@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.local/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.log
+*.tgz
+audit/
+RESEARCH.md
+SECURITY-REVIEW-TELECODEX.md

@@ -1,0 +1,194 @@
+#!/usr/bin/env node
+import { createInterface } from 'node:readline/promises';
+import { emitKeypressEvents } from 'node:readline';
+import { stdin, stdout } from 'node:process';
+import { realpathSync, existsSync, statSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { Bridge } from './bridge.js';
+import { CodexClient } from './codex.js';
+import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, type Config } from './config.js';
+import { Outbox, TelegramClient, TelegramError } from './telegram.js';
+import { array, integer, object, string, type Json } from './types.js';
+
+function binaryFlag(args: string[]): string | undefined {
+  const index = args.indexOf('--codex-bin');
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (!value) throw new Error('--codex-bin requires an absolute native executable path.');
+  return validateBinary(value);
+}
+
+async function secret(question: string): Promise<string> {
+  if (!stdin.isTTY || !stdout.isTTY) throw new Error('Setup requires an interactive terminal. Do not pass a bot token as a command argument.');
+  stdout.write(question);
+  emitKeypressEvents(stdin);
+  stdin.setRawMode(true); stdin.resume();
+  return new Promise((resolve, reject) => {
+    let value = '';
+    const finish = (error?: Error): void => {
+      stdin.off('keypress', handler); stdin.setRawMode(false); stdin.pause(); stdout.write('\n');
+      if (error) reject(error); else resolve(value.trim());
+    };
+    const handler = (text: string | undefined, key: { name?: string; ctrl?: boolean }): void => {
+      if (key.ctrl && key.name === 'c') { finish(new Error('Setup cancelled.')); return; }
+      if (key.name === 'return' || key.name === 'enter') { finish(); return; }
+      if (key.name === 'backspace') { value = value.slice(0, -1); return; }
+      if (text && !key.ctrl && !/[\r\n\x00-\x1f]/u.test(text) && value.length < 4096) value += text;
+    };
+    stdin.on('keypress', handler);
+  });
+}
+
+async function verifyBot(telegram: TelegramClient): Promise<string> {
+  const me = object(await telegram.call('getMe'));
+  if (me.is_bot !== true || me.has_topics_enabled !== true) throw new Error('Enable private-chat topics for your bot in @BotFather, then run setup again.');
+  const webhook = object(await telegram.call('getWebhookInfo'));
+  if (string(webhook.url)) throw new Error('This bot has a webhook. Use a dedicated bot; the relay will not remove another application’s webhook.');
+  return string(me.username);
+}
+
+async function setup(args: string[]): Promise<void> {
+  const home = dataDirectory();
+  if (configExists(home)) throw new Error(`Configuration already exists at ${home}. Keep its token private. Use projects add PATH to add a project.`);
+  const binary = binaryFlag(args) ?? findCodex();
+  const codex = new CodexClient();
+  try {
+    await codex.connect(binary);
+    const sessions = await codex.list();
+    console.log('Existing Codex projects (terminal / IDE):');
+    const paths = [...new Set(sessions.map(s => s.cwd))];
+    paths.forEach((path, index) => console.log(`  ${index + 1}. ${path}`));
+    if (!paths.length) throw new Error('No loaded Codex CLI sessions found. Start Codex in your project, then run setup again.');
+    const terminal = createInterface({ input: stdin, output: stdout });
+    let roots: string[];
+    try {
+      const choice = (await terminal.question('Project numbers to connect (comma-separated, or all): ')).trim();
+      const selected = choice === 'all' ? paths : choice.split(',').map(x => paths[Number(x.trim()) - 1]);
+      if (!selected.length || selected.some(x => !x)) throw new Error('Choose at least one valid project number.');
+      roots = [...new Set(selected.map(x => realpathSync(x!)))];
+    } finally { terminal.close(); }
+    const token = await secret('Bot token from @BotFather (hidden): ');
+    if (!/^\d{5,16}:[A-Za-z0-9_-]{20,200}$/u.test(token)) throw new Error('Token format is invalid.');
+    const telegram = new TelegramClient(token);
+    const username = await verifyBot(telegram);
+    const { randomBytes } = await import('node:crypto');
+    const code = randomBytes(12).toString('hex');
+    console.log(`Send /start ${code} to @${username} in a PRIVATE chat within 5 minutes.`);
+    let offset: number | undefined;
+    let ownerId: number | undefined;
+    const deadline = Date.now() + 5 * 60_000;
+    while (!ownerId && Date.now() < deadline) {
+      const updates = array(await telegram.call('getUpdates', { offset, timeout: 20, allowed_updates: ['message'] }));
+      for (const raw of updates) {
+        const update = object(raw); const message = object(update.message); const from = object(message.from); const chat = object(message.chat);
+        const id = integer(update.update_id); if (id !== undefined) offset = id + 1;
+        if (message.text === `/start ${code}` && chat.type === 'private' && from.is_bot === false && from.id === chat.id) ownerId = integer(from.id);
+      }
+    }
+    if (!ownerId) throw new Error('Pairing timed out. No configuration saved.');
+    const config: Config = { version: 1, ownerId, roots, codexBinary: binary };
+    saveConfig(home, config, token);
+    await telegram.call('sendMessage', { chat_id: ownerId, text: 'Paired with your local Codex Telegram Relay. Start the relay on your computer to connect the selected projects.' });
+    console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start -- start`);
+  } finally { codex.close(); }
+}
+
+async function doctor(args: string[]): Promise<void> {
+  const binary = binaryFlag(args) ?? (configExists(dataDirectory()) ? loadConfig(dataDirectory()).config.codexBinary : findCodex());
+  const codex = new CodexClient();
+  try {
+    await codex.connect(binary);
+    const sessions = await codex.list();
+    console.log(`Native shared-daemon connection: OK\nLoaded interactive sessions: ${sessions.length}\nNo threads resumed, no model turns started, no settings changed.`);
+    for (const session of sessions) console.log(`  ${session.id.slice(0, 8)}  ${session.status}  ${session.cwd}`);
+    if (configExists(dataDirectory())) {
+      const { config, token } = loadConfig(dataDirectory());
+      const username = await verifyBot(new TelegramClient(token));
+      console.log(`Bot: @${username}; private topics: OK; owner configured; project roots: ${config.roots.length}`);
+    } else console.log('Bot configuration: not yet created. Run setup.');
+  } finally { codex.close(); }
+}
+
+async function start(): Promise<void> {
+  const home = dataDirectory();
+  const { config, token } = loadConfig(home);
+  const telegram = new TelegramClient(token);
+  await verifyBot(telegram);
+  const { State } = await import('./state.js');
+  const state = new State(home);
+  const outbox = new Outbox(state, telegram, config.ownerId);
+  let stopping = false;
+  let current: CodexClient | undefined;
+  const stop = (): void => { stopping = true; current?.close(); };
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const output = async (): Promise<void> => {
+    while (!stopping) {
+      try { if (!await outbox.flushOne()) await delay(250); }
+      catch (error) { console.error(string(object(error).message) || 'Telegram delivery failed.'); await delay(1000); }
+    }
+  };
+  const sender = output();
+  try {
+    while (!stopping) {
+      const codex = new CodexClient(); current = codex;
+      let connected = true;
+      let pendingEvents = Promise.resolve();
+      let eventCount = 0;
+      try {
+        const bridge = new Bridge(config, state, codex, telegram);
+        codex.on('disconnected', () => { connected = false; });
+        // Serialize control events so completed native requests invalidate buttons in order.
+        const schedule = (work: () => Promise<void>): void => {
+          if (eventCount >= 256) { codex.close(); console.error('Native event backlog exceeded the limit; reconnecting to recover recent completions.'); return; }
+          eventCount++;
+          pendingEvents = pendingEvents.then(work).catch(error => { console.error(string(object(error).message) || 'Codex event failed.'); }).finally(() => { eventCount--; });
+        };
+        codex.on('notification', (method: string, params: Json) => {
+          if (['item/completed', 'turn/completed', 'serverRequest/resolved'].includes(method) || (method === 'item/started' && object(params.item).type === 'fileChange')) schedule(() => bridge.notification(method, params));
+        });
+        codex.on('request', request => schedule(() => bridge.request(request)));
+        await codex.connect(config.codexBinary);
+        await bridge.discover();
+        console.log('Relay connected. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.');
+        let lastDiscovery = Date.now();
+        while (!stopping && connected) {
+          if (Date.now() - lastDiscovery > 5000) { await bridge.discover(); state.prune(); lastDiscovery = Date.now(); }
+          const updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
+          for (const raw of updates) {
+            if (stopping || !connected) break;
+            try { await bridge.update(object(raw)); }
+            catch (error) { console.error(string(object(error).message) || 'Input delivery failed.'); }
+          }
+        }
+      } catch (error) {
+        if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
+        console.error(string(object(error).message) || 'Relay connection failed.');
+      } finally { codex.close(); await pendingEvents; }
+      if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
+    }
+  } finally {
+    stopping = true; current?.close(); await sender; state.close();
+    process.off('SIGINT', stop); process.off('SIGTERM', stop);
+  }
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const command = args[0] ?? 'help';
+  if (command === 'setup') return setup(args);
+  if (command === 'doctor') return doctor(args);
+  if (command === 'start') return start();
+  if (command === 'projects' && args[1] === 'add') {
+    const path = args[2];
+    if (!path || !existsSync(path)) throw new Error('Usage: projects add EXISTING_PROJECT_DIRECTORY');
+    const home = dataDirectory(); const { config, token } = loadConfig(home);
+    const root = realpathSync(path);
+    if (!statSync(root).isDirectory()) throw new Error('Project root must be a directory.');
+    config.roots = [...new Set([...config.roots, root])]; saveConfig(home, config, token);
+    console.log('Project added. Restart the relay to apply.'); return;
+  }
+  if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
+  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup and doctor accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+}
+
+main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });
