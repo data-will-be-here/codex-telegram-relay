@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, message, click } from './helpers.js';
+import { Bridge } from '../src/bridge.js';
 import { array, object, string } from '../src/types.js';
 
 test('two projects get distinct persistent topics; idle messages target the matching native thread', async () => {
@@ -192,5 +193,21 @@ test('native question IDs are data, including prototype-like names', async () =>
     const answers = object(f.codex.writes[0]!.params.result).answers;
     assert.deepEqual(Object.keys(object(answers)), ['__proto__']);
     assert.equal(object(object(answers).__proto__).answers instanceof Array, true);
+  } finally { f.close(); }
+});
+
+test('reconnection does not spam an unchanged background approval', async () => {
+  const f = await fixture();
+  try {
+    const read = f.codex.read.bind(f.codex);
+    f.codex.read = async id => ({ ...await read(id), status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
+    for (let reconnect = 0; reconnect < 4; reconnect++) {
+      const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+      await bridge.discover();
+      await bridge.request({ id: 'transport-' + reconnect, method: 'item/fileChange/requestApproval', params: { threadId: 'thread-a', turnId: 'same-turn', itemId: 'same-file-change', reason: 'Unchanged pending approval' } });
+      await f.drain();
+    }
+    const warnings = f.telegram.sent().filter(m => m.message_thread_id === 101);
+    assert.equal(warnings.length, 1, 'the same background request must produce one attention notice across reconnects');
   } finally { f.close(); }
 });

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { allowedDirectory, type Config } from './config.js';
 import { State } from './state.js';
@@ -53,11 +53,9 @@ export class Bridge {
           this.state.baseline(session.id, createdWhileRunning ? '-' : string(completed?.id) || '-');
           binding = this.state.binding(session.id)!;
         }
-        const thread = await this.codex.attach(session.id);
+        await this.codex.attach(session.id);
         this.attached.add(session.id);
-        if (object(thread.status).type === 'active' && array(object(thread.status).activeFlags).includes('waitingOnApproval')) {
-          this.notice(binding.topicId, 'This session was already waiting for approval when the relay attached. If no approval buttons appear here, answer the existing request in the terminal.');
-        }
+        // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
         await this.catchUp(binding);
       }
     } finally { this.discovering = false; }
@@ -127,7 +125,7 @@ export class Bridge {
     if (request.method === 'item/tool/requestUserInput') {
       prompt.questions = array(request.params.questions).map(object);
       if (prompt.questions.length === 0 || prompt.questions.length > 10 || prompt.questions.some(q => !string(q.id) || !string(q.question) || q.isSecret === true)) {
-        this.notice(binding.topicId, 'A native question needs the terminal (unsupported or sensitive input).'); return;
+        this.attention(binding, request, 'A native question needs the terminal (unsupported or sensitive input).'); return;
       }
       this.prompts.set(prompt.token, prompt);
       this.showQuestion(prompt);
@@ -135,17 +133,17 @@ export class Bridge {
     }
     const methods = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'];
     if (!methods.includes(request.method)) {
-      this.notice(binding.topicId, 'Codex needs input that this relay cannot safely answer. Use the terminal.'); return;
+      this.attention(binding, request, 'Codex needs input that this relay cannot safely answer. Use the terminal.'); return;
     }
     const detailsParams = { ...request.params };
     if (request.method === 'item/fileChange/requestApproval') {
       const changes = array(request.params.changes).length ? array(request.params.changes) : this.fileChanges.get(`${binding.threadId}/${string(request.params.itemId)}`);
-      if (!changes?.length) { this.notice(binding.topicId, 'Review this file change in the terminal: its complete proposed diff is not available to the relay.'); return; }
+      if (!changes?.length) { this.attention(binding, request, 'Review this file change in the terminal: its complete proposed diff is not available to the relay.'); return; }
       detailsParams.proposedChanges = changes;
     }
     const details = JSON.stringify(detailsParams, null, 2);
     if (details.length > 18_000) {
-      this.notice(binding.topicId, 'An approval is too large to display completely here. Review and answer it in the terminal.'); return;
+      this.attention(binding, request, 'An approval is too large to display completely here. Review and answer it in the terminal.'); return;
     }
     if (request.method === 'item/permissions/requestApproval') {
       prompt.options.set('a', { permissions: object(request.params.permissions), scope: 'turn' });
@@ -157,7 +155,7 @@ export class Bridge {
       if (!advertised || decisions.includes('decline')) prompt.options.set('d', { decision: 'decline' });
       if (advertised && decisions.includes('cancel')) prompt.options.set('c', { decision: 'cancel' });
     }
-    if (!prompt.options.size) { this.notice(binding.topicId, 'Approval choices are unsupported. Use the terminal.'); return; }
+    if (!prompt.options.size) { this.attention(binding, request, 'Approval choices are unsupported. Use the terminal.'); return; }
     this.prompts.set(prompt.token, prompt);
     const keyboard: Keyboard = { inline_keyboard: [[...prompt.options.keys()].map(code => ({ text: code === 'a' ? 'Allow once' : code === 'c' ? 'Cancel turn' : 'Decline', callback_data: `r:${prompt.token}:${code}` }))] };
     this.state.enqueue(this.promptKey(prompt), binding.topicId, '🔐 Approval required\n\n' + details, keyboard as unknown as Json);
@@ -285,6 +283,13 @@ export class Bridge {
     }
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/${randomUUID()}`, topicId, text); }
+  private attention(binding: Binding, request: RpcRequest, text: string): void {
+    // JSON-RPC IDs change with each connection; native turn/item identity survives a reconnect.
+    const identity = JSON.stringify([binding.threadId, request.method, request.params.turnId,
+      request.params.itemId ?? request.params.elicitationId ?? request.params]);
+    const key = 'attention/' + createHash('sha256').update(identity).digest('hex');
+    this.state.enqueue(key, binding.topicId, text);
+  }
   private async stillAllowed(binding: Binding): Promise<boolean> {
     const current = await this.codex.read(binding.threadId);
     if (allowedDirectory(string(current.cwd), this.config.roots)) return true;

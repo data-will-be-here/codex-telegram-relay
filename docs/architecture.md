@@ -16,7 +16,7 @@ The relay asks the existing daemon for loaded thread IDs, reads metadata and sel
 
 Attachment calls `thread/resume` with only `threadId` and `excludeTurns`. A Telegram instruction calls `turn/start` with only its thread ID and text, or `turn/steer` with the expected active turn ID. This intentionally inherits native policy. A rejected or ambiguous steer is never reinterpreted as permission to start another turn.
 
-On first attachment, existing completed history is used only as a baseline. It is not posted to Telegram. Reconnection catches up at most the ten most recent turns for each saved binding. A long outage can therefore leave older missed completions available only in the native terminal. This is a bounded recovery window, not a full transcript mirror.
+On first attachment, existing completed history is used only as a baseline. It is not posted to Telegram. History requests use display summaries, excluding large historical tool outputs. Reconnection catches up at most the ten most recent turns for each saved binding. A long outage can therefore leave older missed completions available only in the native terminal. This is a bounded recovery window, not a full transcript mirror.
 
 ## Telegram identity and topics
 
@@ -24,7 +24,7 @@ Setup checks getMe/private topics and refuses existing webhooks. It accepts a pr
 
 One process consumes getUpdates. The owner check happens before creating work or journaling an input. Input IDs and the polling offset are durable. A crash between sending a native request and receiving acknowledgement is marked uncertain; it is not replayed. There is no exactly-once guarantee across Telegram and native Codex.
 
-Completed agent messages are buffered until turn completion; commentary is omitted. Native questions and approvals carry unguessable, topic-scoped callback capabilities. Multi-question prompts rotate capabilities so an old answer button cannot answer a later question. Unknown request types and payloads too large to review completely are left to the terminal.
+Completed agent messages are buffered until turn completion; commentary is omitted. Native questions and approvals carry unguessable, topic-scoped callback capabilities. Multi-question prompts rotate capabilities so an old answer button cannot answer a later question. Unknown request types and payloads too large to review completely are left to the terminal. Terminal-only attention notices use persistent native identity and do not repeat for the same request across reconnects. Attaching to a waiting session alone does not emit another warning.
 
 ## Initial release limits
 

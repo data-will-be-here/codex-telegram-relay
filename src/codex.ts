@@ -16,6 +16,7 @@ export class CodexClient extends EventEmitter implements Codex {
   private socket?: WebSocket;
   private child?: ChildProcessWithoutNullStreams;
   private closed = false;
+  private failure?: Error;
 
   async connect(binary: string, args = ['app-server', 'proxy']): Promise<void> {
     const env = { ...process.env };
@@ -38,18 +39,24 @@ export class CodexClient extends EventEmitter implements Codex {
       try { this.receive(object(JSON.parse(data.toString()))); }
       catch { this.disconnect(new RpcError('Invalid Codex protocol message.', true)); }
     });
-    socket.on('error', () => this.disconnect(new RpcError('Cannot connect to the shared Codex daemon. Start Codex CLI first.', true)));
+    socket.on('error', error => {
+      const code = string(object(error).code);
+      const message = code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'
+        ? 'Codex response exceeded the 16 MiB transport limit. This is a protocol payload issue, not a stopped daemon.'
+        : `Codex proxy transport failed${/^[A-Z0-9_]+$/u.test(code) ? ` (${code})` : ''}. Run doctor to check daemon availability.`;
+      this.disconnect(new RpcError(message, true));
+    });
     socket.on('close', () => this.disconnect(new RpcError('Codex connection closed; pending writes will not be replayed.', true)));
     child.on('error', () => this.disconnect(new RpcError('Cannot start the native Codex proxy.', false)));
     child.on('exit', () => { if (!this.closed) socket.terminate(); });
     await new Promise<void>((resolve, reject) => {
-      const fail = (): void => reject(new Error('Codex proxy handshake failed. No alternate daemon was started.'));
+      const fail = (): void => reject(this.failure ?? new Error('Codex proxy handshake failed. No alternate daemon was started.'));
       socket.once('error', fail);
       socket.once('close', fail);
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.0' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.1' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -111,7 +118,8 @@ export class CodexClient extends EventEmitter implements Codex {
   }
   async turns(threadId: string): Promise<Json[]> {
     try {
-      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'full' })).data).map(object);
+      // Display summaries retain agent replies while excluding enormous historical tool outputs.
+      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' })).data).map(object);
     } catch (error) {
       // A newly opened interactive session has no persisted history until its first input.
       if (error instanceof RpcError && !error.uncertain && /not materialized yet.*unavailable before first user message/u.test(error.message)) return [];
@@ -132,8 +140,9 @@ export class CodexClient extends EventEmitter implements Codex {
   }
   close(): void { this.closed = true; this.socket?.terminate(); this.child?.kill(); this.disconnect(new RpcError('Codex disconnected.', true)); }
   private disconnect(error: Error): void {
+    this.failure ??= error;
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear(); this.requests.clear();
-    if (!this.closed) { this.closed = true; this.child?.kill(); this.emit('disconnected'); }
+    if (!this.closed) { this.closed = true; this.child?.kill(); this.emit('disconnected', this.failure); }
   }
 }

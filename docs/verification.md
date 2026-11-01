@@ -32,3 +32,9 @@ The native server offered `accept` and `cancel` for the tested approval, rather 
 - Verify actual account-specific native approval modes, including any managed or automatic reviewer policies.
 
 No real Telegram exchange, password prompt, file transfer or production deployment is claimed by the synthetic tests or the native-adapter checks.
+
+## 0.1.1 reconnect regression
+
+A real installation exposed a history response exceeding the client's 16 MiB WebSocket limit. The error had been incorrectly labelled as an unavailable daemon. Each reconnect also re-enqueued warnings about an unchanged background approval.
+
+Both failures were reproduced before the fix: a synthetic large-history test disconnected, and four reconnects produced eight warnings instead of one. After switching to display summaries and persistent native attention keys, all 27 tests pass. The same installation's sessions were checked across three native connection cycles with a separate SQLite store and Telegram simulator: no transport disconnect and one terminal-only warning for the unchanged request. The real bot's token, bindings and state were not modified by this verification.

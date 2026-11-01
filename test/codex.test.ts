@@ -42,6 +42,25 @@ test('native RPC timeout is explicitly uncertain', async () => {
   } finally { c.close(); }
 });
 
+test('large tool history does not disconnect the shared-daemon connection', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const turns = await c.turns('large');
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]!.status, 'completed');
+    assert.equal((await c.list()).length, 2, 'the native connection must remain usable after history discovery');
+  } finally { c.close(); }
+});
+
+test('oversized protocol data reports the payload problem, not an absent daemon', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await assert.rejects(c.call('test/oversized', {}), /exceeded the 16 MiB transport limit/u);
+  } finally { c.close(); }
+});
+
 test('project roots use path containment rather than a shared string prefix', () => {
   const t = temporary();
   try {
