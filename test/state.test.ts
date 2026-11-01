@@ -38,8 +38,11 @@ test('message mode defaults to all and persists across restarts', () => {
   const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
   try {
     assert.equal(state.messageMode(), 'all');
+    assert.equal(state.topicTitleMode(), 'simple');
+    state.setTopicTitleMode('status');
     state.setMessageMode('compact'); state.close(); state = new State(home);
     assert.equal(state.messageMode(), 'compact');
+    assert.equal(state.topicTitleMode(), 'status');
     state.setMessageMode('all');
     assert.equal(state.messageMode(), 'all');
   } finally { state.close(); temp.close(); }

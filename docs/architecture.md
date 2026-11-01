@@ -24,7 +24,9 @@ On first attachment, existing completed history is used only as a baseline. It i
 
 ## Telegram identity and topics
 
-Setup checks getMe/private topics and refuses existing webhooks. It accepts a private `/start RANDOM_CODE` generated locally and saves the sender's ID. Runtime requires the same sender ID and private chat ID. One session maps to one topic, with a session-ID suffix to distinguish parallel sessions in the same directory.
+Setup checks getMe/private topics and refuses existing webhooks. It accepts a private `/start RANDOM_CODE` generated locally and saves the sender's ID. Runtime requires the same sender ID and private chat ID. One session maps to one topic through persisted native thread IDs and Telegram topic IDs; visible names never participate in routing or matching.
+
+Topic-title mode is a durable owner-only setting: `simple` (default) displays project/short ID; `status` displays only project/short status. Native waiting flags distinguish input/approval waits from active work. Metadata discovery compares desired titles with the last confirmed name and calls `editForumTopic` only on change, preserving IDs/history even when two visible names are identical. Unknown rename results are safely retried after backoff; Telegram's not-modified response confirms the desired name. Rate-limit backoff persists globally across reconnects. A missing-topic response still enters the journaled replacement path. Status labels reflect the last observed native metadata, not whether a terminal window is visible.
 
 Topic creation has a durable operation record written before the request. Interrupted `creating` records become `uncertain` at startup. Unknown network/server outcomes are never automatically retried; definite rejections require explicit repair, and 429 responses defer retries until `retry_after`. An owner can bind an already created topic with `/bind ID` from that private topic or explicitly reattempt creation with `/repair ID`. Recovery rejects ambiguous session prefixes, ignored/out-of-root sessions, occupied topics and concurrent creation. Healthy bindings are not silently replaced.
 
@@ -45,6 +47,8 @@ Assistant messages are rendered with explicit Telegram entities instead of `pars
 Every outgoing part includes an italic `» project-name` signature. Project context is captured with queued output so project-specific notices retain their identity outside topics; general notices identify the relay. The signature uses only the last path component and sanitizes control characters. Chunk budgets include the signature, and body entity offsets are shifted without overlapping its italic span. Existing outbox schemas migrate without losing queued output; legacy queued messages can derive project identity from their binding.
 
 ## Initial release limits
+
+Native executable discovery resolves Unix symlinks and known npm launchers to native platform packages without executing the launcher. Current `vendor/<triple>/bin` and older `vendor/<triple>/codex` layouts are supported, with Node package resolution covering nested/hoisted dependencies. Executable format and POSIX permissions are checked; `.cmd`/`.bat` entry points remain rejected on Windows. Private configuration/token symlinks are still rejected independently.
 
 - Native compatibility is targeted at Codex CLI 0.166.0. App Server remains an evolving protocol. Unsupported versions should fail without spawning a replacement harness.
 - No MCP server is needed to use the relay. Future MCP registration can be an optional adapter; it is not the core execution interface.

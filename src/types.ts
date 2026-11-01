@@ -6,6 +6,7 @@ export const array = (value: unknown): unknown[] => Array.isArray(value) ? value
 export const integer = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
 export type MessageMode = 'all' | 'compact';
+export type TopicTitleMode = 'simple' | 'status';
 
 export interface Session {
   id: string;
@@ -14,6 +15,7 @@ export interface Session {
   status: string;
   createdAt?: number;
   activeTurnId?: string;
+  activeFlags?: string[];
 }
 
 export interface Binding {

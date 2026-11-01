@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { object, string } from './types.js';
 
 export interface Config {
@@ -86,12 +87,47 @@ export function allowedDirectory(cwd: string, roots: readonly string[]): boolean
   } catch { return false; }
 }
 
+function packageBinaries(root: string): string[] {
+  const cpu = process.arch === 'arm64' ? 'aarch64' : process.arch === 'x64' ? 'x86_64' : '';
+  const suffix = process.platform === 'win32' ? 'pc-windows-msvc' : process.platform === 'darwin' ? 'apple-darwin' : process.platform === 'linux' ? 'unknown-linux-musl' : '';
+  if (!cpu || !suffix) return [];
+  const triple = `${cpu}-${suffix}`;
+  const roots = [join(root, 'vendor')];
+  try {
+    const manifest = createRequire(join(root, 'package.json')).resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`);
+    roots.unshift(join(dirname(manifest), 'vendor'));
+  } catch { /* Older Codex packages bundled vendor files directly. */ }
+  const binary = process.platform === 'win32' ? 'codex.exe' : 'codex';
+  return roots.flatMap(vendor => [join(vendor, triple, 'bin', binary), join(vendor, triple, 'codex', binary)]);
+}
+
+function nativeBinary(path: string): string {
+  const target = realpathSync(path);
+  if (!statSync(target).isFile() || (process.platform === 'win32' && !target.toLowerCase().endsWith('.exe'))) throw new Error('Not a native executable.');
+  if (process.platform !== 'win32') accessSync(target, constants.X_OK);
+  const descriptor = openSync(target, 'r'); const header = Buffer.alloc(4);
+  try { if (readSync(descriptor, header, 0, 4, 0) !== 4) throw new Error('Missing native executable header.'); }
+  finally { closeSync(descriptor); }
+  const magic = header.toString('hex');
+  const valid = process.platform === 'win32' ? magic.startsWith('4d5a') : process.platform === 'darwin'
+    ? ['feedface', 'cefaedfe', 'feedfacf', 'cffaedfe', 'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca'].includes(magic)
+    : magic === '7f454c46';
+  if (!valid) throw new Error('A native executable is required; script wrappers are not supported.');
+  return target;
+}
+
 export function validateBinary(path: string): string {
-  if (!isAbsolute(path) || !existsSync(path) || !lstatSync(path).isFile() ||
-      (process.platform === 'win32' && !path.toLowerCase().endsWith('.exe'))) {
-    throw new Error('Codex must be an absolute native executable path (.exe on Windows); batch/shell wrappers are not supported.');
-  }
-  return realpathSync(path);
+  if (!isAbsolute(path) || (process.platform === 'win32' && !path.toLowerCase().endsWith('.exe'))) throw new Error('Codex must be an absolute native executable path (.exe on Windows); batch/shell wrappers are not supported.');
+  try {
+    const target = realpathSync(path);
+    if (process.platform !== 'win32' && basename(target) === 'codex.js' && basename(dirname(target)) === 'bin') {
+      const root = dirname(dirname(target));
+      if (object(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))).name === '@openai/codex') {
+        for (const binary of packageBinaries(root)) { try { return nativeBinary(binary); } catch { /* Try the next supported package layout. */ } }
+      }
+    }
+    return nativeBinary(target);
+  } catch { throw new Error('Cannot locate a runnable native Codex executable. Check its installation or pass --codex-bin PATH.'); }
 }
 
 export function findCodex(): string {
@@ -100,15 +136,10 @@ export function findCodex(): string {
     if (!dir) continue;
     candidates.push(join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex'));
     if (process.platform === 'win32') {
-      for (const arch of ['x64', 'arm64']) {
-        const triple = arch === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
-        candidates.push(join(dir, 'node_modules', '@openai', 'codex', 'node_modules', '@openai', `codex-win32-${arch}`, 'vendor', triple, 'codex', 'codex.exe'));
-      }
+      candidates.push(...packageBinaries(join(dir, 'node_modules', '@openai', 'codex')));
     }
   }
-  if (process.platform === 'win32') {
-    candidates.push(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'packages', 'app-server-daemon', 'current', 'bin', 'codex.exe'));
-  }
+  candidates.push(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'packages', 'app-server-daemon', 'current', 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex'));
   for (const path of candidates) {
     try { return validateBinary(path); } catch { /* Try the next native executable. */ }
   }

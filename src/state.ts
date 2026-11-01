@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, openSync, readFileSync, un
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
-import { object, string, type Binding, type Json, type MessageMode } from './types.js';
+import { object, string, type Binding, type Json, type MessageMode, type TopicTitleMode } from './types.js';
 
 export interface Delivery { id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null; }
 export interface TopicOperation {
@@ -99,6 +99,23 @@ export class State {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   baseline(threadId: string, turnId: string): void { this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=?').run(turnId, threadId); }
+  topicTitleMode(): TopicTitleMode { return this.db.prepare("SELECT value FROM settings WHERE key='topicTitleMode'").get()?.value === 'status' ? 'status' : 'simple'; }
+  setTopicTitleMode(mode: TopicTitleMode): void {
+    if (mode !== 'status' && mode !== 'simple') throw new Error('Invalid topic title mode.');
+    this.db.prepare("INSERT INTO settings VALUES('topicTitleMode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(mode);
+  }
+  topicTitleRetryAt(threadId: string): number {
+    return Math.max(Number(this.db.prepare('SELECT value FROM settings WHERE key=?').get('titleRetry/' + threadId)?.value ?? 0),
+      Number(this.db.prepare("SELECT value FROM settings WHERE key='titleRetry/all'").get()?.value ?? 0));
+  }
+  deferTopicTitle(threadId: string, until: number): void {
+    this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('titleRetry/' + threadId, String(until));
+  }
+  confirmTopicTitle(threadId: string, title: string): void {
+    this.db.prepare('UPDATE bindings SET title=? WHERE threadId=?').run(title, threadId);
+    this.db.prepare('DELETE FROM settings WHERE key=?').run('titleRetry/' + threadId);
+  }
+  sessionDirectory(threadId: string, cwd: string): void { this.db.prepare('UPDATE bindings SET cwd=? WHERE threadId=? AND cwd!=?').run(cwd, threadId, cwd); }
   messageMode(): MessageMode { return this.db.prepare("SELECT value FROM settings WHERE key='messageMode'").get()?.value === 'compact' ? 'compact' : 'all'; }
   setMessageMode(mode: MessageMode): void {
     if (mode !== 'all' && mode !== 'compact') throw new Error('Invalid message mode.');

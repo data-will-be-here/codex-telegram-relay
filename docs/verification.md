@@ -50,3 +50,9 @@ Two completed answers containing localhost preview links reached the relay but w
 The unavailable-session, ambiguous-topic-creation and missing-topic scenarios were reproduced using synthetic adapters before the fix. Regression coverage now includes a disappearing thread, a failed resume alongside healthy sessions, transport errors still triggering reconnect, interrupted topic creation across restart, explicit binding/retry, rate limits, and deleted-topic replacement with queued answers preserved. A combined scenario checks that other topics remain usable during uncertain replacement, old approval buttons stay inert, and new buttons require a fresh owner click.
 
 Project signatures are checked for italic styling without full paths, UTF-16 offsets, each multipart message, project notices outside topics, and migration of older SQLite outbox schemas. The recovery tests never delete or rebind real user topics or mutate real Codex sessions.
+
+## 0.1.8 topic display and native executable discovery
+
+Tests cover owner-only title-mode changes, persisted preferences, idempotent renaming, Telegram rename rate limits, duplicate visible names routing to different native threads, and reconnects without topic creation. Status mode intentionally omits dialogue names and IDs; simple mode preserves the original format.
+
+Unix CI tests resolve an executable symlink and an npm launcher backed by a hoisted native platform package without executing the launcher. A separate installation check downloads official Codex 0.166.0 to a guarded temporary directory, resolves that installation's native executable and runs `--version` plus `app-server proxy --help`. It starts no daemon, authenticates no account and makes no model request. This checks installation/command compatibility, not a complete real-daemon/Telegram exchange on macOS/Linux.

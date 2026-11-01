@@ -18,7 +18,7 @@ Your Telegram bot / private project topics
 
 - No VPS, webhook, public port or cloud relay to install.
 - Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
-- Topics are named after the project plus a short session ID; two sessions in one project remain separate.
+- Topics default to the project plus a short session ID. `/topics status` switches to compact project/status names; `/topics simple` restores project/ID names. Session routing always uses saved IDs, even if visible names are identical.
 - Every message part starts with an italic `» project-name` signature, including project notices outside topics. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
 - Replies immediately steer a running turn or start the next turn when idle.
@@ -54,6 +54,8 @@ npm start -- start
 
 Once running, the relay automatically creates a topic for each eligible session in your selected projects. Type in that topic to talk to its Codex session. Stop with Ctrl+C: the existing Codex daemon and its work keep running.
 
+Topic names are optional display settings: `/topics status` shows compact names such as `tgmcp · работа` (working), `tgmcp · ждёт` (waiting for input/approval), or `tgmcp · готово` (idle). `/topics simple` keeps the original `project · ID` format and is the default. The setting persists and applies on the next metadata sync, without restarting. Topic IDs and history stay unchanged across renaming/restarts; keep the private state directory when moving installations. Two sessions may share the same visible name and still route correctly by saved IDs.
+
 Discovery uses threads loaded in the shared daemon. This can include an older thread still waiting for approval even when its terminal/IDE window is no longer visible; it is not a list of open windows.
 
 To stop relaying an old session without changing its Codex state, run `npm start -- sessions ignore SESSION_ID`, then restart the relay. A unique ID prefix from `/sessions` also works. Use `sessions unignore SESSION_ID` to reconnect it after another restart. Ignoring keeps the existing Telegram topic and history; topics are not automatically closed or deleted when a terminal window closes.
@@ -76,6 +78,10 @@ npm start -- doctor --codex-bin 'C:\absolute\path\to\codex.exe'
 npm start -- setup --codex-bin 'C:\absolute\path\to\codex.exe'
 ```
 
+### macOS and Linux
+
+Executable links from Homebrew/native installers are resolved. For npm installations, the relay locates the actual platform binary behind `codex.js`, including hoisted and nested optional packages; the JavaScript/shell launcher is never executed by the relay. Unix execute permissions and ELF/Mach-O format are checked. CI installs official Codex 0.166.0 and checks its native version and proxy command on each OS; a complete real-session/Telegram exchange on macOS/Linux still needs acceptance testing.
+
 ### Add another project
 
 ```sh
@@ -93,6 +99,7 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 | `/sessions` | Show the saved session/topic bindings |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
+| `/topics`, `/topics status`, `/topics simple` | Show or change topic names globally: project/status or the original project/ID format |
 | `/bind SESSION_ID` | Bind an already created topic after uncertain creation; send inside that topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |

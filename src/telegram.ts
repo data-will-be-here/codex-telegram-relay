@@ -8,6 +8,10 @@ export class TelegramError extends Error {
   constructor(message: string, readonly status: number, readonly retryAfter?: number) { super(message); }
 }
 
+export function isMissingTopic(error: unknown): error is TelegramError {
+  return error instanceof TelegramError && error.status === 400 && /message thread not found|message_thread_id.*invalid|TOPIC_DELETED|TOPIC_ID_INVALID/iu.test(error.message);
+}
+
 export class TelegramClient implements Telegram {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
   async call(method: string, params: Json = {}): Promise<unknown> {
@@ -74,7 +78,7 @@ export class Outbox {
       }
       this.state.delivered(delivery.id, messageId);
     } catch (error) {
-      if (binding && error instanceof TelegramError && error.status === 400 && /message thread not found|message_thread_id.*invalid|TOPIC_DELETED|TOPIC_ID_INVALID/iu.test(error.message)) {
+      if (binding && isMissingTopic(error)) {
         this.state.missingTopic(binding);
         return true;
       }

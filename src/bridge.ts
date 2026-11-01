@@ -216,7 +216,7 @@ export class Bridge {
     const text = string(message.text).trim();
     if (!text) { if (message.document || message.voice || message.photo) this.notice(topicId, 'This version supports text only.'); return; }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/topics status|simple — project/status or project/ID topic names\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
@@ -240,6 +240,12 @@ export class Bridge {
       if (mode !== undefined && mode !== 'all' && mode !== 'compact') { this.notice(topicId, 'Use /mode all or /mode compact.'); return; }
       if (mode) this.state.setMessageMode(mode);
       this.notice(topicId, `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
+    }
+    if (/^\/topics(?:\s|$)/u.test(text)) {
+      const [_, mode, extra] = text.split(/\s+/u);
+      if (extra || (mode !== undefined && mode !== 'status' && mode !== 'simple')) { this.notice(topicId, 'Use /topics status or /topics simple.'); return; }
+      if (mode) this.state.setTopicTitleMode(mode);
+      this.notice(topicId, `Topic names for all sessions: ${this.state.topicTitleMode()}.\n/topics status — project · работа / ждёт / готово\n/topics simple — project · ID\nExisting topics are renamed during the next sync; no restart required and their history stays intact.`); return;
     }
     if (text === '/questions') {
       const prompts = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length);

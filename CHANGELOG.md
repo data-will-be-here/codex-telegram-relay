@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8
+
+- Add owner-only `/topics status|simple` selection, defaulting to the existing project/ID format. Status mode uses only the project and a short status.
+- Rename existing topics by their saved Telegram IDs, persist confirmed names and apply backoff on rename errors/rate limits. Reconnects and duplicate visible names preserve session routing.
+- Read native waiting flags so approval/input waits appear as `ждёт`.
+- Resolve executable symlinks on Unix and locate native Codex behind npm launchers, including hoisted/nested platform packages and older vendor layouts. Validate native format and Unix executable permissions without running script wrappers.
+- Add CI checks that install official Codex 0.166.0 and run its native version/proxy help commands without starting a daemon or model.
+
 ## 0.1.7
 
 - Isolate unavailable-session metadata, resume and history failures so healthy sessions remain connected; transport failures still reconnect normally.

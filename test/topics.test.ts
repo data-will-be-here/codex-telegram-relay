@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { Topics } from '../src/topics.js';
+import { Topics, topicTitle } from '../src/topics.js';
 import { State } from '../src/state.js';
 import { TelegramError } from '../src/telegram.js';
 import { temporary, FakeTelegram } from './helpers.js';
@@ -63,5 +63,82 @@ test('topic repair cannot hijack another session, bypass roots, unignore a sessi
     assert.throws(() => outside.bind('thread-a', 103), /outside/u);
     assert.equal(f.topics.bind('thread-a', 103).topicId, 103);
     assert.equal(f.state.binding('thread-b')?.topicId, 102);
+  } finally { f.close(); }
+});
+
+test('status titles stay short, omit dialogue/ID and reflect native waiting flags', () => {
+  const session = { id: 'thread-a', cwd: join('root', 'project'), status: 'active', activeFlags: [] as string[] };
+  assert.equal(topicTitle(session, 'status'), 'project · работа');
+  assert.equal(topicTitle({ ...session, activeFlags: ['waitingOnApproval'] }, 'status'), 'project · ждёт');
+  assert.equal(topicTitle({ ...session, activeFlags: ['waitingOnUserInput'] }, 'status'), 'project · ждёт');
+  assert.equal(topicTitle({ ...session, status: 'idle' }, 'status'), 'project · готово');
+  assert.equal(topicTitle(session, 'simple'), 'project · thread-a');
+  const long = topicTitle({ ...session, cwd: join('root', '🎁'.repeat(100)) }, 'status');
+  assert.ok(long.length <= 128);
+  assert.ok(long.endsWith(' · работа'));
+  assert.ok(!/[\uD800-\uDBFF] · /u.test(long));
+});
+
+test('a lost rename response retries idempotently, accepts not-modified and never recreates the topic', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir, status: 'idle' };
+    const binding = (await f.topics.ensure(session))!;
+    f.state.setTopicTitleMode('status');
+    const call = f.telegram.call.bind(f.telegram); let renames = 0;
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'editForumTopic') { renames++; throw new TelegramError(renames === 1 ? 'Rename response lost' : 'Bad Request: TOPIC_NOT_MODIFIED', renames === 1 ? 0 : 400); }
+      return call(method, params);
+    };
+    assert.equal((await f.topics.ensure(session))?.topicId, binding.topicId);
+    await new Topics(f.config, f.state, f.telegram).ensure(session);
+    assert.equal(renames, 1);
+    f.state.deferTopicTitle(session.id, 0);
+    await f.topics.ensure(session);
+    assert.equal(renames, 2);
+    assert.equal(f.state.binding(session.id)?.title, topicTitle(session, 'status'));
+    await f.topics.ensure(session);
+    assert.equal(renames, 2);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 1);
+  } finally { f.close(); }
+});
+
+test('rename rate limits persist globally and do not block existing topic delivery', async () => {
+  const f = setup();
+  try {
+    const a = { id: 'thread-a', cwd: f.temp.dir, status: 'active' };
+    const b = { ...a, id: 'thread-b' };
+    const first = (await f.topics.ensure(a))!; const second = (await f.topics.ensure(b))!;
+    f.state.setTopicTitleMode('status');
+    let renames = 0;
+    f.telegram.call = async () => { renames++; throw new TelegramError('Too Many Requests', 429, 60); };
+    assert.equal((await f.topics.ensure(a))?.topicId, first.topicId);
+    assert.equal((await f.topics.ensure(b))?.topicId, second.topicId);
+    assert.equal(renames, 1);
+    assert.equal(f.state.topicOperations().length, 0);
+    f.state.enqueue('final/a/while-rename-waits', first.topicId, 'Answer');
+    assert.equal(f.state.next()?.text, 'Answer');
+  } finally { f.close(); }
+});
+
+test('a missing topic detected during title sync uses the same journaled recovery as failed delivery', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir, status: 'active' };
+    const first = (await f.topics.ensure(session))!;
+    f.state.enqueue('final/a/saved', first.topicId, 'Saved');
+    f.state.setTopicTitleMode('status');
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'editForumTopic') throw new TelegramError('Bad Request: message thread not found', 400);
+      return call(method, params);
+    };
+    assert.equal(await f.topics.ensure(session), undefined);
+    assert.equal(f.state.topicOperation(session.id)?.status, 'missing');
+    assert.equal(f.state.next(), undefined);
+    const restored = (await f.topics.ensure(session))!;
+    assert.notEqual(restored.topicId, first.topicId);
+    assert.equal(f.state.next()?.topicId, restored.topicId);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 2);
   } finally { f.close(); }
 });

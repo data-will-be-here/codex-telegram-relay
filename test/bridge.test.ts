@@ -184,6 +184,51 @@ test('only the owner can switch message modes; changes apply immediately without
   } finally { f.close(); }
 });
 
+test('topic style toggles between project/status and project/id without creating topics, including after reconnect', async () => {
+  const f = await fixture();
+  try {
+    f.codex.sessions[0]!.status = 'active';
+    await f.bridge.update(message(1, 101, '/topics status', 99));
+    await f.bridge.discover();
+    assert.equal(f.telegram.calls.filter(c => c.method === 'editForumTopic').length, 0);
+    await f.bridge.update(message(2, 101, '/topics status'));
+    await f.bridge.discover();
+    const edits = () => f.telegram.calls.filter(c => c.method === 'editForumTopic');
+    assert.ok(edits().some(c => c.params.message_thread_id === 101 && c.params.name === 'project-a · работа'));
+    assert.ok(edits().some(c => c.params.message_thread_id === 102 && c.params.name === 'project-b · готово'));
+    assert.equal(edits().length, 2);
+    await new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover();
+    assert.equal(edits().length, 2);
+    f.codex.sessions[0]!.status = 'idle';
+    await f.bridge.discover();
+    assert.equal(edits().length, 3);
+    assert.equal(edits().at(-1)!.params.name, 'project-a · готово');
+    await f.bridge.update(message(3, 101, '/topics simple'));
+    await f.bridge.discover();
+    assert.equal(f.state.binding('thread-a')?.title, 'project-a · thread-a');
+    assert.equal(f.state.binding('thread-a')?.topicId, 101);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 2);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('two sessions with identical visible project/status names still route by their saved topic IDs', async () => {
+  const f = await fixture();
+  try {
+    f.state.setTopicTitleMode('status');
+    f.codex.sessions[1]!.cwd = f.projectA;
+    await f.bridge.discover();
+    assert.equal(f.state.binding('thread-a')?.title, 'project-a · готово');
+    assert.equal(f.state.binding('thread-b')?.title, 'project-a · готово');
+    const restarted = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+    await restarted.discover();
+    await restarted.update(message(1, 101, 'A'));
+    await restarted.update(message(2, 102, 'B'));
+    assert.deepEqual(f.codex.writes.map(w => w.params.threadId), ['thread-a', 'thread-b']);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 2);
+  } finally { f.close(); }
+});
+
 test('native approval needs an owner click in its own topic, then becomes one-shot', async () => {
   const f = await fixture();
   try {
