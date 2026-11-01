@@ -42,6 +42,29 @@ test('duplicate Telegram updates never submit the instruction twice', async () =
   finally { f.close(); }
 });
 
+test('accepted Telegram instructions get one immediate acknowledgement in their own topic', async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.update(message(1, 101, 'Start work'));
+    await f.bridge.update(message(1, 101, 'Start work'));
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 1);
+    assert.equal(f.telegram.sent()[0]!.message_thread_id, 101);
+    assert.match(string(f.telegram.sent()[0]!.text), /accepted by Codex/u);
+    f.codex.sessions[1]!.status = 'active';
+    f.codex.histories.set('thread-b', [{ id: 'busy-turn', status: 'inProgress' }]);
+    await f.bridge.update(message(2, 102, 'Change direction'));
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 2);
+    assert.equal(f.telegram.sent()[1]!.message_thread_id, 102);
+    assert.match(string(f.telegram.sent()[1]!.text), /accepted by Codex/u);
+    f.codex.failSteer = true;
+    await assert.rejects(f.bridge.update(message(3, 102, 'Another direction')));
+    await f.drain();
+    assert.equal(f.telegram.sent().filter(s => string(s.text).includes('accepted by Codex')).length, 2);
+  } finally { f.close(); }
+});
+
 test('busy input steers the expected active turn; uncertain steering never creates a fallback turn', async () => {
   const f = await fixture();
   try {
@@ -86,6 +109,10 @@ test('native approval needs an owner click in its own topic, then becomes one-sh
     await f.bridge.update(click(3, data));
     await f.bridge.update(click(4, data));
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'r1', result: { decision: 'accept' } } }]);
+    await f.drain();
+    const confirmations = f.telegram.sent().filter(s => string(s.text).includes('Decision sent to Codex'));
+    assert.equal(confirmations.length, 1);
+    assert.equal(confirmations[0]!.message_thread_id, 101);
   } finally { f.close(); }
 });
 
@@ -118,6 +145,8 @@ test('multi-question replies preserve native IDs and old buttons cannot answer t
     assert.equal(f.codex.writes.length, 0);
     await f.bridge.update(message(3, 101, 'Medium'));
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'q1', result: { answers: { color: { answers: ['Blue'] }, size: { answers: ['Medium'] } } } } }]);
+    await f.drain();
+    assert.equal(f.telegram.sent().filter(s => string(s.text).includes('Answer sent to Codex')).length, 1);
   } finally { f.close(); }
 });
 

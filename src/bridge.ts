@@ -225,7 +225,8 @@ export class Bridge {
       await this.codex.steer(binding.threadId, turnId, prompt);
     } else if (status === 'idle') {
       await this.codex.start(binding.threadId, prompt);
-    } else { this.notice(topicId, 'This session is not ready. Open it in Codex and retry.'); }
+    } else { this.notice(topicId, 'This session is not ready. Open it in Codex and retry.'); return; }
+    this.notice(topicId, '✅ Message accepted by Codex. I will send its answer here.');
   }
 
   private async callback(callback: Json, _message: Json, topicId: number | null): Promise<void> {
@@ -251,6 +252,7 @@ export class Bridge {
     // Consume before writing the response; a duplicated click cannot repeat a decision.
     await this.clearPrompt(prompt);
     await this.codex.respond(prompt.request.id, result);
+    this.notice(topicId, '✅ Decision sent to Codex.');
   }
 
   private showQuestion(prompt: Prompt, repeat = false): void {
@@ -271,7 +273,10 @@ export class Bridge {
       prompt.token = randomBytes(16).toString('hex');
       this.prompts.set(prompt.token, prompt);
       this.showQuestion(prompt);
-    } else { await this.codex.respond(prompt.request.id, { answers: prompt.answers }); }
+    } else {
+      await this.codex.respond(prompt.request.id, { answers: prompt.answers });
+      this.notice(prompt.binding.topicId, '✅ Answer sent to Codex.');
+    }
   }
   private promptKey(prompt: Prompt): string { return `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }
   private async clearPrompt(prompt: Prompt): Promise<void> {

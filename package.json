@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-relay",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A local, private-topic Telegram companion for existing Codex CLI sessions.",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,6 @@
     "start": "node dist/src/cli.js",
     "prepare": "npm run build"
   },
-  "dependencies": { "ws": "8.22.1" },
+  "dependencies": { "marked": "18.1.2", "ws": "8.22.1" },
   "devDependencies": { "@types/node": "22.20.5", "@types/ws": "8.18.2", "typescript": "7.0.2" }
 }

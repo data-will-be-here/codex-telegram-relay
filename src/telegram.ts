@@ -1,6 +1,8 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State } from './state.js';
+import { formatMessages } from './format.js';
+export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
   constructor(message: string, readonly status: number, readonly retryAfter?: number) { super(message); }
@@ -31,19 +33,6 @@ export class TelegramClient implements Telegram {
   }
 }
 
-export function splitMessage(text: string, limit = 3500): string[] {
-  const characters = Array.from(text);
-  const chunks: string[] = [];
-  // Unicode scalar values keep astral characters intact; the conservative limit also fits UTF-16 limits.
-  let chunk = '';
-  for (const char of characters) {
-    if (chunk.length + char.length > limit) { chunks.push(chunk); chunk = ''; }
-    chunk += char;
-  }
-  if (chunk) chunks.push(chunk);
-  return chunks;
-}
-
 export class Outbox {
   constructor(private readonly state: State, private readonly telegram: Telegram, private readonly ownerId: number, private readonly interval = 1100) {}
   async flushOne(): Promise<boolean> {
@@ -51,10 +40,12 @@ export class Outbox {
     if (!delivery) return false;
     this.state.sending(delivery.id);
     try {
-      const chunks = splitMessage(delivery.text);
+      // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.
+      const chunks = formatMessages(delivery.text, delivery.key.startsWith('final/'));
       let messageId: number | null = null;
-      for (const [index, text] of chunks.entries()) {
+      for (const [index, { text, entities }] of chunks.entries()) {
         const params: Json = { chat_id: this.ownerId, text };
+        if (entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
         if (index === chunks.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
         let retries = 0;

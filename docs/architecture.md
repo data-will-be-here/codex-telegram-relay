@@ -5,6 +5,7 @@
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
 - `bridge.ts`: project/topic bindings, owner authentication, completion filtering, input routing, questions and explicit one-time approvals. It does not own native sandbox policy.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.
+- `format.ts`: CommonMark/GFM parsing into Telegram text entities, safe external links and UTF-16-aware splitting. Raw HTML is displayed literally; code never nests inside formatting entities.
 - `state.ts`: SQLite bindings, update IDs, delivery status and a local singleton lock. Unknown users' payloads are not stored.
 - `config.ts` / `cli.ts`: local pairing, secret input, project selection, user-profile state and process lifecycle.
 
@@ -25,6 +26,10 @@ Setup checks getMe/private topics and refuses existing webhooks. It accepts a pr
 One process consumes getUpdates. The owner check happens before creating work or journaling an input. Input IDs and the polling offset are durable. A crash between sending a native request and receiving acknowledgement is marked uncertain; it is not replayed. There is no exactly-once guarantee across Telegram and native Codex.
 
 Completed agent messages are buffered until turn completion; commentary is omitted. Native questions and approvals carry unguessable, topic-scoped callback capabilities. Multi-question prompts rotate capabilities so an old answer button cannot answer a later question. Unknown request types and payloads too large to review completely are left to the terminal. Terminal-only attention notices use persistent native identity and do not repeat for the same request across reconnects. Attaching to a waiting session alone does not emit another warning.
+
+Instructions (including steering) enqueue a short confirmation after the native RPC succeeds. Completed question answers and approval decisions confirm transmission after the socket write succeeds; these native responses have no separate RPC acknowledgement. Rejected/uncertain calls never produce a success confirmation. Input deduplication also prevents duplicate confirmations for the same Telegram update. A confirmation does not mean that work has completed or a pending approval has been resolved.
+
+Completed answers are rendered with explicit Telegram entities instead of `parse_mode`: CommonMark differs from Telegram MarkdownV2. Entities use UTF-16 offsets and are clipped/rebased for each message. Formatting is bounded to 100 entities per chunk without removing text. Native approval payloads and questions stay verbatim so Markdown does not conceal command or diff characters. Local file links retain their label and target as text because Telegram cannot open paths on the owner's computer.
 
 ## Initial release limits
 

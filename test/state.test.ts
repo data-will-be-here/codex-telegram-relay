@@ -44,6 +44,22 @@ test('an uncertain Telegram POST is not automatically replayed', async () => {
   } finally { state.close(); temp.close(); }
 });
 
+test('final answers send Telegram formatting entities instead of raw Markdown', async () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
+  try {
+    state.enqueue('final/a/formatted', 1, '🎁 **Готово**: [документация](https://example.com/docs) и `npm test`.');
+    await new Outbox(state, t, 42, 0).flushOne();
+    const sent = t.sent()[0]!;
+    assert.equal(sent.text, '🎁 Готово: документация и npm test.');
+    assert.deepEqual(sent.entities, [
+      { type: 'bold', offset: 3, length: 6 },
+      { type: 'text_link', offset: 11, length: 12, url: 'https://example.com/docs' },
+      { type: 'code', offset: 26, length: 8 },
+    ]);
+    assert.equal(sent.parse_mode, undefined);
+  } finally { state.close(); temp.close(); }
+});
+
 test('long Unicode output is split intact and buttons appear only on its last message', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
   try {

@@ -21,8 +21,10 @@ Your Telegram bot / private project topics
 - Topics are named after the project plus a short session ID; two sessions in one project remain separate.
 - Tool chatter and incremental text are suppressed. Completed answers, questions, approvals and failures are delivered.
 - Replies immediately steer a running turn or start the next turn when idle.
+- Accepted messages, question answers and approval decisions get a short confirmation in their topic.
+- Completed answers render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file links show their paths as text.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
-- The only runtime npm dependency is `ws`. SQLite comes with Node.
+- Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 This is an initial developer release. Native transport, completion, questions, live steering and cross-client approval cancellation were qualified on Windows with CLI **0.166.0**, using a Telegram simulator. An exchange with a real Telegram bot must still be checked after pairing. [Verification](docs/verification.md), [compatibility and limitations](docs/architecture.md).
 
@@ -49,6 +51,8 @@ npm start -- start
 `npm ci` builds the TypeScript CLI. Setup asks you to select projects from your currently loaded Codex sessions, reads the bot token **without echoing it**, and prints a random pairing code. Send the displayed `/start CODE` to your bot in a **private** chat. The relay binds to the sender's numeric Telegram ID. Never paste a token into an issue, AI conversation or command argument.
 
 Once running, the relay automatically creates a topic for each eligible session in your selected projects. Type in that topic to talk to its Codex session. Stop with Ctrl+C: the existing Codex daemon and its work keep running.
+
+Discovery uses threads loaded in the shared daemon. This can include an older thread still waiting for approval even when its terminal/IDE window is no longer visible; it is not a list of open windows.
 
 For an npm-style executable after cloning:
 
