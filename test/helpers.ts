@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { type Codex, type Json, type Session, type Telegram } from '../src/types.js';
+import { type Codex, type Json, type Session, type Telegram, type MessageMode } from '../src/types.js';
 
 export function temporary(): { dir: string; close: () => void } {
   const base = realpathSync(tmpdir());
@@ -55,7 +55,7 @@ export class FakeTelegram implements Telegram {
   sent(): Json[] { return this.calls.filter(c => c.method === 'sendMessage').map(c => c.params); }
 }
 
-export async function fixture(): Promise<{
+export async function fixture(mode: MessageMode = 'compact'): Promise<{
   dir: string; projectA: string; projectB: string; state: State; codex: FakeCodex; telegram: FakeTelegram; bridge: Bridge;
   drain: () => Promise<void>; close: () => void;
 }> {
@@ -65,6 +65,7 @@ export async function fixture(): Promise<{
   const codex = new FakeCodex(); const telegram = new FakeTelegram();
   codex.sessions = [{ id: 'thread-a', cwd: projectA, name: '', status: 'idle' }, { id: 'thread-b', cwd: projectB, name: '', status: 'idle' }];
   const state = new State(join(temp.dir, 'private'));
+  state.setMessageMode(mode);
   const bridge = new Bridge({ version: 1, ownerId: 42, roots: [projectA, projectB], codexBinary: process.execPath }, state, codex, telegram);
   await bridge.discover();
   const outbox = new Outbox(state, telegram, 42, 0);

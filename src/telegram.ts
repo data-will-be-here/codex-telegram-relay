@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State } from './state.js';
-import { formatMessages } from './format.js';
+import { formatMessages, withoutFormatting } from './format.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
@@ -43,20 +43,30 @@ export class Outbox {
     this.state.sending(delivery.id);
     try {
       // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.
-      const chunks = formatMessages(delivery.text, delivery.key.startsWith('final/') || delivery.key.startsWith('reply/'));
+      const chunks = formatMessages(delivery.text, /^(?:final|reply|assistant)\//u.test(delivery.key));
       let messageId: number | null = null;
-      for (const [index, { text, entities }] of chunks.entries()) {
+      for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index]!;
+        const { text, entities } = chunk;
         const params: Json = { chat_id: this.ownerId, text };
         if (entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
         if (index === chunks.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
         let retries = 0;
-        while (true) {
-          try { messageId = integer(object(await this.telegram.call('sendMessage', params)).message_id) ?? null; break; }
-          catch (error) {
-            if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
-            await delay(Math.min(error.retryAfter ?? 2, 60) * 1000);
+        try {
+          while (true) {
+            try { messageId = integer(object(await this.telegram.call('sendMessage', params)).message_id) ?? null; break; }
+            catch (error) {
+              if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
+              await delay(Math.min(error.retryAfter ?? 2, 60) * 1000);
+            }
           }
+        } catch (error) {
+          // A definite 400 entity rejection sent no message. Retry only that chunk without markup.
+          if (!(error instanceof TelegramError) || error.status !== 400 || !entities.length ||
+              !/can't parse entities|entity.*(?:URL|offset|length|invalid)|wrong HTTP URL/iu.test(error.message)) throw error;
+          chunks.splice(index, 1, ...formatMessages(withoutFormatting(chunk), false));
+          index--; continue;
         }
         if (this.interval > 0) await delay(this.interval);
       }

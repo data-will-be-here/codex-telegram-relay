@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, openSync, readFileSync, un
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
-import { object, string, type Binding, type Json } from './types.js';
+import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 
 export interface Delivery { id: number; key: string; topicId: number | null; text: string; markup: Json | null; }
 
@@ -56,6 +56,11 @@ export class State {
     this.db.prepare('INSERT INTO bindings(threadId,topicId,cwd,title) VALUES(?,?,?,?)').run(threadId, topicId, cwd, title);
   }
   baseline(threadId: string, turnId: string): void { this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=?').run(turnId, threadId); }
+  messageMode(): MessageMode { return this.db.prepare("SELECT value FROM settings WHERE key='messageMode'").get()?.value === 'compact' ? 'compact' : 'all'; }
+  setMessageMode(mode: MessageMode): void {
+    if (mode !== 'all' && mode !== 'compact') throw new Error('Invalid message mode.');
+    this.db.prepare("INSERT INTO settings VALUES('messageMode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(mode);
+  }
   offset(): number | undefined {
     const value = this.db.prepare("SELECT value FROM settings WHERE key='offset'").get()?.value;
     return value === undefined ? undefined : Number(value);

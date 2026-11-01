@@ -87,9 +87,13 @@ export class Bridge {
       const item = object(params.item);
       if (item.type === 'agentMessage' && item.phase === 'commentary' && string(item.text).trim()) {
         const reply = this.state.reply(threadId);
-        if (reply && (!reply.turnId || reply.turnId === params.turnId) && await this.stillAllowed(binding)) {
-          this.state.enqueue(`reply/${threadId}/${reply.inputId}`, binding.topicId, string(item.text));
-          this.state.clearReply(threadId, reply.inputId);
+        const matchingReply = reply && (!reply.turnId || reply.turnId === params.turnId);
+        const all = this.state.messageMode() === 'all';
+        if ((all || matchingReply) && await this.stillAllowed(binding)) {
+          const itemId = string(item.id) || createHash('sha256').update(string(item.text)).digest('hex');
+          const key = all ? `assistant/${threadId}/${string(params.turnId)}/${itemId}` : `reply/${threadId}/${reply!.inputId}`;
+          this.state.enqueue(key, binding.topicId, string(item.text));
+          if (matchingReply) this.state.clearReply(threadId, reply.inputId);
         }
       }
       if (item.type === 'agentMessage' && (!item.phase || item.phase === 'final_answer')) {
@@ -202,12 +206,18 @@ export class Bridge {
     const text = string(message.text).trim();
     if (!text) { if (message.document || message.voice || message.photo) this.notice(topicId, 'This version supports text only.'); return; }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
     }
-    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nUncertain deliveries: ${this.state.uncertainCount()}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (/^\/mode(?:\s|$)/u.test(text)) {
+      const mode = text.split(/\s+/u)[1];
+      if (mode !== undefined && mode !== 'all' && mode !== 'compact') { this.notice(topicId, 'Use /mode all or /mode compact.'); return; }
+      if (mode) this.state.setMessageMode(mode);
+      this.notice(topicId, `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
+    }
     if (text === '/questions') {
       const prompts = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length);
       for (const p of prompts) this.showQuestion(p, true);

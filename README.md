@@ -19,15 +19,15 @@ Your Telegram bot / private project topics
 - No VPS, webhook, public port or cloud relay to install.
 - Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
 - Topics are named after the project plus a short session ID; two sessions in one project remain separate.
-- Tool chatter and incremental text are suppressed. The first assistant reply to a Telegram message, completed answers, questions, approvals and failures are delivered.
+- By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
 - Replies immediately steer a running turn or start the next turn when idle.
-- Telegram input gets the assistant's actual first reply instead of a canned acceptance message. Later progress chatter is suppressed; the final answer still follows.
-- Completed answers render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file links show their paths as text.
+- `/mode all` delivers all assistant commentary and final answers; `/mode compact` delivers the first reply to Telegram input and final answer. This owner-only preference applies to all sessions, persists and changes immediately for future messages.
+- Assistant messages render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file and preview links show their targets as text. A definite Telegram entity rejection falls back to plain text without repeating accepted parts.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
-This is an initial developer release. Native transport, completion, questions, live steering and cross-client approval cancellation were qualified on Windows with CLI **0.166.0**, using a Telegram simulator. An exchange with a real Telegram bot must still be checked after pairing. [Verification](docs/verification.md), [compatibility and limitations](docs/architecture.md).
+This is an initial developer release. Native transport, completion, questions, live steering and cross-client approval cancellation were qualified on Windows with CLI **0.166.0**, using a Telegram simulator. A real paired bot was subsequently checked for topic creation, bidirectional messages, formatting and native question responses. Sleep/reconnect, other native client versions and clean-machine installation still need acceptance checks. [Verification](docs/verification.md), [compatibility and limitations](docs/architecture.md).
 
 ## Requirements
 
@@ -91,6 +91,7 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 | `/say TEXT` | Send an instruction even while a native question is pending |
 | `/sessions` | Show the saved session/topic bindings |
 | `/status` | Show connection and uncertain-delivery counts |
+| `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
 | `/questions` | Redisplay pending native questions |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6
+
+- Deliver all assistant commentary and final answers by default, while excluding command output, file/tool events and internal reasoning items.
+- Add persistent owner-only `/mode all|compact` selection that applies immediately to future messages across sessions.
+- Deduplicate assistant commentary by native item identity across reconnects and render its Markdown.
+- Display localhost/private preview links as text instead of invalid Telegram text-link entities.
+- Recover from definite Telegram entity rejection using plain text for only the rejected chunk, preserving link targets and already accepted parts.
+
 ## 0.1.5
 
 - Replace canned acceptance messages with the assistant's actual first response to Telegram input, followed by the final answer.

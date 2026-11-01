@@ -135,6 +135,54 @@ test('commentary is suppressed and final delivery is deduplicated across native 
   } finally { f.close(); }
 });
 
+test('all mode relays every assistant message once while excluding tools and system events', async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.update(message(500, 101, '/mode all'));
+    await f.drain(); f.telegram.calls.length = 0;
+    const first = { threadId: 'thread-a', turnId: 'turn-all', item: { id: 'a1', type: 'agentMessage', phase: 'commentary', text: '**Начинаю** проверку.' } };
+    await f.bridge.notification('item/completed', first);
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn-all', item: { id: 'cmd', type: 'commandExecution', aggregatedOutput: 'Ran Get-Content' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn-all', item: { id: 'file', type: 'fileChange', text: 'Added file' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn-all', item: { id: 'reasoning', type: 'reasoning', text: 'Synthetic internal item' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn-all', item: { id: 'a2', type: 'agentMessage', phase: 'commentary', text: 'Нашёл причину, исправляю.' } });
+    const final = { id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'Готово.' };
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn-all', item: final });
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'turn-all', status: 'completed', items: [final] } });
+    const reconnect = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+    await reconnect.discover();
+    await reconnect.notification('item/completed', first);
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 3);
+    assert.equal(f.telegram.sent()[0]!.text, 'Начинаю проверку.');
+    assert.ok(f.telegram.sent()[0]!.entities);
+    assert.equal(f.telegram.sent()[1]!.text, 'Нашёл причину, исправляю.');
+    assert.match(string(f.telegram.sent()[2]!.text), /Готово/u);
+    assert.ok(f.telegram.sent().every(s => s.message_thread_id === 101));
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('only the owner can switch message modes; changes apply immediately without starting a Codex turn', async () => {
+  const f = await fixture('all');
+  try {
+    await f.bridge.update(message(1, 101, '/mode compact', 99));
+    assert.equal(f.state.messageMode(), 'all');
+    await f.bridge.update(message(2, 101, '/mode compact'));
+    assert.equal(f.state.messageMode(), 'compact');
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn', item: { id: 'hidden', type: 'agentMessage', phase: 'commentary', text: 'Hidden in compact' } });
+    await f.bridge.update(message(3, 101, '/mode all'));
+    assert.equal(f.state.messageMode(), 'all');
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn', item: { id: 'visible', type: 'agentMessage', phase: 'commentary', text: 'Visible in all' } });
+    await f.bridge.update(message(4, 101, '/mode invalid'));
+    assert.equal(f.state.messageMode(), 'all');
+    await f.drain();
+    assert.ok(f.telegram.sent().some(s => s.text === 'Visible in all'));
+    assert.ok(f.telegram.sent().every(s => s.text !== 'Hidden in compact'));
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
 test('native approval needs an owner click in its own topic, then becomes one-shot', async () => {
   const f = await fixture();
   try {

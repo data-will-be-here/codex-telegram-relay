@@ -5,6 +5,7 @@ export const string = (value: unknown): string => typeof value === 'string' ? va
 export const array = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 export const integer = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
+export type MessageMode = 'all' | 'compact';
 
 export interface Session {
   id: string;

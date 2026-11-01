@@ -24,10 +24,10 @@ Verified:
 
 The native server offered `accept` and `cancel` for the tested approval, rather than `decline`. The relay now renders the advertised choices and has a regression test for this case. A blank native context cannot be resumed before its first input; discovery waits for materialization instead of creating replacement sessions.
 
-## Still required before calling a real installation accepted
+## Installation acceptance checklist
 
-- Configure a dedicated BotFather bot with private topics and complete owner pairing.
-- Confirm topic creation, final delivery, questions and approvals in an actual Telegram client.
+- Configure a dedicated BotFather bot with private topics and complete owner pairing (performed for one local installation; repeat for each installation).
+- Confirm topic creation, final delivery and native questions in an actual Telegram client (performed locally). Real-client approval acceptance remains to be checked; automated approval qualification used the adapter.
 - Confirm behaviour after the local computer sleeps and reconnects.
 - Verify actual account-specific native approval modes, including any managed or automatic reviewer policies.
 
@@ -38,3 +38,9 @@ No real Telegram exchange, password prompt, file transfer or production deployme
 A real installation exposed a history response exceeding the client's 16 MiB WebSocket limit. The error had been incorrectly labelled as an unavailable daemon. Each reconnect also re-enqueued warnings about an unchanged background approval.
 
 Both failures were reproduced before the fix: a synthetic large-history test disconnected, and four reconnects produced eight warnings instead of one. After switching to display summaries and persistent native attention keys, all 27 tests pass. The same installation's sessions were checked across three native connection cycles with a separate SQLite store and Telegram simulator: no transport disconnect and one terminal-only warning for the unchanged request. The real bot's token, bindings and state were not modified by this verification.
+
+## Live acceptance and 0.1.6 delivery regression
+
+A paired real bot was subsequently checked for topic creation, bidirectional messages, Markdown entities and a native multiple-choice question in a separate test session. A selected answer reached that session and its final response returned to Telegram. These checks do not replace clean-machine or sleep/reconnect acceptance checks.
+
+Two completed answers containing localhost preview links reached the relay but were rejected by Telegram. A controlled live request reproduced HTTP 400 `Wrong HTTP URL`; the local-link and definite-entity-rejection regression tests failed before the fix. After rendering local previews as text, both stored answers were delivered to their original topic without repeating native Codex input. Automated tests also cover switching/persisting message modes, owner checks, commentary deduplication, and plain-text fallback without replaying accepted multipart output.

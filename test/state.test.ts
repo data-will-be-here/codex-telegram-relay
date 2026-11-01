@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { State } from '../src/state.js';
-import { Outbox, TelegramClient, splitMessage } from '../src/telegram.js';
+import { Outbox, TelegramClient, TelegramError, splitMessage } from '../src/telegram.js';
 import { FakeTelegram, temporary } from './helpers.js';
 
 test('restart preserves bindings and marks dispatched inputs/sends uncertain without replay', () => {
@@ -31,6 +31,48 @@ test('singleton lock refuses a second local poller', () => {
   finally { state.close(); temp.close(); }
 });
 
+test('message mode defaults to all and persists across restarts', () => {
+  const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
+  try {
+    assert.equal(state.messageMode(), 'all');
+    state.setMessageMode('compact'); state.close(); state = new State(home);
+    assert.equal(state.messageMode(), 'compact');
+    state.setMessageMode('all');
+    assert.equal(state.messageMode(), 'all');
+  } finally { state.close(); temp.close(); }
+});
+
+test('Telegram errors unrelated to formatting are not retried as plain text', async () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home')); let attempts = 0;
+  try {
+    state.enqueue('final/a/missing-topic', 1, '**Answer**');
+    const telegram = { call: async () => { attempts++; throw new TelegramError('Bad Request: message thread not found', 400); } };
+    await assert.rejects(new Outbox(state, telegram, 42, 0).flushOne());
+    assert.equal(attempts, 1);
+    assert.equal(state.uncertainCount(), 1);
+  } finally { state.close(); temp.close(); }
+});
+
+test('format fallback on a later chunk never replays accepted chunks and keeps buttons on the last part', async () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
+  try {
+    state.enqueue('final/a/multipart-fallback', 1, '**' + 'x'.repeat(4000) + '**', { inline_keyboard: [[{ text: 'OK', callback_data: 'test' }]] });
+    const call = t.call.bind(t); let attempts = 0;
+    t.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && ++attempts === 2) { t.calls.push({ method, params }); throw new TelegramError("Bad Request: can't parse entities", 400); }
+      return call(method, params);
+    };
+    await new Outbox(state, t, 42, 0).flushOne();
+    const messages = t.sent();
+    assert.equal(messages.length, 3);
+    assert.equal(messages[0]!.text, 'x'.repeat(3500));
+    assert.equal(messages[2]!.text, 'x'.repeat(500));
+    assert.equal(messages[2]!.entities, undefined);
+    assert.ok(messages[2]!.reply_markup);
+    assert.equal(state.uncertainCount(), 0);
+  } finally { state.close(); temp.close(); }
+});
+
 test('HTTP errors cannot leak the bot token or its URL', async () => {
   const token = 'synthetic-token-used-only-by-mocked-fetch';
   const t = new TelegramClient(token, (async () => { throw new Error('https://api.telegram.org/bot' + token + '/sendMessage'); }) as typeof fetch);
@@ -47,6 +89,24 @@ test('an uncertain Telegram POST is not automatically replayed', async () => {
     const outbox = new Outbox(state, failing, 42, 0);
     await assert.rejects(outbox.flushOne());
     assert.equal(await outbox.flushOne(), false); assert.equal(state.uncertainCount(), 1);
+  } finally { state.close(); temp.close(); }
+});
+
+test('a definite Telegram entity rejection falls back to readable text with link targets', async () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
+  try {
+    state.enqueue('final/a/rejected-markup', 1, '**Result**: [docs](https://example.com/docs).');
+    const call = t.call.bind(t); let first = true;
+    t.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && first) { first = false; t.calls.push({ method, params }); throw new TelegramError("Bad Request: can't parse entities", 400); }
+      return call(method, params);
+    };
+    await new Outbox(state, t, 42, 0).flushOne();
+    assert.equal(t.sent().length, 2);
+    assert.ok(t.sent()[0]!.entities);
+    assert.equal(t.sent()[1]!.entities, undefined);
+    assert.equal(t.sent()[1]!.text, 'Result: docs (https://example.com/docs).');
+    assert.equal(state.uncertainCount(), 0);
   } finally { state.close(); temp.close(); }
 });
 

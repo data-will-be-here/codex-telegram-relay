@@ -1,4 +1,5 @@
 import { Lexer, type MarkedToken, type Token } from 'marked';
+import { isIP } from 'node:net';
 
 export interface Entity {
   type: 'bold' | 'italic' | 'strikethrough' | 'code' | 'pre' | 'text_link';
@@ -8,6 +9,19 @@ export interface Entity {
   language?: string;
 }
 export interface FormattedText { text: string; entities: Entity[]; }
+
+function linkable(url: URL): boolean {
+  if (url.protocol === 'mailto:') return true;
+  if (!['https:', 'http:'].includes(url.protocol)) return false;
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/gu, '').replace(/\.$/u, '');
+  const ip = isIP(host);
+  if (host === 'localhost' || /\.(?:localhost|local|lan|internal)$/u.test(host) || (!host.includes('.') && !ip)) return false;
+  if (ip === 4) {
+    const [a = -1, b = -1] = host.split('.').map(Number);
+    if (a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return false;
+  }
+  return ip !== 6 || !/^(?:::|f[cd]|fe[89ab])/u.test(host);
+}
 
 /** Parse CommonMark/GFM into text and Telegram entities; never interpret raw HTML. */
 export function renderMarkdown(source: string): FormattedText {
@@ -42,7 +56,7 @@ export function renderMarkdown(source: string): FormattedText {
           const href = token.href;
           let url: URL | undefined;
           try { url = new URL(href); } catch { /* Relative/local links remain readable text. */ }
-          if (url && ['https:', 'http:', 'mailto:'].includes(url.protocol)) {
+          if (url && linkable(url)) {
             add('text_link', () => children(token.tokens), { url: url.href });
           } else {
             children(token.tokens);
@@ -96,6 +110,17 @@ export function renderMarkdown(source: string): FormattedText {
   }
   entities.sort((a, b) => a.offset - b.offset || b.length - a.length);
   return { text, entities };
+}
+
+export function withoutFormatting(message: FormattedText): string {
+  let text = message.text;
+  const links = message.entities.filter(e => e.type === 'text_link' && e.url).sort((a, b) => b.offset - a.offset);
+  for (const link of links) {
+    if (text.slice(link.offset, link.offset + link.length) === link.url) continue;
+    const end = link.offset + link.length;
+    text = text.slice(0, end) + ` (${link.url})` + text.slice(end);
+  }
+  return text;
 }
 
 export function splitMessage(text: string, limit = 3500): string[] {

@@ -23,6 +23,14 @@ test('links support external URLs while local paths remain visible and unsafe sc
   assert.deepEqual(result.entities.map(e => e.url), ['https://example.com/a?q=1', 'mailto:a@example.com']);
 });
 
+test('localhost and private preview URLs stay visible without Telegram text-link entities', () => {
+  const result = renderMarkdown('[Preview](http://localhost:5173) [LAN](http://192.168.1.10:3000) http://127.0.0.1:4173 [IPv6](http://[::1]:3000)');
+  assert.ok(result.text.includes('Preview (http://localhost:5173)'));
+  assert.ok(result.text.includes('LAN (http://192.168.1.10:3000)'));
+  assert.ok(result.text.includes('http://127.0.0.1:4173'));
+  assert.equal(result.entities.filter(e => e.type === 'text_link').length, 0);
+});
+
 test('long styled Unicode messages preserve content, code and link entities on every chunk', () => {
   const source = '**' + '🎁'.repeat(2200) + '**\n\n```js\n' + 'a();\n'.repeat(900) + '```\n\n[' + 'link '.repeat(800) + '](https://example.com)';
   const original = renderMarkdown(source);
