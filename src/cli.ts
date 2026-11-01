@@ -2,6 +2,7 @@
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { stdin, stdout } from 'node:process';
+import { join } from 'node:path';
 import { realpathSync, existsSync, statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
@@ -116,7 +117,7 @@ async function start(): Promise<void> {
   await verifyBot(telegram);
   const { State } = await import('./state.js');
   const state = new State(home);
-  const outbox = new Outbox(state, telegram, config.ownerId);
+  const outbox = new Outbox(state, telegram, config.ownerId, 1100, config.ignoredThreadIds);
   let stopping = false;
   let current: CodexClient | undefined;
   const stop = (): void => { stopping = true; current?.close(); };
@@ -178,6 +179,24 @@ async function main(): Promise<void> {
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start();
+  if (command === 'sessions' && ['ignore', 'unignore'].includes(args[1] ?? '')) {
+    const prefix = args[2];
+    if (!prefix || !/^[a-zA-Z0-9-]{6,128}$/u.test(prefix)) throw new Error('Usage: sessions ignore|unignore SESSION_ID_OR_UNIQUE_PREFIX');
+    const home = dataDirectory(); const { config } = loadConfig(home);
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(home, 'state.sqlite'), { readOnly: true });
+    let matches: string[];
+    try { matches = db.prepare('SELECT threadId FROM bindings').all().map(row => string(row.threadId)).filter(id => id.startsWith(prefix)); }
+    finally { db.close(); }
+    if (matches.length !== 1) throw new Error('Session prefix must match exactly one existing topic. Use /sessions to see IDs.');
+    const id = matches[0]!;
+    config.ignoredThreadIds = args[1] === 'ignore'
+      ? [...new Set([...(config.ignoredThreadIds ?? []), id])]
+      : (config.ignoredThreadIds ?? []).filter(value => value !== id);
+    saveConfig(home, config);
+    console.log(`Session ${id.slice(0, 8)} ${args[1] === 'ignore' ? 'ignored' : 'enabled'}. Restart the relay to apply. Native Codex state is unchanged.`);
+    return;
+  }
   if (command === 'projects' && args[1] === 'add') {
     const path = args[2];
     if (!path || !existsSync(path)) throw new Error('Usage: projects add EXISTING_PROJECT_DIRECTORY');
@@ -188,7 +207,7 @@ async function main(): Promise<void> {
     console.log('Project added. Restart the relay to apply.'); return;
   }
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
-  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup and doctor accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup and doctor accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

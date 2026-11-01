@@ -80,6 +80,7 @@ export class State {
   sending(id: number): void { this.db.prepare("UPDATE outbox SET status='sending' WHERE id=? AND status='pending'").run(id); }
   delivered(id: number, messageId: number | null): void { this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id); }
   uncertain(id: number): void { this.db.prepare("UPDATE outbox SET status='uncertain' WHERE id=?").run(id); }
+  cancelDelivery(id: number): void { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE id=? AND status='pending'").run(id); }
   cancelPrompt(key: string): number | undefined {
     const id = this.db.prepare('SELECT messageId FROM outbox WHERE key=?').get(key)?.messageId;
     this.db.prepare("UPDATE outbox SET status='cancelled' WHERE key=? AND status='pending'").run(key);

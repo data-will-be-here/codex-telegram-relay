@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Add local `sessions ignore ID` and `sessions unignore ID` commands with unambiguous ID-prefix matching.
+- Ignored sessions are excluded from native attachment, input forwarding and queued Telegram delivery after restarting the relay.
+- Preserve existing topic bindings, Telegram history and native Codex state; configuration-only updates do not rewrite the bot token.
+
 ## 0.1.3
 
 - Present structured native questions with numbered choices, descriptions, concise inline buttons and progress across multiple questions.

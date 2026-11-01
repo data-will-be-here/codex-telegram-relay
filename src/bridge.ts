@@ -37,7 +37,7 @@ export class Bridge {
     this.discovering = true;
     try {
       for (const session of await this.codex.list()) {
-        if (this.attached.has(session.id) || !allowedDirectory(session.cwd, this.config.roots)) continue;
+        if (this.config.ignoredThreadIds?.includes(session.id) || this.attached.has(session.id) || !allowedDirectory(session.cwd, this.config.roots)) continue;
         let binding = this.state.binding(session.id);
         if (!binding) {
           const title = `${basename(session.cwd)} · ${session.id.slice(0, 8)}`.slice(0, 128);
@@ -196,7 +196,7 @@ export class Bridge {
       this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
-      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
+      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
     }
     if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nUncertain deliveries: ${this.state.uncertainCount()}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
     if (text === '/questions') {

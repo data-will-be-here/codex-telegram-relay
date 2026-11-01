@@ -34,10 +34,12 @@ export class TelegramClient implements Telegram {
 }
 
 export class Outbox {
-  constructor(private readonly state: State, private readonly telegram: Telegram, private readonly ownerId: number, private readonly interval = 1100) {}
+  constructor(private readonly state: State, private readonly telegram: Telegram, private readonly ownerId: number, private readonly interval = 1100, private readonly ignoredThreadIds: readonly string[] = []) {}
   async flushOne(): Promise<boolean> {
     const delivery = this.state.next();
     if (!delivery) return false;
+    const binding = delivery.topicId === null ? undefined : this.state.topic(delivery.topicId);
+    if (binding && this.ignoredThreadIds.includes(binding.threadId)) { this.state.cancelDelivery(delivery.id); return true; }
     this.state.sending(delivery.id);
     try {
       // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.

@@ -9,6 +9,7 @@ export interface Config {
   ownerId: number;
   roots: string[];
   codexBinary: string;
+  ignoredThreadIds?: string[];
 }
 
 export function dataDirectory(): string {
@@ -51,15 +52,23 @@ export function loadConfig(home: string): { config: Config; token: string } {
     throw new Error('Invalid configuration; run setup again.');
   }
   const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: validateBinary(string(raw.codexBinary)) };
+  if (raw.ignoredThreadIds !== undefined) {
+    if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
+      throw new Error('Invalid ignored session list.');
+    }
+    config.ignoredThreadIds = [...new Set(raw.ignoredThreadIds as string[])];
+  }
   const token = privateRead(join(home, 'bot.token'), 4096).trim();
   if (!/^\d{5,16}:[A-Za-z0-9_-]{20,200}$/u.test(token)) throw new Error('Invalid bot token file.');
   return { config, token };
 }
 
-export function saveConfig(home: string, config: Config, token: string): void {
+export function saveConfig(home: string, config: Config, token?: string): void {
   privateDirectory(home);
   protectWindowsDirectory(home);
-  for (const [name, value] of [['config.json', JSON.stringify(config, null, 2) + '\n'], ['bot.token', token + '\n']]) {
+  const files = [['config.json', JSON.stringify(config, null, 2) + '\n']];
+  if (token !== undefined) files.push(['bot.token', token + '\n']);
+  for (const [name, value] of files) {
     const path = join(home, name!);
     if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error('Refusing to write a configuration link.');
     writeFileSync(path, value!, { mode: 0o600 });

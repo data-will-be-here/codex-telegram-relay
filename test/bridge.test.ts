@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, message, click } from './helpers.js';
 import { Bridge } from '../src/bridge.js';
+import { Outbox } from '../src/telegram.js';
 import { array, object, string } from '../src/types.js';
 
 test('two projects get distinct persistent topics; idle messages target the matching native thread', async () => {
@@ -287,5 +288,28 @@ test('reconnection does not spam an unchanged background approval', async () => 
     }
     const warnings = f.telegram.sent().filter(m => m.message_thread_id === 101);
     assert.equal(warnings.length, 1, 'the same background request must produce one attention notice across reconnects');
+  } finally { f.close(); }
+});
+
+test('ignored sessions preserve their topics but never attach, receive input or deliver queued output', async () => {
+  const f = await fixture();
+  try {
+    const config = { ...f.bridge.config, ignoredThreadIds: ['thread-a'] };
+    const attach = f.codex.attach.bind(f.codex); const attached: string[] = [];
+    f.codex.attach = async id => { attached.push(id); return attach(id); };
+    const bridge = new Bridge(config, f.state, f.codex, f.telegram);
+    await bridge.discover();
+    assert.deepEqual(attached, ['thread-b']);
+    assert.equal(f.state.bindings().length, 2);
+    f.state.enqueue('final/thread-a/queued', 101, 'Old queued answer');
+    await bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'ignored', status: 'completed' } });
+    await bridge.update(message(1, 101, 'Do not forward'));
+    await bridge.update(message(2, 102, 'Still forward B'));
+    assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-b', text: 'Still forward B' } }]);
+    const outbox = new Outbox(f.state, f.telegram, 42, 0, config.ignoredThreadIds);
+    while (await outbox.flushOne()) { /* Cancel ignored deliveries; send other topics. */ }
+    assert.ok(f.telegram.sent().every(s => s.message_thread_id !== 101));
+    assert.ok(f.telegram.sent().some(s => s.message_thread_id === 102));
+    assert.equal(f.state.uncertainCount(), 0);
   } finally { f.close(); }
 });
