@@ -19,6 +19,7 @@ Your Telegram bot / private project topics
 - No VPS, webhook, public port or cloud relay to install.
 - Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
 - Topics are named after the project plus a short session ID; two sessions in one project remain separate.
+- Every message part starts with an italic `» project-name` signature, including project notices outside topics. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
 - Replies immediately steer a running turn or start the next turn when idle.
 - `/mode all` delivers all assistant commentary and final answers; `/mode compact` delivers the first reply to Telegram input and final answer. This owner-only preference applies to all sessions, persists and changes immediately for future messages.
@@ -92,6 +93,8 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 | `/sessions` | Show the saved session/topic bindings |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
+| `/bind SESSION_ID` | Bind an already created topic after uncertain creation; send inside that topic |
+| `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
@@ -110,6 +113,12 @@ Configuration and state live outside your projects:
 The optional `CODEX_TELEGRAM_RELAY_HOME` environment variable changes this directory, for example for an isolated installation. No other environment variables are required.
 
 A singleton lock prevents two relay instances using the same state directory. A Telegram polling conflict stops the relay rather than replacing another consumer. An existing webhook is never deleted automatically.
+
+One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Transport failures still reconnect.
+
+Topic creation is journaled before calling Telegram. If the response is lost, creation pauses to avoid duplicate topics, including after restarting the relay. The bot sends recovery instructions: use `/bind SESSION_ID` inside the topic if it appeared, or `/repair SESSION_ID` to explicitly retry if it did not. These commands require the paired owner and never submit an instruction to Codex.
+
+If Telegram explicitly reports that a saved topic no longer exists, the relay recreates it for the loaded session and transfers queued undelivered answers. Existing sent history is not imported, and stale approval buttons are cancelled; pending native prompts are reattached with fresh controls. If you want to permanently remove a session's topic, ignore the session locally before deleting the topic.
 
 Duplicate incoming updates do not execute twice. Writes with an ambiguous result are **not** automatically retried. Check the Codex terminal before repeating an instruction after an uncertainty notice. On reconnection, the relay catches up recent completions for saved bindings; it does not dump old history on the first attachment. See [delivery guarantees](docs/architecture.md).
 

@@ -10,6 +10,7 @@ import { CodexClient } from './codex.js';
 import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, type Config } from './config.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
+import { withProjectHeader } from './format.js';
 
 function binaryFlag(args: string[]): string | undefined {
   const index = args.indexOf('--codex-bin');
@@ -89,7 +90,7 @@ async function setup(args: string[]): Promise<void> {
     if (!ownerId) throw new Error('Pairing timed out. No configuration saved.');
     const config: Config = { version: 1, ownerId, roots, codexBinary: binary };
     saveConfig(home, config, token);
-    await telegram.call('sendMessage', { chat_id: ownerId, text: 'Paired with your local Codex Telegram Relay. Start the relay on your computer to connect the selected projects.' });
+    await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: 'Paired with your local Codex Telegram Relay. Start the relay on your computer to connect the selected projects.', entities: [] }) });
     console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start -- start`);
   } finally { codex.close(); }
 }
@@ -137,6 +138,10 @@ async function start(): Promise<void> {
       let eventCount = 0;
       try {
         const bridge = new Bridge(config, state, codex, telegram);
+        const unavailable = new Set<string>();
+        codex.on('sessionUnavailable', (id: string) => {
+          if (!unavailable.has(id)) { unavailable.add(id); console.error(`Skipping unavailable Codex session ${id.slice(0, 8)}; other sessions remain connected.`); }
+        });
         codex.on('disconnected', () => { connected = false; });
         // Serialize control events so completed native requests invalidate buttons in order.
         const schedule = (work: () => Promise<void>): void => {

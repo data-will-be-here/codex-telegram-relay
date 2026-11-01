@@ -8,6 +8,7 @@ This program runs on the same computer and account as Codex. Telegram is a remot
 - Projects must be selected locally. Paths are resolved before containment checks.
 - The relay supplies no sandbox, network, approval-policy, model, instruction or working-directory overrides to native resume/start/steer calls.
 - Only explicit pending native requests can be answered. Native resolution, duplicate clicks and cross-topic clicks invalidate/reject controls.
+- Topic recovery commands accept only the paired owner, reject occupied topics and ignored/out-of-root sessions, and never submit native input. Unknown creation results require owner-directed binding or retry; they are not automatically replayed. Recovered topics retire old pending approval controls.
 - Remote setting changes, shell commands, file uploads and automatic filesystem artifact discovery are absent.
 - Windows requires a native executable; `.cmd` and `.bat` wrappers are rejected.
 - Bot tokens stay outside the repository, are not passed on the command line, are stripped from Telegram error text, and Telegram-token environment variables are removed from native child processes.

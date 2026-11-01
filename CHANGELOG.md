@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7
+
+- Isolate unavailable-session metadata, resume and history failures so healthy sessions remain connected; transport failures still reconnect normally.
+- Journal topic creation before the Telegram request. Unconfirmed creation survives restart and is never automatically repeated.
+- Add owner-only `/bind ID` to adopt an already created topic and `/repair ID` to explicitly retry failed or uncertain creation; rate-limit responses honour `retry_after`.
+- Recreate deleted topics for loaded sessions and move blocked undelivered answers to the replacement without repeating Codex instructions. Retire old approval buttons before reattachment.
+- Prefix every outgoing message part with an italic project signature such as `» tgmcp`; retain project context in notices outside topics and migrate existing queues.
+
 ## 0.1.6
 
 - Deliver all assistant commentary and final answers by default, while excluding command output, file/tool events and internal reasoning items.

@@ -44,3 +44,9 @@ Both failures were reproduced before the fix: a synthetic large-history test dis
 A paired real bot was subsequently checked for topic creation, bidirectional messages, Markdown entities and a native multiple-choice question in a separate test session. A selected answer reached that session and its final response returned to Telegram. These checks do not replace clean-machine or sleep/reconnect acceptance checks.
 
 Two completed answers containing localhost preview links reached the relay but were rejected by Telegram. A controlled live request reproduced HTTP 400 `Wrong HTTP URL`; the local-link and definite-entity-rejection regression tests failed before the fix. After rendering local previews as text, both stored answers were delivered to their original topic without repeating native Codex input. Automated tests also cover switching/persisting message modes, owner checks, commentary deduplication, and plain-text fallback without replaying accepted multipart output.
+
+## 0.1.7 discovery and topic recovery
+
+The unavailable-session, ambiguous-topic-creation and missing-topic scenarios were reproduced using synthetic adapters before the fix. Regression coverage now includes a disappearing thread, a failed resume alongside healthy sessions, transport errors still triggering reconnect, interrupted topic creation across restart, explicit binding/retry, rate limits, and deleted-topic replacement with queued answers preserved. A combined scenario checks that other topics remain usable during uncertain replacement, old approval buttons stay inert, and new buttons require a fresh owner click.
+
+Project signatures are checked for italic styling without full paths, UTF-16 offsets, each multipart message, project notices outside topics, and migration of older SQLite outbox schemas. The recovery tests never delete or rebind real user topics or mutate real Codex sessions.

@@ -4,6 +4,7 @@
 
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
 - `bridge.ts`: project/topic bindings, owner authentication, completion filtering, input routing, questions and explicit one-time approvals. It does not own native sandbox policy.
+- `topics.ts`: durable topic creation and repair, ambiguous-result handling, rate-limit scheduling and owner-directed binding/retry. It never changes native execution policy or starts a turn.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.
 - `format.ts`: CommonMark/GFM parsing into Telegram text entities, safe external links and UTF-16-aware splitting. Raw HTML is displayed literally; code never nests inside formatting entities.
 - `state.ts`: SQLite bindings, update IDs, delivery status and a local singleton lock. Unknown users' payloads are not stored.
@@ -15,6 +16,8 @@ Native I/O and Telegram I/O have real adapters and test adapters. Most behaviour
 
 The relay asks the existing daemon for loaded thread IDs, reads metadata and selects root interactive sessions (`cli`, `vscode`, `appServer`). Subagents, ephemeral contexts and not-yet-materialized sessions are excluded. Only locally selected project roots are eligible.
 
+If metadata, resume or history fails for one session, discovery continues for healthy sessions and retries the unavailable session later. Sessions missing from a successful discovery are detached locally. Uncertain native transport failures propagate to the connection loop instead of being treated as local session failures.
+
 Attachment calls `thread/resume` with only `threadId` and `excludeTurns`. A Telegram instruction calls `turn/start` with only its thread ID and text, or `turn/steer` with the expected active turn ID. This intentionally inherits native policy. A rejected or ambiguous steer is never reinterpreted as permission to start another turn.
 
 On first attachment, existing completed history is used only as a baseline. It is not posted to Telegram. History requests use display summaries, excluding large historical tool outputs. Reconnection catches up at most the ten most recent turns for each saved binding. A long outage can therefore leave older missed completions available only in the native terminal. This is a bounded recovery window, not a full transcript mirror.
@@ -22,6 +25,10 @@ On first attachment, existing completed history is used only as a baseline. It i
 ## Telegram identity and topics
 
 Setup checks getMe/private topics and refuses existing webhooks. It accepts a private `/start RANDOM_CODE` generated locally and saves the sender's ID. Runtime requires the same sender ID and private chat ID. One session maps to one topic, with a session-ID suffix to distinguish parallel sessions in the same directory.
+
+Topic creation has a durable operation record written before the request. Interrupted `creating` records become `uncertain` at startup. Unknown network/server outcomes are never automatically retried; definite rejections require explicit repair, and 429 responses defer retries until `retry_after`. An owner can bind an already created topic with `/bind ID` from that private topic or explicitly reattempt creation with `/repair ID`. Recovery rejects ambiguous session prefixes, ignored/out-of-root sessions, occupied topics and concurrent creation. Healthy bindings are not silently replaced.
+
+A definite missing-topic error blocks that topic's unsent output while other topics continue. A replacement is created for a loaded session through the same journaled path. Installation atomically changes the binding, transfers blocked/pending non-prompt output and retires old pending prompt controls. Already sent or ambiguous deliveries are not replayed. The native session is reattached without policy overrides; any replayed prompts get fresh topic-scoped controls. Deleting a topic is therefore not an instruction to disable its loaded session; use `sessions ignore` first when removing it permanently.
 
 One process consumes getUpdates. The owner check happens before creating work or journaling an input. Input IDs and the polling offset are durable. A crash between sending a native request and receiving acknowledgement is marked uncertain; it is not replayed. There is no exactly-once guarantee across Telegram and native Codex.
 
@@ -34,6 +41,8 @@ The local `sessions ignore/unignore` commands resolve an exact ID or a unique pr
 Instructions (including steering), completed question answers and approval decisions durably record that an assistant reply is awaited before writing to Codex. This captures replies arriving before the RPC result. The first commentary message in the matching turn is queued once per Telegram update, then the wait is consumed. Questions and final answers also consume the wait. Failed writes clear it, and a reconnect preserves it without replaying commentary already delivered. No canned acceptance/decision/answer messages substitute for the assistant's words. If Codex emits no initial commentary, the next visible response is its question or final answer.
 
 Assistant messages are rendered with explicit Telegram entities instead of `parse_mode`: CommonMark differs from Telegram MarkdownV2. Entities use UTF-16 offsets and are clipped/rebased for each message. Formatting is bounded to 100 entities per chunk without removing text. Native approval payloads and questions stay verbatim so Markdown does not conceal command or diff characters. Local file and local/private preview URLs retain their label and target as text because Telegram can reject localhost text-link entities. A definite HTTP 400 entity error retries only that rejected chunk without entities, retaining link targets and re-splitting if necessary; accepted chunks are never replayed. Network ambiguity, missing-topic errors and other failures do not trigger this fallback.
+
+Every outgoing part includes an italic `» project-name` signature. Project context is captured with queued output so project-specific notices retain their identity outside topics; general notices identify the relay. The signature uses only the last path component and sanitizes control characters. Chunk budgets include the signature, and body entity offsets are shifted without overlapping its italic span. Existing outbox schemas migrate without losing queued output; legacy queued messages can derive project identity from their binding.
 
 ## Initial release limits
 

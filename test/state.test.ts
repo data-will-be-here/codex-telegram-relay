@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { State } from '../src/state.js';
 import { Outbox, TelegramClient, TelegramError, splitMessage } from '../src/telegram.js';
-import { FakeTelegram, temporary } from './helpers.js';
+import { FakeTelegram, temporary, messageBody } from './helpers.js';
+import { projectHeader } from '../src/format.js';
+import { DatabaseSync } from 'node:sqlite';
+import { string, array, object } from '../src/types.js';
 
 test('restart preserves bindings and marks dispatched inputs/sends uncertain without replay', () => {
   const temp = temporary(); const home = join(temp.dir, 'home');
@@ -42,6 +45,49 @@ test('message mode defaults to all and persists across restarts', () => {
   } finally { state.close(); temp.close(); }
 });
 
+test('a crash during topic creation leaves an uncertain operation that cannot create a duplicate after restart', () => {
+  const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
+  try {
+    const attempt = state.beginTopic('thread-a', temp.dir, 'Project')!;
+    assert.equal(attempt.status, 'creating');
+    state.close(); state = new State(home);
+    assert.equal(state.topicOperation('thread-a')?.status, 'uncertain');
+    assert.equal(state.beginTopic('thread-a', temp.dir, 'Project'), undefined);
+    state.installTopic('thread-a', 101, temp.dir, 'Project');
+    assert.equal(state.topicOperation('thread-a'), undefined);
+    assert.equal(state.binding('thread-a')?.topicId, 101);
+  } finally { state.close(); temp.close(); }
+});
+
+test('missing-topic recovery blocks new output, cancels old approval buttons and preserves other topics', () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home'));
+  try {
+    state.bind('a', 101, temp.dir, 'A'); state.bind('b', 102, temp.dir, 'B');
+    state.baseline('a', 'previous-turn');
+    state.enqueue('final/a/1', 101, 'First saved answer');
+    state.sending(state.next()!.id);
+    state.enqueue('prompt/old/approval', 101, 'Old approval', { inline_keyboard: [[{ text: 'Allow', callback_data: 'old' }]] });
+    state.enqueue('final/b/1', 102, 'Unrelated answer');
+    state.missingTopic(state.binding('a')!);
+    const attempt = state.beginTopic('a', temp.dir, 'A')!;
+    state.enqueue('assistant/a/2', 101, 'Arrived while creating replacement');
+    state.missingTopic(state.binding('a')!);
+    assert.equal(state.topicOperation('a')?.attempt, attempt.attempt);
+    assert.equal(state.topicOperation('a')?.status, 'creating');
+    assert.equal(state.next()?.topicId, 102);
+    state.delivered(state.next()!.id, 1);
+    assert.equal(state.next(), undefined);
+    state.installTopic('a', 103, temp.dir, 'A');
+    assert.equal(state.binding('a')?.lastTurn, 'previous-turn');
+    const recovered: string[] = [];
+    for (let row = state.next(); row; row = state.next()) {
+      assert.equal(row.topicId, 103); assert.equal(row.markup, null);
+      recovered.push(row.text); state.delivered(row.id, 1);
+    }
+    assert.deepEqual(recovered, ['First saved answer', 'Arrived while creating replacement']);
+  } finally { state.close(); temp.close(); }
+});
+
 test('Telegram errors unrelated to formatting are not retried as plain text', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); let attempts = 0;
   try {
@@ -65,8 +111,9 @@ test('format fallback on a later chunk never replays accepted chunks and keeps b
     await new Outbox(state, t, 42, 0).flushOne();
     const messages = t.sent();
     assert.equal(messages.length, 3);
-    assert.equal(messages[0]!.text, 'x'.repeat(3500));
-    assert.equal(messages[2]!.text, 'x'.repeat(500));
+    const limit = 3500 - projectHeader().length - 2;
+    assert.equal(messageBody(messages[0]!), 'x'.repeat(limit));
+    assert.equal(messageBody(messages[2]!), 'x'.repeat(4000 - limit));
     assert.equal(messages[2]!.entities, undefined);
     assert.ok(messages[2]!.reply_markup);
     assert.equal(state.uncertainCount(), 0);
@@ -105,7 +152,7 @@ test('a definite Telegram entity rejection falls back to readable text with link
     assert.equal(t.sent().length, 2);
     assert.ok(t.sent()[0]!.entities);
     assert.equal(t.sent()[1]!.entities, undefined);
-    assert.equal(t.sent()[1]!.text, 'Result: docs (https://example.com/docs).');
+    assert.equal(messageBody(t.sent()[1]!), 'Result: docs (https://example.com/docs).');
     assert.equal(state.uncertainCount(), 0);
   } finally { state.close(); temp.close(); }
 });
@@ -116,11 +163,15 @@ test('final answers send Telegram formatting entities instead of raw Markdown', 
     state.enqueue('final/a/formatted', 1, '🎁 **Готово**: [документация](https://example.com/docs) и `npm test`.');
     await new Outbox(state, t, 42, 0).flushOne();
     const sent = t.sent()[0]!;
-    assert.equal(sent.text, '🎁 Готово: документация и npm test.');
+    assert.equal(messageBody(sent), '🎁 Готово: документация и npm test.');
+    const header = projectHeader();
     assert.deepEqual(sent.entities, [
+      { type: 'italic', offset: 0, length: header.length },
+      ...[
       { type: 'bold', offset: 3, length: 6 },
       { type: 'text_link', offset: 11, length: 12, url: 'https://example.com/docs' },
       { type: 'code', offset: 26, length: 8 },
+      ].map(e => ({ ...e, offset: e.offset + header.length + 2 })),
     ]);
     assert.equal(sent.parse_mode, undefined);
   } finally { state.close(); temp.close(); }
@@ -137,5 +188,38 @@ test('long Unicode output is split intact and buttons appear only on its last me
     assert.equal(t.sent().length, 3);
     assert.equal(t.sent()[0]!.reply_markup, undefined);
     assert.ok(t.sent().at(-1)!.reply_markup);
+  } finally { state.close(); temp.close(); }
+});
+
+test('each long message part includes its italic project signature and keeps formatting within limits', async () => {
+  const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
+  try {
+    state.bind('a', 101, join(temp.dir, 'project-a'), 'A');
+    const text = '🎁'.repeat(4000);
+    state.enqueue('final/a/header', 101, text);
+    await new Outbox(state, t, 42, 0).flushOne();
+    const sent = t.sent();
+    assert.equal(sent.map(messageBody).join(''), text);
+    for (const message of sent) {
+      assert.ok(string(message.text).startsWith('» project-a\n\n'));
+      assert.ok(string(message.text).length <= 3500);
+      const header = object(array(message.entities)[0]);
+      assert.equal(header.type, 'italic'); assert.equal(header.offset, 0); assert.equal(header.length, '» project-a'.length);
+    }
+    state.enqueue('topic-problem/synthetic', null, 'Needs attention', null, join(temp.dir, 'project-a'));
+    await new Outbox(state, t, 42, 0).flushOne();
+    assert.equal(t.sent().at(-1)!.text, '» project-a\n\nNeeds attention');
+  } finally { state.close(); temp.close(); }
+});
+
+test('older outbox schemas migrate without losing queued answers or their project identity', async () => {
+  const temp = temporary(); const db = new DatabaseSync(join(temp.dir, 'state.sqlite'));
+  db.exec("CREATE TABLE outbox(id INTEGER PRIMARY KEY,key TEXT UNIQUE,topicId INTEGER,text TEXT,markup TEXT,status TEXT DEFAULT 'pending',messageId INTEGER,at INTEGER); INSERT INTO outbox(key,topicId,text,at) VALUES('final/a/legacy',101,'Legacy answer',0)");
+  db.close();
+  const state = new State(temp.dir); const t = new FakeTelegram();
+  try {
+    state.bind('a', 101, join(temp.dir, 'legacy-project'), 'Legacy');
+    await new Outbox(state, t, 42, 0).flushOne();
+    assert.equal(t.sent()[0]!.text, '» legacy-project\n\nLegacy answer');
   } finally { state.close(); temp.close(); }
 });

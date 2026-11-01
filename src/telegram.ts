@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State } from './state.js';
-import { formatMessages, withoutFormatting } from './format.js';
+import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
@@ -43,13 +43,15 @@ export class Outbox {
     this.state.sending(delivery.id);
     try {
       // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.
-      const chunks = formatMessages(delivery.text, /^(?:final|reply|assistant)\//u.test(delivery.key));
+      const project = delivery.projectCwd ?? binding?.cwd;
+      const limit = 3500 - projectHeader(project).length - 2;
+      const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:final|reply|assistant)\//u.test(delivery.key), limit);
       let messageId: number | null = null;
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;
-        const { text, entities } = chunk;
+        const { text, entities } = withProjectHeader(chunk, project);
         const params: Json = { chat_id: this.ownerId, text };
-        if (entities.length) params.entities = entities;
+        if (!chunk.plain && entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
         if (index === chunks.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
         let retries = 0;
@@ -63,15 +65,19 @@ export class Outbox {
           }
         } catch (error) {
           // A definite 400 entity rejection sent no message. Retry only that chunk without markup.
-          if (!(error instanceof TelegramError) || error.status !== 400 || !entities.length ||
+          if (!(error instanceof TelegramError) || error.status !== 400 || chunk.plain ||
               !/can't parse entities|entity.*(?:URL|offset|length|invalid)|wrong HTTP URL/iu.test(error.message)) throw error;
-          chunks.splice(index, 1, ...formatMessages(withoutFormatting(chunk), false));
+          chunks.splice(index, 1, ...formatMessages(withoutFormatting(chunk), false, limit).map(part => ({ ...part, plain: true })));
           index--; continue;
         }
         if (this.interval > 0) await delay(this.interval);
       }
       this.state.delivered(delivery.id, messageId);
     } catch (error) {
+      if (binding && error instanceof TelegramError && error.status === 400 && /message thread not found|message_thread_id.*invalid|TOPIC_DELETED|TOPIC_ID_INVALID/iu.test(error.message)) {
+        this.state.missingTopic(binding);
+        return true;
+      }
       // Neither timeouts nor partial multi-part sends authorize blindly replaying a message.
       this.state.uncertain(delivery.id);
       throw error;

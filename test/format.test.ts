@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatMessages, renderMarkdown } from '../src/format.js';
+import { formatMessages, renderMarkdown, projectHeader, withProjectHeader } from '../src/format.js';
 
 test('nested Markdown, code and literal HTML produce only Telegram-compatible entities', () => {
   const source = '# Result\n\n**bold *italic* and `a < b && c`**\n\n```ts\nconst x = "**literal**";\n```\n\n<script>alert(1)</script>';
@@ -61,4 +61,15 @@ test('excessive formatting is bounded without dropping text', () => {
   const chunks = formatMessages(source, true);
   assert.equal(chunks.map(c => c.text).join(''), renderMarkdown(source).text);
   assert.ok(chunks.every(c => c.entities.length <= 100));
+});
+
+test('project signatures show only an italic project name and preserve Unicode entity offsets', () => {
+  assert.equal(projectHeader('D:\\code\\tgmcp'), '» tgmcp');
+  assert.equal(projectHeader('/home/user/code/gifts_show/'), '» gifts_show');
+  const message = withProjectHeader(renderMarkdown('🎁 **Готово**'), 'D:\\code\\tgmcp');
+  assert.equal(message.text, '» tgmcp\n\n🎁 Готово');
+  assert.deepEqual(message.entities, [
+    { type: 'italic', offset: 0, length: 7 },
+    { type: 'bold', offset: 12, length: 6 },
+  ]);
 });

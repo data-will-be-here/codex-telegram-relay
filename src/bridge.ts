@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { basename } from 'node:path';
 import { allowedDirectory, type Config } from './config.js';
+import { RpcError } from './codex.js';
 import { State } from './state.js';
+import { Topics } from './topics.js';
 import { array, integer, object, string, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram } from './types.js';
 
 interface Prompt {
@@ -29,34 +30,43 @@ export class Bridge {
   private generation = randomUUID();
   private discovering = false;
   private startedAt = Date.now();
+  private topics: Topics;
 
-  constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram) {}
+  constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram) { this.topics = new Topics(config, state, telegram); }
 
   async discover(): Promise<void> {
     if (this.discovering) return;
     this.discovering = true;
     try {
-      for (const session of await this.codex.list()) {
-        if (this.config.ignoredThreadIds?.includes(session.id) || this.attached.has(session.id) || !allowedDirectory(session.cwd, this.config.roots)) continue;
-        let binding = this.state.binding(session.id);
-        if (!binding) {
-          const title = `${basename(session.cwd)} · ${session.id.slice(0, 8)}`.slice(0, 128);
-          const topic = object(await this.telegram.call('createForumTopic', { chat_id: this.config.ownerId, name: title }));
-          const topicId = integer(topic.message_thread_id);
-          if (!topicId) throw new Error('Telegram did not return a topic identifier.');
-          this.state.bind(session.id, topicId, session.cwd, title);
-          binding = this.state.binding(session.id)!;
+      const sessions = await this.codex.list();
+      const loaded = new Set(sessions.map(s => s.id));
+      for (const id of this.attached) if (!loaded.has(id)) this.attached.delete(id);
+      for (const session of sessions) {
+        if (this.config.ignoredThreadIds?.includes(session.id) || !allowedDirectory(session.cwd, this.config.roots)) { this.attached.delete(session.id); continue; }
+        try {
+          const previous = this.state.binding(session.id);
+          let binding = await this.topics.ensure(session);
+          if (!binding) { this.attached.delete(session.id); continue; }
+          if (this.attached.has(session.id) && previous?.topicId === binding.topicId) continue;
+          if (previous && previous.topicId !== binding.topicId) {
+            for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === session.id) await this.clearPrompt(prompt);
+          }
+          if (binding.lastTurn === null) {
+            const completed = (await this.codex.turns(session.id)).find(t => t.status !== 'inProgress');
+            const createdWhileRunning = session.createdAt !== undefined && session.createdAt * 1000 >= this.startedAt;
+            this.state.baseline(session.id, createdWhileRunning ? '-' : string(completed?.id) || '-');
+            binding = this.state.binding(session.id)!;
+          }
+          this.attached.add(session.id);
+          await this.codex.attach(session.id);
+          // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
+          await this.catchUp(binding);
+        } catch (error) {
+          this.attached.delete(session.id);
+          if (error instanceof RpcError && error.uncertain) throw error;
+          this.state.enqueue(`session-unavailable/${this.generation}/${session.id}`, null,
+            `Codex session ${session.id.slice(0, 8)} is temporarily unavailable. Other sessions remain connected; this session will be retried automatically.`, null, session.cwd);
         }
-        if (binding.lastTurn === null) {
-          const completed = (await this.codex.turns(session.id)).find(t => t.status !== 'inProgress');
-          const createdWhileRunning = session.createdAt !== undefined && session.createdAt * 1000 >= this.startedAt;
-          this.state.baseline(session.id, createdWhileRunning ? '-' : string(completed?.id) || '-');
-          binding = this.state.binding(session.id)!;
-        }
-        await this.codex.attach(session.id);
-        this.attached.add(session.id);
-        // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
-        await this.catchUp(binding);
       }
     } finally { this.discovering = false; }
   }
@@ -206,12 +216,25 @@ export class Bridge {
     const text = string(message.text).trim();
     if (!text) { if (message.document || message.voice || message.photo) this.notice(topicId, 'This version supports text only.'); return; }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
     }
-    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (/^\/(?:bind|repair)(?:\s|$)/u.test(text)) {
+      const [command, prefix, extra] = text.split(/\s+/u);
+      if (!prefix || extra || (command === '/bind' && topicId === null)) { this.notice(topicId, 'Use /bind SESSION_ID inside the existing topic, or /repair SESSION_ID to explicitly retry creation.'); return; }
+      try {
+        const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
+        if (binding) {
+          this.attached.delete(binding.threadId);
+          for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId) await this.clearPrompt(prompt);
+          this.notice(topicId, `Topic bound to session ${binding.threadId.slice(0, 8)}. The relay will reconnect it automatically; no Codex instruction was sent.`);
+        }
+      } catch (error) { this.notice(topicId, string(object(error).message) || 'Topic recovery failed.'); }
+      return;
+    }
     if (/^\/mode(?:\s|$)/u.test(text)) {
       const mode = text.split(/\s+/u)[1];
       if (mode !== undefined && mode !== 'all' && mode !== 'compact') { this.notice(topicId, 'Use /mode all or /mode compact.'); return; }

@@ -56,7 +56,7 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.6' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.7' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -102,7 +102,13 @@ export class CodexClient extends EventEmitter implements Codex {
     const loaded = array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string').slice(0, 64);
     const result: Session[] = [];
     for (const id of loaded) {
-      const thread = await this.read(id);
+      let thread: Json;
+      try { thread = await this.read(id); }
+      catch (error) {
+        if (error instanceof RpcError && error.uncertain) throw error;
+        this.emit('sessionUnavailable', id);
+        continue;
+      }
       if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
       const session: Session = { id, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
       if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;

@@ -4,7 +4,12 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { type Codex, type Json, type Session, type Telegram, type MessageMode } from '../src/types.js';
+import { string, type Codex, type Json, type Session, type Telegram, type MessageMode } from '../src/types.js';
+
+export function messageBody(message: Json): string {
+  const text = string(message.text);
+  return text.startsWith('» ') ? text.slice(text.indexOf('\n\n') + 2) : text;
+}
 
 export function temporary(): { dir: string; close: () => void } {
   const base = realpathSync(tmpdir());

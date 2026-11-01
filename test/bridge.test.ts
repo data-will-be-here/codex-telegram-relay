@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, message, click } from './helpers.js';
+import { fixture, message, click, messageBody } from './helpers.js';
 import { Bridge } from '../src/bridge.js';
-import { Outbox } from '../src/telegram.js';
+import { Outbox, TelegramError } from '../src/telegram.js';
+import { RpcError } from '../src/codex.js';
 import { array, object, string } from '../src/types.js';
 
 test('two projects get distinct persistent topics; idle messages target the matching native thread', async () => {
@@ -55,7 +56,7 @@ test('Telegram input receives the actual first assistant reply once, without a c
     await f.drain();
     assert.equal(f.telegram.sent().length, 1);
     assert.equal(f.telegram.sent()[0]!.message_thread_id, 101);
-    assert.equal(f.telegram.sent()[0]!.text, 'Понял, проверю причину.');
+    assert.equal(messageBody(f.telegram.sent()[0]!), 'Понял, проверю причину.');
     assert.ok(f.telegram.sent()[0]!.entities);
     f.codex.sessions[1]!.status = 'active';
     f.codex.histories.set('thread-b', [{ id: 'busy-turn', status: 'inProgress' }]);
@@ -65,7 +66,7 @@ test('Telegram input receives the actual first assistant reply once, without a c
     await f.drain();
     assert.equal(f.telegram.sent().length, 2);
     assert.equal(f.telegram.sent()[1]!.message_thread_id, 102);
-    assert.equal(f.telegram.sent()[1]!.text, 'Учту изменение.');
+    assert.equal(messageBody(f.telegram.sent()[1]!), 'Учту изменение.');
     f.codex.failSteer = true;
     await assert.rejects(f.bridge.update(message(3, 102, 'Another direction')));
     await f.drain();
@@ -85,7 +86,7 @@ test('a first reply arriving before the native RPC result is preserved, then onl
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'fast-turn', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Готово.' }] } });
     await f.drain();
     assert.equal(f.telegram.sent().length, 2);
-    assert.equal(f.telegram.sent()[0]!.text, 'Проверю это.');
+    assert.equal(messageBody(f.telegram.sent()[0]!), 'Проверю это.');
     assert.match(string(f.telegram.sent()[1]!.text), /Готово/u);
     assert.equal(f.state.reply('thread-a'), undefined);
   } finally { f.close(); }
@@ -102,7 +103,7 @@ test('reconnecting before the first reply retains the wait but does not replay c
     await bridge.notification('item/completed', reply);
     await f.drain();
     assert.equal(f.telegram.sent().length, 1);
-    assert.equal(f.telegram.sent()[0]!.text, 'Первый ответ.');
+    assert.equal(messageBody(f.telegram.sent()[0]!), 'Первый ответ.');
   } finally { f.close(); }
 });
 
@@ -154,9 +155,9 @@ test('all mode relays every assistant message once while excluding tools and sys
     await reconnect.notification('item/completed', first);
     await f.drain();
     assert.equal(f.telegram.sent().length, 3);
-    assert.equal(f.telegram.sent()[0]!.text, 'Начинаю проверку.');
+    assert.equal(messageBody(f.telegram.sent()[0]!), 'Начинаю проверку.');
     assert.ok(f.telegram.sent()[0]!.entities);
-    assert.equal(f.telegram.sent()[1]!.text, 'Нашёл причину, исправляю.');
+    assert.equal(messageBody(f.telegram.sent()[1]!), 'Нашёл причину, исправляю.');
     assert.match(string(f.telegram.sent()[2]!.text), /Готово/u);
     assert.ok(f.telegram.sent().every(s => s.message_thread_id === 101));
     assert.equal(f.codex.writes.length, 0);
@@ -177,8 +178,8 @@ test('only the owner can switch message modes; changes apply immediately without
     await f.bridge.update(message(4, 101, '/mode invalid'));
     assert.equal(f.state.messageMode(), 'all');
     await f.drain();
-    assert.ok(f.telegram.sent().some(s => s.text === 'Visible in all'));
-    assert.ok(f.telegram.sent().every(s => s.text !== 'Hidden in compact'));
+    assert.ok(f.telegram.sent().some(s => messageBody(s) === 'Visible in all'));
+    assert.ok(f.telegram.sent().every(s => messageBody(s) !== 'Hidden in compact'));
     assert.equal(f.codex.writes.length, 0);
   } finally { f.close(); }
 });
@@ -399,5 +400,106 @@ test('ignored sessions preserve their topics but never attach, receive input or 
     assert.ok(f.telegram.sent().every(s => s.message_thread_id !== 101));
     assert.ok(f.telegram.sent().some(s => s.message_thread_id === 102));
     assert.equal(f.state.uncertainCount(), 0);
+  } finally { f.close(); }
+});
+
+test('ambiguous topic creation is not repeated; the owner can bind the already created topic', async () => {
+  const f = await fixture();
+  try {
+    f.codex.sessions.push({ id: 'thread-new', cwd: f.projectA, name: 'New', status: 'idle' });
+    const call = f.telegram.call.bind(f.telegram); let loseResponse = true;
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'createForumTopic' && loseResponse) { loseResponse = false; throw new TelegramError('Created, response lost', 0); }
+      return result;
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { await new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover(); } catch { /* Old behaviour throws; regression asserts no duplicate. */ }
+    }
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 3);
+    assert.equal(f.state.binding('thread-new'), undefined);
+    await f.bridge.update(message(1, 103, '/bind thread-new', 99));
+    assert.equal(f.state.binding('thread-new'), undefined);
+    await f.bridge.update(message(2, 103, '/bind thread-new'));
+    assert.equal(f.state.binding('thread-new')?.topicId, 103);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 3);
+  } finally { f.close(); }
+});
+
+test('a missing Telegram topic is recreated and its undelivered answer moves to the replacement topic', async () => {
+  const f = await fixture();
+  try {
+    f.state.enqueue('final/thread-a/deleted', 101, 'Saved answer');
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && params.message_thread_id === 101) throw new TelegramError('Bad Request: message thread not found', 400);
+      return call(method, params);
+    };
+    const outbox = new Outbox(f.state, f.telegram, 42, 0);
+    try { await outbox.flushOne(); } catch { /* Old behaviour marks it uncertain and never repairs. */ }
+    await f.bridge.discover(); await f.drain();
+    assert.equal(f.state.binding('thread-a')?.topicId, 103);
+    assert.ok(f.telegram.sent().some(s => s.message_thread_id === 103 && messageBody(s) === 'Saved answer'));
+    assert.equal(f.state.uncertainCount(), 0);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('a local attach error does not disconnect healthy sessions, but transport failure still reconnects', async () => {
+  const f = await fixture();
+  try {
+    const attach = f.codex.attach.bind(f.codex);
+    f.codex.attach = async id => { if (id === 'thread-a') throw new RpcError('Cannot resume this thread', false); return attach(id); };
+    const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+    await bridge.discover();
+    await bridge.update(message(1, 102, 'Still available'));
+    assert.equal(f.codex.writes.length, 1);
+    f.codex.attach = async () => { throw new RpcError('Connection lost', true); };
+    await assert.rejects(new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover(), /Connection lost/u);
+  } finally { f.close(); }
+});
+
+test('ambiguous replacement pauses output until binding; other topics continue and old approval buttons stay inert', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add('approval');
+    const request = { id: 'approval', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command: 'echo synthetic', availableDecisions: ['accept', 'decline'] } };
+    await f.bridge.request(request); await f.drain();
+    const oldData = string(object(array(array(object(f.telegram.sent()[0]!.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    f.telegram.calls.length = 0;
+    f.state.enqueue('final/a/restore', 101, 'Saved A');
+    const call = f.telegram.call.bind(f.telegram); let loseResponse = true;
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && params.message_thread_id === 101) throw new TelegramError('Bad Request: message thread not found', 400);
+      const result = await call(method, params);
+      if (method === 'createForumTopic' && loseResponse) { loseResponse = false; throw new TelegramError('Replacement response lost', 0); }
+      return result;
+    };
+    const outbox = new Outbox(f.state, f.telegram, 42, 0);
+    await outbox.flushOne();
+    await f.bridge.discover(); await f.bridge.discover();
+    f.state.enqueue('assistant/a/new', 101, 'New A');
+    f.state.enqueue('final/b/healthy', 102, 'Healthy B');
+    await f.drain();
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 1);
+    assert.ok(f.telegram.sent().some(s => messageBody(s) === 'Healthy B'));
+    assert.ok(f.telegram.sent().every(s => messageBody(s) !== 'Saved A' && messageBody(s) !== 'New A'));
+    await f.bridge.update(message(20, 103, '/bind thread-a'));
+    await f.bridge.update(click(21, oldData, 101));
+    assert.equal(f.codex.writes.length, 0);
+    const attach = f.codex.attach.bind(f.codex);
+    f.codex.attach = async id => { if (id === 'thread-a') await f.bridge.request(request); return attach(id); };
+    await f.bridge.discover(); await f.drain();
+    assert.ok(f.telegram.sent().some(s => s.message_thread_id === 103 && messageBody(s) === 'Saved A'));
+    assert.ok(f.telegram.sent().some(s => s.message_thread_id === 103 && messageBody(s) === 'New A'));
+    const restoredApproval = f.telegram.sent().find(s => s.message_thread_id === 103 && s.reply_markup);
+    assert.ok(restoredApproval);
+    const newData = string(object(array(array(object(restoredApproval.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    assert.notEqual(newData, oldData);
+    await f.bridge.update(click(22, oldData, 103));
+    assert.equal(f.codex.writes.length, 0);
+    await f.bridge.update(click(23, newData, 103));
+    assert.equal(f.codex.writes.length, 1);
+    assert.equal(f.codex.writes[0]!.method, 'respond');
   } finally { f.close(); }
 });

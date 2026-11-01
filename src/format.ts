@@ -10,6 +10,20 @@ export interface Entity {
 }
 export interface FormattedText { text: string; entities: Entity[]; }
 
+export function projectHeader(cwd?: string | null): string {
+  const name = (cwd?.split(/[\\/]/u).filter(Boolean).at(-1) || 'codex-telegram-relay').replace(/[\x00-\x1f\x7f]/gu, ' ');
+  const chars = Array.from(name);
+  return '» ' + (chars.length > 80 ? chars.slice(0, 79).join('') + '…' : name);
+}
+
+export function withProjectHeader(message: FormattedText, cwd?: string | null): FormattedText {
+  const header = projectHeader(cwd); const prefix = header + '\n\n';
+  return { text: prefix + message.text, entities: [
+    { type: 'italic', offset: 0, length: header.length },
+    ...message.entities.slice(0, 99).map(e => ({ ...e, offset: e.offset + prefix.length })),
+  ] };
+}
+
 function linkable(url: URL): boolean {
   if (url.protocol === 'mailto:') return true;
   if (!['https:', 'http:'].includes(url.protocol)) return false;

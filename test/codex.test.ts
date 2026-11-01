@@ -71,3 +71,15 @@ test('project roots use path containment rather than a shared string prefix', ()
     assert.throws(() => validateBinary('codex.cmd'));
   } finally { t.close(); }
 });
+
+test('a session disappearing during discovery does not hide healthy sessions', async () => {
+  const c = new CodexClient();
+  c.call = async () => ({ data: ['gone', 'healthy'] });
+  c.read = async id => {
+    if (id === 'gone') throw new RpcError('Thread no longer loaded', false);
+    return { id, source: 'cli', cwd: process.cwd(), path: '/synthetic', status: { type: 'idle' } };
+  };
+  assert.deepEqual((await c.list()).map(s => s.id), ['healthy']);
+  c.read = async () => { throw new RpcError('Transport disconnected', true); };
+  await assert.rejects(c.list(), /Transport disconnected/u);
+});
