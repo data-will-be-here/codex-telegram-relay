@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Present structured native questions with numbered choices, descriptions, concise inline buttons and progress across multiple questions.
+- Keep the free-text answer path alongside buttons; reject stale, foreign-user and wrong-topic callbacks.
+- Leave secret, oversized, ambiguous or unsupported questions in the terminal instead of displaying incomplete choices.
+- Document the distinction between structured native questions and questions written in ordinary assistant prose.
+
 ## 0.1.2
 
 - Render completed Markdown answers using Telegram entities, including emphasis, links and code with Unicode-safe splitting.

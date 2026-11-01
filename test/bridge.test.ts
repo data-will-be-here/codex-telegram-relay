@@ -150,6 +150,55 @@ test('multi-question replies preserve native IDs and old buttons cannot answer t
   } finally { f.close(); }
 });
 
+test('question cards list numbered choices with descriptions, concise buttons and a free-text alternative', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add('q-card');
+    await f.bridge.request({ id: 'q-card', method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', questions: [
+      { id: 'delivery', header: 'Delivery', question: 'How should it work?', options: [
+        { label: 'Local bot', description: 'Runs on your computer; no server required.' },
+        { label: 'Hosted bot', description: 'Requires a server that remains online.' },
+      ] },
+      { id: 'detail', question: 'Any additional requirements?' },
+    ] } });
+    await f.drain();
+    const first = f.telegram.sent()[0]!;
+    assert.match(string(first.text), /1\/2/u);
+    assert.match(string(first.text), /1\. Local bot\nRuns on your computer/u);
+    assert.match(string(first.text), /2\. Hosted bot\nRequires a server/u);
+    const buttons = array(object(first.reply_markup).inline_keyboard).flatMap(array).map(object);
+    assert.deepEqual(buttons.map(b => b.text), ['1 · Local bot', '2 · Hosted bot', 'Type an answer']);
+    const data = string(buttons[0]!.callback_data);
+    assert.ok(Buffer.byteLength(data) <= 64);
+    await f.bridge.update(click(1, data, 102));
+    await f.bridge.update(click(2, data, 101, 99));
+    assert.equal(f.codex.writes.length, 0);
+    await f.bridge.update(click(3, data));
+    await f.drain();
+    assert.ok(f.telegram.sent().some(s => string(s.text).includes('2/2')));
+    await f.bridge.update(message(4, 101, 'Support my own bot'));
+    assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'q-card', result: { answers: {
+      delivery: { answers: ['Local bot'] }, detail: { answers: ['Support my own bot'] },
+    } } } }]);
+  } finally { f.close(); }
+});
+
+test('questions that cannot be displayed completely stay in the terminal without partial answer buttons', async () => {
+  const f = await fixture();
+  try {
+    for (const [index, question] of [
+      { id: 'many', question: 'Pick', options: Array.from({ length: 11 }, (_, i) => ({ label: String(i) })) },
+      { id: 'large', question: 'x'.repeat(19_000) },
+      { id: 'secret', question: 'Secret?', isSecret: true },
+    ].entries()) {
+      await f.bridge.request({ id: 'unsupported-' + index, method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', questions: [question] } });
+    }
+    await f.drain();
+    assert.ok(f.telegram.sent().every(s => !s.reply_markup));
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
 test('remote settings commands are not forwarded to Codex', async () => {
   const f = await fixture();
   try {

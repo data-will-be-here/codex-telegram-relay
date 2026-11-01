@@ -124,7 +124,11 @@ export class Bridge {
     };
     if (request.method === 'item/tool/requestUserInput') {
       prompt.questions = array(request.params.questions).map(object);
-      if (prompt.questions.length === 0 || prompt.questions.length > 10 || prompt.questions.some(q => !string(q.id) || !string(q.question) || q.isSecret === true)) {
+      if (prompt.questions.length === 0 || prompt.questions.length > 10 ||
+          new Set(prompt.questions.map(q => string(q.id))).size !== prompt.questions.length ||
+          prompt.questions.some(q => !string(q.id) || !string(q.question) || q.isSecret === true ||
+            JSON.stringify(q).length > 18_000 || array(q.options).length > 10 ||
+            array(q.options).some(o => !string(object(o).label)))) {
         this.attention(binding, request, 'A native question needs the terminal (unsupported or sensitive input).'); return;
       }
       this.prompts.set(prompt.token, prompt);
@@ -258,9 +262,12 @@ export class Bridge {
   private showQuestion(prompt: Prompt, repeat = false): void {
     const question = prompt.questions[prompt.index]!;
     const options = array(question.options).map(object);
-    const rows = options.slice(0, 10).map((o, i) => [{ text: string(o.label).slice(0, 60), callback_data: `r:${prompt.token}:${i}` }]);
+    const rows = options.slice(0, 10).map((o, i) => [{ text: Array.from(`${i + 1} · ${string(o.label)}`).slice(0, 60).join(''), callback_data: `r:${prompt.token}:${i}` }]);
     rows.push([{ text: 'Type an answer', callback_data: `r:${prompt.token}:t` }]);
-    const text = `❓ ${string(question.header) || 'Codex needs your answer'}\n\n${string(question.question)}\n\n` + options.map(o => `${string(o.label)}${o.description ? ' — ' + string(o.description) : ''}`).join('\n');
+    const progress = prompt.questions.length > 1 ? ` · ${prompt.index + 1}/${prompt.questions.length}` : '';
+    const choices = options.map((o, i) => `${i + 1}. ${string(o.label)}${o.description ? '\n' + string(o.description) : ''}`).join('\n\n');
+    const text = `❓ ${string(question.header) || 'Codex needs your answer'}${progress}\n\n${string(question.question)}` +
+      (choices ? '\n\n' + choices : '') + '\n\nChoose a button or write your own answer in this topic.';
     this.state.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows });
   }
   private async answer(prompt: Prompt, text: string): Promise<void> {

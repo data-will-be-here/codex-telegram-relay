@@ -23,6 +23,7 @@ Your Telegram bot / private project topics
 - Replies immediately steer a running turn or start the next turn when idle.
 - Accepted messages, question answers and approval decisions get a short confirmation in their topic.
 - Completed answers render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file links show their paths as text.
+- Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
