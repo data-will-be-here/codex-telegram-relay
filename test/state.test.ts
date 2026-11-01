@@ -12,10 +12,16 @@ test('restart preserves bindings and marks dispatched inputs/sends uncertain wit
     state.bind('a', 1, temp.dir, 'Project'); state.baseline('a', 'turn-previous');
     state.admit(9, 1); state.advance(9);
     state.enqueue('final/a/t', 1, 'Finished'); state.sending(state.next()!.id);
+    state.awaitReply('a', 9, 'next-turn');
     state.close(); state = new State(home);
     assert.equal(state.bindings()[0]!.lastTurn, 'turn-previous');
     assert.equal(state.offset(), 10); assert.equal(state.uncertainCount(), 2);
     assert.equal(state.next(), undefined); assert.equal(state.admit(9, 1), false);
+    assert.deepEqual({ ...state.reply('a') }, { inputId: 9, turnId: 'next-turn' });
+    state.clearReply('a', 8);
+    assert.ok(state.reply('a'));
+    state.clearReply('a', 9);
+    assert.equal(state.reply('a'), undefined);
   } finally { state.close(); temp.close(); }
 });
 

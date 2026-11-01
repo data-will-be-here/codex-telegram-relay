@@ -19,9 +19,9 @@ Your Telegram bot / private project topics
 - No VPS, webhook, public port or cloud relay to install.
 - Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
 - Topics are named after the project plus a short session ID; two sessions in one project remain separate.
-- Tool chatter and incremental text are suppressed. Completed answers, questions, approvals and failures are delivered.
+- Tool chatter and incremental text are suppressed. The first assistant reply to a Telegram message, completed answers, questions, approvals and failures are delivered.
 - Replies immediately steer a running turn or start the next turn when idle.
-- Accepted messages, question answers and approval decisions get a short confirmation in their topic.
+- Telegram input gets the assistant's actual first reply instead of a canned acceptance message. Later progress chatter is suppressed; the final answer still follows.
 - Completed answers render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file links show their paths as text.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.

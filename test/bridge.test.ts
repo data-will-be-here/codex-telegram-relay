@@ -43,26 +43,66 @@ test('duplicate Telegram updates never submit the instruction twice', async () =
   finally { f.close(); }
 });
 
-test('accepted Telegram instructions get one immediate acknowledgement in their own topic', async () => {
+test('Telegram input receives the actual first assistant reply once, without a canned acknowledgement', async () => {
   const f = await fixture();
   try {
     await f.bridge.update(message(1, 101, 'Start work'));
     await f.bridge.update(message(1, 101, 'Start work'));
     await f.drain();
+    assert.equal(f.telegram.sent().length, 0);
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'new-turn', item: { type: 'agentMessage', phase: 'commentary', text: '**Понял**, проверю причину.' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'new-turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Reading files' } });
+    await f.drain();
     assert.equal(f.telegram.sent().length, 1);
     assert.equal(f.telegram.sent()[0]!.message_thread_id, 101);
-    assert.match(string(f.telegram.sent()[0]!.text), /accepted by Codex/u);
+    assert.equal(f.telegram.sent()[0]!.text, 'Понял, проверю причину.');
+    assert.ok(f.telegram.sent()[0]!.entities);
     f.codex.sessions[1]!.status = 'active';
     f.codex.histories.set('thread-b', [{ id: 'busy-turn', status: 'inProgress' }]);
     await f.bridge.update(message(2, 102, 'Change direction'));
+    await f.bridge.notification('item/completed', { threadId: 'thread-b', turnId: 'other-turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Unrelated turn' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-b', turnId: 'busy-turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Учту изменение.' } });
     await f.drain();
     assert.equal(f.telegram.sent().length, 2);
     assert.equal(f.telegram.sent()[1]!.message_thread_id, 102);
-    assert.match(string(f.telegram.sent()[1]!.text), /accepted by Codex/u);
+    assert.equal(f.telegram.sent()[1]!.text, 'Учту изменение.');
     f.codex.failSteer = true;
     await assert.rejects(f.bridge.update(message(3, 102, 'Another direction')));
     await f.drain();
-    assert.equal(f.telegram.sent().filter(s => string(s.text).includes('accepted by Codex')).length, 2);
+    assert.ok(f.telegram.sent().every(s => !string(s.text).includes('accepted by Codex')));
+  } finally { f.close(); }
+});
+
+test('a first reply arriving before the native RPC result is preserved, then only the final answer follows', async () => {
+  const f = await fixture();
+  try {
+    f.codex.start = async () => {
+      await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'fast-turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Проверю это.' } });
+      return { turn: { id: 'fast-turn' } };
+    };
+    await f.bridge.update(message(1));
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'fast-turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Reading file' } });
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'fast-turn', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Готово.' }] } });
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 2);
+    assert.equal(f.telegram.sent()[0]!.text, 'Проверю это.');
+    assert.match(string(f.telegram.sent()[1]!.text), /Готово/u);
+    assert.equal(f.state.reply('thread-a'), undefined);
+  } finally { f.close(); }
+});
+
+test('reconnecting before the first reply retains the wait but does not replay commentary afterwards', async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.update(message(1));
+    const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+    await bridge.discover();
+    const reply = { threadId: 'thread-a', turnId: 'turn', item: { type: 'agentMessage', phase: 'commentary', text: 'Первый ответ.' } };
+    await bridge.notification('item/completed', reply);
+    await bridge.notification('item/completed', reply);
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 1);
+    assert.equal(f.telegram.sent()[0]!.text, 'Первый ответ.');
   } finally { f.close(); }
 });
 
@@ -112,8 +152,7 @@ test('native approval needs an owner click in its own topic, then becomes one-sh
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'r1', result: { decision: 'accept' } } }]);
     await f.drain();
     const confirmations = f.telegram.sent().filter(s => string(s.text).includes('Decision sent to Codex'));
-    assert.equal(confirmations.length, 1);
-    assert.equal(confirmations[0]!.message_thread_id, 101);
+    assert.equal(confirmations.length, 0);
   } finally { f.close(); }
 });
 
@@ -147,7 +186,7 @@ test('multi-question replies preserve native IDs and old buttons cannot answer t
     await f.bridge.update(message(3, 101, 'Medium'));
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'q1', result: { answers: { color: { answers: ['Blue'] }, size: { answers: ['Medium'] } } } } }]);
     await f.drain();
-    assert.equal(f.telegram.sent().filter(s => string(s.text).includes('Answer sent to Codex')).length, 1);
+    assert.equal(f.telegram.sent().filter(s => string(s.text).includes('Answer sent to Codex')).length, 0);
   } finally { f.close(); }
 });
 
@@ -305,6 +344,7 @@ test('ignored sessions preserve their topics but never attach, receive input or 
     await bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'ignored', status: 'completed' } });
     await bridge.update(message(1, 101, 'Do not forward'));
     await bridge.update(message(2, 102, 'Still forward B'));
+    await bridge.notification('item/completed', { threadId: 'thread-b', turnId: 'active-b', item: { type: 'agentMessage', phase: 'commentary', text: 'Working on B' } });
     assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-b', text: 'Still forward B' } }]);
     const outbox = new Outbox(f.state, f.telegram, 42, 0, config.ignoredThreadIds);
     while (await outbox.flushOne()) { /* Cancel ignored deliveries; send other topics. */ }

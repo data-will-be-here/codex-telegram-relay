@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5
+
+- Replace canned acceptance messages with the assistant's actual first response to Telegram input, followed by the final answer.
+- Suppress later progress chatter and commentary from unrelated background turns.
+- Persist reply waits across reconnects and correlate them with the Telegram update and native turn, including responses racing the RPC result.
+- Apply Markdown rendering to initial assistant replies as well as completed answers.
+
 ## 0.1.4
 
 - Add local `sessions ignore ID` and `sessions unignore ID` commands with unambiguous ID-prefix matching.

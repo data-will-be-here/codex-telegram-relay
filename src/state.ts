@@ -38,6 +38,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS incoming(id INTEGER PRIMARY KEY, topicId INTEGER, status TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, topicId INTEGER, text TEXT NOT NULL, markup TEXT, status TEXT NOT NULL DEFAULT 'pending', messageId INTEGER, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS replies(threadId TEXT PRIMARY KEY, inputId INTEGER NOT NULL, turnId TEXT);
         UPDATE incoming SET status='uncertain' WHERE status='dispatching';
         UPDATE outbox SET status='uncertain' WHERE status='sending';
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
@@ -67,6 +68,16 @@ export class State {
   advance(id: number): void {
     this.db.prepare("INSERT INTO settings VALUES('offset',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(value AS INTEGER)<CAST(excluded.value AS INTEGER)").run(String(id + 1));
   }
+  awaitReply(threadId: string, inputId: number, turnId: string | null): void {
+    this.db.prepare('INSERT INTO replies VALUES(?,?,?) ON CONFLICT(threadId) DO UPDATE SET inputId=excluded.inputId,turnId=excluded.turnId').run(threadId, inputId, turnId);
+  }
+  reply(threadId: string): { inputId: number; turnId: string | null } | undefined {
+    return this.db.prepare('SELECT inputId,turnId FROM replies WHERE threadId=?').get(threadId) as { inputId: number; turnId: string | null } | undefined;
+  }
+  replyTurn(threadId: string, inputId: number, turnId: string): void {
+    this.db.prepare('UPDATE replies SET turnId=? WHERE threadId=? AND inputId=?').run(turnId, threadId, inputId);
+  }
+  clearReply(threadId: string, inputId: number): void { this.db.prepare('DELETE FROM replies WHERE threadId=? AND inputId=?').run(threadId, inputId); }
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null): void {
     if (text.length > 40_000) text = text.slice(0, 39_900) + '\n[Message shortened. See the terminal for the full answer.]';
     if (Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE status='pending'").get()?.n ?? 0) >= 1000) throw new Error('Delivery queue is full; check Telegram connectivity.');

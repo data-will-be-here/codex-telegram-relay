@@ -43,7 +43,7 @@ export class Outbox {
     this.state.sending(delivery.id);
     try {
       // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.
-      const chunks = formatMessages(delivery.text, delivery.key.startsWith('final/'));
+      const chunks = formatMessages(delivery.text, delivery.key.startsWith('final/') || delivery.key.startsWith('reply/'));
       let messageId: number | null = null;
       for (const [index, { text, entities }] of chunks.entries()) {
         const params: Json = { chat_id: this.ownerId, text };

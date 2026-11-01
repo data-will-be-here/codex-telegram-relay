@@ -85,6 +85,13 @@ export class Bridge {
       }
     } else if (method === 'item/completed') {
       const item = object(params.item);
+      if (item.type === 'agentMessage' && item.phase === 'commentary' && string(item.text).trim()) {
+        const reply = this.state.reply(threadId);
+        if (reply && (!reply.turnId || reply.turnId === params.turnId) && await this.stillAllowed(binding)) {
+          this.state.enqueue(`reply/${threadId}/${reply.inputId}`, binding.topicId, string(item.text));
+          this.state.clearReply(threadId, reply.inputId);
+        }
+      }
       if (item.type === 'agentMessage' && (!item.phase || item.phase === 'final_answer')) {
         this.finals.set(`${threadId}/${string(params.turnId)}`, string(item.text));
       }
@@ -110,6 +117,8 @@ export class Bridge {
     const error = string(object(turn.error).message);
     this.state.enqueue(`final/${binding.threadId}/${turnId}`, binding.topicId, `${header}\n\n${text || error || 'See the terminal for details.'}`);
     this.state.baseline(binding.threadId, turnId);
+    const reply = this.state.reply(binding.threadId);
+    if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
     this.finals.delete(`${binding.threadId}/${turnId}`);
     for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId) await this.clearPrompt(prompt);
   }
@@ -179,8 +188,8 @@ export class Bridge {
     const topic = integer(message.message_thread_id) ?? null;
     if (!this.state.admit(id, topic)) { this.state.advance(id); return; }
     try {
-      if (Object.keys(callback).length) await this.callback(callback, message, topic);
-      else await this.message(message, topic);
+      if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
+      else await this.message(message, topic, id);
       this.state.finish(id, 'done');
     } catch (error) {
       this.state.finish(id, 'uncertain');
@@ -189,7 +198,7 @@ export class Bridge {
     } finally { this.state.advance(id); }
   }
 
-  private async message(message: Json, topicId: number | null): Promise<void> {
+  private async message(message: Json, topicId: number | null, inputId: number): Promise<void> {
     const text = string(message.text).trim();
     if (!text) { if (message.document || message.voice || message.photo) this.notice(topicId, 'This version supports text only.'); return; }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
@@ -213,7 +222,7 @@ export class Bridge {
       const focused = question.filter(p => p.freeText);
       const target = focused.length === 1 ? focused[0] : question.length === 1 ? question[0] : undefined;
       if (!target) { this.notice(topicId, 'Several questions are pending. Choose “Type an answer” on the question you want to answer.'); return; }
-      await this.answer(target, text); return;
+      await this.answer(target, text, inputId); return;
     }
     if (text.startsWith('/') && !text.startsWith('/say ')) { this.notice(topicId, 'Unknown command. Use /help. Codex settings cannot be changed through this bot.'); return; }
     const prompt = text.startsWith('/say ') ? text.slice(5).trim() : text;
@@ -226,14 +235,13 @@ export class Bridge {
       const turnId = string(latest?.id);
       if (!turnId) { this.notice(topicId, 'The active turn could not be identified safely. Send this instruction in the terminal.'); return; }
       // A failed or ambiguous steer never falls back to a second turn.
-      await this.codex.steer(binding.threadId, turnId, prompt);
+      await this.awaitAssistant(binding.threadId, inputId, turnId, () => this.codex.steer(binding.threadId, turnId, prompt));
     } else if (status === 'idle') {
-      await this.codex.start(binding.threadId, prompt);
+      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt));
     } else { this.notice(topicId, 'This session is not ready. Open it in Codex and retry.'); return; }
-    this.notice(topicId, '✅ Message accepted by Codex. I will send its answer here.');
   }
 
-  private async callback(callback: Json, _message: Json, topicId: number | null): Promise<void> {
+  private async callback(callback: Json, _message: Json, topicId: number | null, inputId: number): Promise<void> {
     const data = string(callback.data);
     const match = /^r:([a-f0-9]{32}):([a-z0-9]+)$/u.exec(data);
     const prompt = match ? this.prompts.get(match[1]!) : undefined;
@@ -249,17 +257,19 @@ export class Bridge {
       }
       const option = array(prompt.questions[prompt.index]?.options)[Number(code)];
       if (!option || !/^\d+$/u.test(code)) return;
-      await this.answer(prompt, string(object(option).label)); return;
+      await this.answer(prompt, string(object(option).label), inputId); return;
     }
     const result = prompt.options.get(code);
     if (!result) return;
     // Consume before writing the response; a duplicated click cannot repeat a decision.
     await this.clearPrompt(prompt);
-    await this.codex.respond(prompt.request.id, result);
-    this.notice(topicId, '✅ Decision sent to Codex.');
+    await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
+      () => this.codex.respond(prompt.request.id, result));
   }
 
   private showQuestion(prompt: Prompt, repeat = false): void {
+    const waiting = this.state.reply(prompt.binding.threadId);
+    if (waiting) this.state.clearReply(prompt.binding.threadId, waiting.inputId);
     const question = prompt.questions[prompt.index]!;
     const options = array(question.options).map(object);
     const rows = options.slice(0, 10).map((o, i) => [{ text: Array.from(`${i + 1} · ${string(o.label)}`).slice(0, 60).join(''), callback_data: `r:${prompt.token}:${i}` }]);
@@ -270,7 +280,7 @@ export class Bridge {
       (choices ? '\n\n' + choices : '') + '\n\nChoose a button or write your own answer in this topic.';
     this.state.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows });
   }
-  private async answer(prompt: Prompt, text: string): Promise<void> {
+  private async answer(prompt: Prompt, text: string, inputId: number): Promise<void> {
     const question = prompt.questions[prompt.index]!;
     prompt.answers[string(question.id)] = { answers: [text] };
     await this.clearPrompt(prompt);
@@ -281,9 +291,17 @@ export class Bridge {
       this.prompts.set(prompt.token, prompt);
       this.showQuestion(prompt);
     } else {
-      await this.codex.respond(prompt.request.id, { answers: prompt.answers });
-      this.notice(prompt.binding.topicId, '✅ Answer sent to Codex.');
+      await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
+        () => this.codex.respond(prompt.request.id, { answers: prompt.answers }));
     }
+  }
+  private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>): Promise<void> {
+    this.state.awaitReply(threadId, inputId, turnId);
+    try {
+      const result = object(await write());
+      const acceptedTurn = string(object(result.turn).id) || string(result.turnId);
+      if (acceptedTurn) this.state.replyTurn(threadId, inputId, acceptedTurn);
+    } catch (error) { this.state.clearReply(threadId, inputId); throw error; }
   }
   private promptKey(prompt: Prompt): string { return `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }
   private async clearPrompt(prompt: Prompt): Promise<void> {
