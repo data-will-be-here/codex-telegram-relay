@@ -6,6 +6,8 @@ A local companion for your existing Codex sessions. Each session gets its own to
 
 [Public preview v0.1.11](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.11). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
+`main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
+
 ## How it works
 
 ```text
