@@ -2,6 +2,10 @@
 
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
+## 0.1.10 journal recovery
+
+Large-journal tests reproduced both false restart/next-turn warnings and an actual current question lost before a 9 MiB tool output. They pass with streamed recovery, including an answer after a large output suppressing an already resolved question. Read-only checks of four selected live journals (largest approximately 99 MiB) returned no false recovery markers; native sessions were not modified. A real Telegram photo subsequently reached the native conversation and was visually identified, completing the incoming-photo acceptance check. Live host-question buttons after restart remain a separate acceptance check.
+
 ## Automated
 
 Version 0.1.9 adds synthetic tests for owner/root checks before attachment download, safe random cache paths, caption forwarding, image input framing, native-question attachment answers, actual streamed download limits, path traversal and token-error redaction. Host async-question tests cover split journal records, current-turn filtering, native UI answers, secret-format fallback, topic isolation, free-text answers and reconnect consumption. Stale-approval and missing-partial-answer tests failed before their fixes and now pass. The bounded journal reader also recovered the actual missing questions from the local selected tgmcp session without printing their contents. A real Telegram question copy was accepted in the saved project topic. Full live delivery/buttons after restarting the updated relay and a real photo upload remain acceptance checks.

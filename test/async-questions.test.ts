@@ -28,6 +28,47 @@ test('reads only current-turn async questions, survives split records, and remov
   } finally { f.close(); }
 });
 
+test('a large journal stays quiet after restart and a subsequent turn when no questions were missed', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    writeFileSync(path, JSON.stringify({ timestamp: '2026-11-01T10:00:00Z', type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(9 * 1024 * 1024) } }) + '\n');
+    const started = Date.parse('2026-11-02T10:00:00Z');
+    assert.deepEqual(await new AsyncQuestionReader().read(path, 'turn-1', started), []);
+    const restarted = new AsyncQuestionReader();
+    assert.deepEqual(await restarted.read(path, 'turn-1', started), []);
+    appendFileSync(path, JSON.stringify({ timestamp: '2026-11-02T10:01:00Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue' }] } }) + '\n');
+    assert.deepEqual(await restarted.read(path, 'turn-2', started + 60_000), []);
+  } finally { f.close(); }
+});
+
+test('recovers a current question before a large tool result instead of warning that history may be missing', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    const timestamp = '2026-11-02T10:00:01Z';
+    const question = { timestamp, type: 'response_item', payload: { type: 'function_call', name: 'request_user_input_async', call_id: 'q-before-output', arguments: JSON.stringify({ questions: [{ title: 'Proceed?', options: ['Yes', 'No'] }] }) } };
+    writeFileSync(path, JSON.stringify(question) + '\n' + JSON.stringify({ timestamp, type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(9 * 1024 * 1024) } }) + '\n');
+    const reader = new AsyncQuestionReader();
+    const result = await reader.read(path, 'turn', Date.parse('2026-11-02T10:00:00Z'));
+    assert.deepEqual(result.map(q => q.callId), ['q-before-output']);
+    assert.deepEqual((await reader.read(path, 'turn', Date.parse('2026-11-02T10:00:00Z'))).map(q => q.callId), ['q-before-output']);
+  } finally { f.close(); }
+});
+
+test('finishes the journal snapshot before publishing a question answered beyond the first read chunk', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    const event = (payload: unknown) => JSON.stringify({ timestamp: '2026-11-02T10:00:01Z', type: 'response_item', payload }) + '\n';
+    const reply = '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'resolved', 0]), answer: 'Done' }]) + '\n</send_user_message_question_reply>';
+    writeFileSync(path, event({ type: 'function_call', name: 'request_user_input_async', call_id: 'resolved', arguments: JSON.stringify({ questions: [{ title: 'Proceed?' }] }) }) +
+      event({ type: 'function_call_output', output: 'x'.repeat(9 * 1024 * 1024) }) +
+      event({ type: 'message', role: 'user', content: [{ type: 'input_text', text: reply }] }));
+    assert.deepEqual(await new AsyncQuestionReader().read(path, 'turn', Date.parse('2026-11-02T10:00:00Z')), []);
+  } finally { f.close(); }
+});
+
 test('sensitive or malformed host questions produce a terminal-only marker without exposing their contents', async () => {
   const f = temporary();
   try {

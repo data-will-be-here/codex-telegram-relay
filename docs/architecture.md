@@ -4,7 +4,7 @@
 
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
 - `bridge.ts`: project/topic bindings, owner authentication, completion filtering, input routing, questions and explicit one-time approvals. It does not own native sandbox policy.
-- `async-questions.ts`: bounded incremental reading of host question/answer records omitted by App Server. Only the latest selected session turn is eligible; unrelated tools and internal reasoning are not forwarded. Answers use ordinary native user input; unavailable journal sources and truncated recovery produce terminal notices.
+- `async-questions.ts`: streaming recovery of host question/answer records omitted by App Server, using 1 MiB read chunks and a 256 KiB record bound. Each source snapshot is scanned completely before publishing questions so later answer records can invalidate them. Only the latest selected session turn is eligible; unrelated tools and internal reasoning are not forwarded. Answers use ordinary native user input; unavailable journal sources produce terminal notices. Journal size alone is not evidence of missed questions.
 - `attachments.ts`: authenticated incoming file preparation, private cache quotas/retention, detected image input and bounded UTF-8 excerpts. It never executes or unpacks uploads.
 - `topics.ts`: durable topic creation and repair, ambiguous-result handling, rate-limit scheduling and owner-directed binding/retry. It never changes native execution policy or starts a turn.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.

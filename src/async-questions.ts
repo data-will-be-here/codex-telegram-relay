@@ -3,14 +3,13 @@ import { array, object, string, type Json } from './types.js';
 
 export interface AsyncQuestion { callId: string; turnId: string; questions: Json[]; needsTerminal?: boolean; }
 
-/** Some host tools never appear in app-server items. Read only their bounded, public question payloads. */
+/** Scan journals incrementally in bounded chunks; retain only public host question payloads. */
 export class AsyncQuestionReader {
   private position = 0;
   private context = '';
   private remainder = Buffer.alloc(0);
   private dropping = false;
   private pending = new Map<string, AsyncQuestion>();
-  private recoveryGap = false;
 
   async read(path: string, turnId: string, startedAtMs: number): Promise<AsyncQuestion[]> {
     const file = await open(path, 'r');
@@ -19,22 +18,26 @@ export class AsyncQuestionReader {
       if (!stat.isFile()) throw new Error('Invalid native session journal.');
       const context = `${path}/${turnId}`;
       if (context !== this.context || stat.size < this.position) {
-        this.context = context; this.position = Math.max(0, stat.size - 8 * 1024 * 1024);
-        this.remainder = Buffer.alloc(0); this.dropping = this.position > 0; this.pending.clear();
-        this.recoveryGap = this.position > 0;
+        this.context = context; this.position = 0;
+        this.remainder = Buffer.alloc(0); this.dropping = false; this.pending.clear();
       }
-      const chunk = Buffer.alloc(Math.min(stat.size - this.position, 8 * 1024 * 1024));
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, this.position);
-      this.position += bytesRead;
-      const data = Buffer.concat([this.remainder, chunk.subarray(0, bytesRead)]);
-      let start = 0;
-      for (let end = data.indexOf(10); end >= 0; end = data.indexOf(10, start)) {
-        if (!this.dropping && end - start <= 256 * 1024) this.record(data.subarray(start, end).toString('utf8'), turnId, startedAtMs);
-        this.dropping = false; start = end + 1;
+      // Size limits apply to each buffer/record, not to how far back a question can be found.
+      // Finish the snapshot before publishing questions: a later record may already answer one.
+      const chunk = Buffer.alloc(Math.min(stat.size - this.position, 1024 * 1024));
+      while (this.position < stat.size) {
+        const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, stat.size - this.position), this.position);
+        if (!bytesRead) break;
+        this.position += bytesRead;
+        const data = Buffer.concat([this.remainder, chunk.subarray(0, bytesRead)]);
+        let start = 0;
+        for (let end = data.indexOf(10); end >= 0; end = data.indexOf(10, start)) {
+          if (!this.dropping && end - start <= 256 * 1024) this.record(data.subarray(start, end).toString('utf8'), turnId, startedAtMs);
+          this.dropping = false; start = end + 1;
+        }
+        this.remainder = Buffer.from(data.subarray(start));
+        if (this.remainder.length > 256 * 1024) { this.remainder = Buffer.alloc(0); this.dropping = true; }
       }
-      this.remainder = Buffer.from(data.subarray(start));
-      if (this.remainder.length > 256 * 1024) { this.remainder = Buffer.alloc(0); this.dropping = true; }
-      return [...this.pending.values(), ...(this.recoveryGap ? [{ callId: `recovery-gap/${turnId}`, turnId, questions: [], needsTerminal: true }] : [])];
+      return [...this.pending.values()];
     } finally { await file.close(); }
   }
 

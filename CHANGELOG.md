@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10
+
+- Fix false recovery-window warnings after restart and subsequent user turns: journal size was incorrectly treated as missing question history.
+- Stream session journals in bounded chunks instead of truncating recovery to their last 8 MiB. Recover current-turn questions before large tool outputs and apply later answer records before displaying controls.
+
 ## 0.1.9
 
 - Remove status topic naming and keep stable project/ID names; migrate the old setting without losing bindings/history.

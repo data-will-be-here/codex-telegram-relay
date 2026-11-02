@@ -399,8 +399,7 @@ export class Bridge {
     for (const q of questions) {
       if (q.needsTerminal) {
         this.attention(binding, { id: q.callId, method: 'request_user_input_async', params: { turnId: q.turnId, itemId: q.callId } },
-          q.callId.startsWith('recovery-gap/') ? 'This session journal exceeds the bounded recovery window. Earlier host questions may require the terminal; newly observed questions will continue arriving here.' :
-            'A host question needs the terminal: its format is unsupported, too large, or marked as sensitive. Its contents were not forwarded.'); continue;
+          'A host question needs the terminal: its format is unsupported, too large, or marked as sensitive. Its contents were not forwarded.'); continue;
       }
       if (this.state.asyncAnswered(binding.threadId, q.callId) || [...this.prompts.values()].some(p => p.binding.threadId === binding.threadId && p.asyncCallId === q.callId)) continue;
       const prompt: Prompt = {
