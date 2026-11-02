@@ -66,6 +66,20 @@ test('topic repair cannot hijack another session, bypass roots, unignore a sessi
   } finally { f.close(); }
 });
 
+test('automatic scope recovers a topic outside selected roots without unignoring sessions', () => {
+  const f = setup();
+  try {
+    f.state.beginTopic('thread-new', f.temp.dir, 'New');
+    const attempt = f.state.topicOperation('thread-new')!;
+    f.state.topicResult('thread-new', attempt.attempt, 'uncertain');
+    const config = { ...f.config, roots: [], sessionScope: 'all' as const };
+    const ignored = new Topics({ ...config, ignoredThreadIds: ['thread-new'] }, f.state, f.telegram);
+    assert.throws(() => ignored.bind('thread-new', 103), /ignored/u);
+    const automatic = new Topics(config, f.state, f.telegram);
+    assert.equal(automatic.bind('thread-new', 103).topicId, 103);
+  } finally { f.close(); }
+});
+
 test('static project/id titles remain bounded without splitting Unicode', () => {
   assert.equal(topicTitle({id:'1234567890',cwd:join('root','project')}),'project · 12345678');
   const long=topicTitle({id:'1234567890',cwd:join('root','🎁'.repeat(100))});

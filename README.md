@@ -2,6 +2,15 @@
 
 A local companion for your existing Codex sessions. Each session gets its own topic in a private chat with **your own Telegram bot**. Receive questions, approval requests and completed answers; reply from Telegram to the same native session.
 
+**Install with your coding agent:** send it the repository link and this prompt:
+
+```text
+Install Codex Telegram Relay on my computer: https://github.com/data-will-be-here/codex-telegram-relay/tree/dev
+Follow the README's "Agent-assisted installation" instructions. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
+```
+
+This workflow currently uses `dev`; the published v0.1.11 does not include automatic discovery across new projects.
+
 [Русский README](README.ru.md)
 
 [Public preview v0.1.11](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.11). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
@@ -73,6 +82,20 @@ codex-telegram-relay setup
 codex-telegram-relay start
 ```
 
+### Agent-assisted installation
+
+When the user asks you to install this repository, follow this workflow. The session-scope choice belongs to the user; a repository link alone does not authorize connecting every project.
+
+1. Check the OS, Git, Node.js 22.13+ and the existing authenticated Codex installation. Use its native executable, following the platform instructions below. Ask the user to start a normal session and send its first prompt if no eligible session is loaded. No server, webhook or MCP registration is needed.
+2. Explain these two session-discovery modes and ask the user to choose, unless they already made that choice:
+   - **Automatic (`all`)**: connects all eligible loaded interactive terminal/IDE sessions, including future projects, approximately every five seconds. Older interactive sessions retained by the daemon can also appear. Ignored sessions and subagents remain excluded.
+   - **Selected projects (`selected`)**: connects sessions only inside locally chosen project directories; adding another project requires `projects add PATH` and a relay restart. Recommend automatic when the user wants every new project to appear; selected when they want a limited scope.
+   Wait for their answer before pairing or changing session scope. This choice is separate from `/mode all|compact`, which controls how many assistant messages are delivered.
+3. Clone into a new local directory and run `npm ci` followed by `npm start -- doctor`. Until the next release, use `git clone --branch dev https://github.com/data-will-be-here/codex-telegram-relay.git` for this workflow; v0.1.11 lacks the scope commands. Report the checked-out commit. Preserve any existing checkout changes and private relay state; do not reinstall by deleting configuration.
+4. Help the user create a dedicated bot in @BotFather and enable private-chat topics. For a fresh installation, run `npm start -- setup --scope all` or `npm start -- setup --scope selected` according to their answer. If your terminal cannot accept private interactive input, have the user run that command in their own terminal. The token must be entered only into the hidden local prompt: never request it in chat, command arguments, environment variables or logs. The user sends the displayed `/start CODE` to their bot in a private chat; pairing must finish successfully.
+5. For an already paired installation, skip setup. Run `npm start -- sessions scope all` or `npm start -- sessions scope selected` after their choice; selected mode needs at least one root added with `npm start -- projects add /absolute/path`. Keep the token, owner, ignored IDs and topic bindings intact.
+6. Start one foreground relay with `npm start -- start`, or ask the user to restart their already running relay. Keep the process running; do not create an unattended service without a separate request. Confirm the startup discovery mode, matching `/status`, and a topic for an eligible session. In automatic mode, ask the user to open a session in a new project, send its first prompt and check its topic appears. If a real bot check is pending, report it as pending rather than claiming success.
+
 ### Windows
 
 The relay launches a **native `codex.exe`**, never a `.cmd`/`.bat` shell wrapper. It searches the npm Codex installation and the managed daemon package. If needed, pass the native executable explicitly:
@@ -86,7 +109,19 @@ npm start -- setup --codex-bin 'C:\absolute\path\to\codex.exe'
 
 Executable links from Homebrew/native installers are resolved. For npm installations, the relay locates the actual platform binary behind `codex.js`, including hoisted and nested optional packages; the JavaScript/shell launcher is never executed by the relay. Unix execute permissions and ELF/Mach-O format are checked. CI installs official Codex 0.166.0 and checks its native version and proxy command on each OS; a complete real-session/Telegram exchange on macOS/Linux still needs acceptance testing.
 
-### Add another project
+### Automatically include new projects (development version)
+
+On `dev` after v0.1.11, explicitly enable automatic discovery locally:
+
+```sh
+npm start -- sessions scope all
+```
+
+Restart the relay once. Every eligible loaded interactive session is then connected, including sessions in future projects, without another setup or restart. Discovery runs about every five seconds; a new session needs its first prompt before it has resumable history. This also includes IDE sessions and older interactive threads still loaded in the daemon. Explicitly ignored sessions, subagents and ephemeral contexts remain excluded.
+
+For a fresh installation, `npm start -- setup --scope all` opts into the same mode. Plain `setup` and existing configurations retain selected-project discovery. `npm start -- sessions scope` shows the configured mode; `/status` shows the running mode. `npm start -- sessions scope selected` restores project restrictions after restarting. These settings can only be changed locally, not through Telegram.
+
+### Add another project in selected mode
 
 ```sh
 npm start -- projects add /absolute/path/to/project
@@ -118,7 +153,7 @@ Configuration and state live outside your projects:
 - Windows: `%LOCALAPPDATA%\codex-telegram-relay`
 - Linux/macOS: `$XDG_CONFIG_HOME/codex-telegram-relay`, or `~/.config/codex-telegram-relay`
 
-`config.json` stores the owner, project roots and native executable path. `bot.token` contains the token. `state.sqlite` stores topic bindings, delivery text and delivery status. Treat the entire directory as private. POSIX modes are restricted; setup/start verify current-user Windows access rules on private relay files.
+`config.json` stores the owner, discovery scope, project roots and native executable path. `bot.token` contains the token. `state.sqlite` stores topic bindings, delivery text and delivery status. Treat the entire directory as private. POSIX modes are restricted; setup/start verify current-user Windows access rules on private relay files.
 
 The optional `CODEX_TELEGRAM_RELAY_HOME` environment variable changes this directory, for example for an isolated installation. No other environment variables are required.
 

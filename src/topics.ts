@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { allowedDirectory, type Config } from './config.js';
+import { allowedSessionDirectory, type Config } from './config.js';
 import { State } from './state.js';
 import { TelegramError, isMissingTopic } from './telegram.js';
 import { integer, object, type Binding, type Session, type Telegram } from './types.js';
@@ -93,7 +93,7 @@ export class Topics {
     const matches = [...sessions.values()].filter(s => s.id.startsWith(prefix));
     if (matches.length !== 1) throw new Error('Session prefix must identify exactly one saved session.');
     const session = matches[0]!;
-    if (this.config.ignoredThreadIds?.includes(session.id) || !allowedDirectory(session.cwd, this.config.roots)) throw new Error('This session is ignored or outside your selected projects.');
+    if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) throw new Error('This session is ignored or outside your selected projects.');
     return session;
   }
 

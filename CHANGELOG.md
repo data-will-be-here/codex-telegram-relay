@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12 (unreleased)
+
+- Add explicit local automatic discovery with `sessions scope all` or `setup --scope all`, including future projects without repeated setup. Preserve selected-project defaults and ignored-session/subagent exclusions.
+- Apply session scope consistently to discovery, input, outgoing events, approval controls and topic recovery. Show discovery mode at startup, in `/status` and in read-only `doctor` eligibility diagnostics.
+
 ## 0.1.11
 
 - Remove pre-existing broad Windows ACLs from private directories and credential/state/cache files; verify current-user grants at setup/start without changing audit policy.

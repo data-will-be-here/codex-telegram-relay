@@ -7,7 +7,7 @@ import { realpathSync, existsSync, statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
-import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, type Config } from './config.js';
+import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
 import { withProjectHeader } from './format.js';
@@ -52,6 +52,9 @@ async function verifyBot(telegram: TelegramClient): Promise<string> {
 async function setup(args: string[]): Promise<void> {
   const home = dataDirectory();
   if (configExists(home)) throw new Error(`Configuration already exists at ${home}. Keep its token private. Use projects add PATH to add a project.`);
+  const scopeIndex = args.indexOf('--scope');
+  const scope = scopeIndex >= 0 ? args[scopeIndex + 1] : 'selected';
+  if (scope !== 'all' && scope !== 'selected') throw new Error('Use setup --scope all or setup --scope selected.');
   const binary = binaryFlag(args) ?? findCodex();
   const codex = new CodexClient();
   try {
@@ -60,15 +63,20 @@ async function setup(args: string[]): Promise<void> {
     console.log('Existing Codex projects (terminal / IDE):');
     const paths = [...new Set(sessions.map(s => s.cwd))];
     paths.forEach((path, index) => console.log(`  ${index + 1}. ${path}`));
-    if (!paths.length) throw new Error('No loaded Codex CLI sessions found. Start Codex in your project, then run setup again.');
-    const terminal = createInterface({ input: stdin, output: stdout });
-    let roots: string[];
-    try {
-      const choice = (await terminal.question('Project numbers to connect (comma-separated, or all): ')).trim();
-      const selected = choice === 'all' ? paths : choice.split(',').map(x => paths[Number(x.trim()) - 1]);
-      if (!selected.length || selected.some(x => !x)) throw new Error('Choose at least one valid project number.');
-      roots = [...new Set(selected.map(x => realpathSync(x!)))];
-    } finally { terminal.close(); }
+    let roots: string[] = [];
+    if (scope === 'selected') {
+      if (!paths.length) throw new Error('No loaded Codex CLI sessions found. Start Codex in your project, then run setup again.');
+      const terminal = createInterface({ input: stdin, output: stdout });
+      try {
+        const choice = (await terminal.question('Project numbers to connect (comma-separated, or all currently listed): ')).trim();
+        const selected = choice === 'all' ? paths : choice.split(',').map(x => paths[Number(x.trim()) - 1]);
+        if (!selected.length || selected.some(x => !x)) throw new Error('Choose at least one valid project number.');
+        roots = [...new Set(selected.map(x => realpathSync(x!)))];
+      } finally { terminal.close(); }
+    } else {
+      console.log('Automatic discovery explicitly enabled: all interactive CLI/IDE sessions, including future projects.');
+      if (!paths.length) console.log('No materialized sessions yet. New sessions become connectable after their first prompt.');
+    }
     const token = await secret('Bot token from @BotFather (hidden): ');
     if (!/^\d{5,16}:[A-Za-z0-9_-]{20,200}$/u.test(token)) throw new Error('Token format is invalid.');
     const telegram = new TelegramClient(token);
@@ -88,9 +96,9 @@ async function setup(args: string[]): Promise<void> {
       }
     }
     if (!ownerId) throw new Error('Pairing timed out. No configuration saved.');
-    const config: Config = { version: 1, ownerId, roots, codexBinary: binary };
+    const config: Config = { version: 1, ownerId, roots, codexBinary: binary, sessionScope: scope };
     saveConfig(home, config, token);
-    await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: 'Paired with your local Codex Telegram Relay. Start the relay on your computer to connect the selected projects.', entities: [] }) });
+    await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: `Paired with your local Codex Telegram Relay. Start the relay on your computer to connect ${scope === 'all' ? 'all interactive Codex sessions, including future projects' : 'the selected projects'}.`, entities: [] }) });
     console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start -- start`);
   } finally { codex.close(); }
 }
@@ -104,7 +112,11 @@ async function doctor(args: string[]): Promise<void> {
     await codex.connect(binary);
     const sessions = await codex.list();
     console.log(`Native shared-daemon connection: OK\nLoaded interactive sessions: ${sessions.length}\nNo threads resumed, no model turns started, no settings changed.`);
-    for (const session of sessions) console.log(`  ${session.id.slice(0, 8)}  ${session.status}  ${session.cwd}`);
+    if (configured) console.log(`Session discovery: ${configured.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}`);
+    for (const session of sessions) {
+      const reason = !configured ? '' : configured.config.ignoredThreadIds?.includes(session.id) ? ' [ignored]' : allowedSessionDirectory(session.cwd, configured.config) ? ' [eligible]' : ' [project not selected]';
+      console.log(`  ${session.id.slice(0, 8)}  ${session.status}  ${session.cwd}${reason}`);
+    }
     if (configured) {
       const { config, token } = configured;
       const username = await verifyBot(new TelegramClient(token));
@@ -168,7 +180,7 @@ async function start(args: string[]): Promise<void> {
           console.log('Codex executable path updated after a successful shared-daemon check. Bot pairing and topic bindings are preserved.');
         }
         await bridge.discover();
-        console.log('Relay connected. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.');
+        console.log(`Relay connected. Discovery: ${config.sessionScope === 'all' ? 'automatic, all interactive sessions' : 'selected projects'}. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.`);
         let lastDiscovery = Date.now();
         while (!stopping && connected) {
           if (Date.now() - lastDiscovery > 5000) { await bridge.discover(); state.prune(); lastDiscovery = Date.now(); }
@@ -197,6 +209,15 @@ async function main(): Promise<void> {
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);
+  if (command === 'sessions' && args[1] === 'scope') {
+    const mode = args[2];
+    if (args[3] || (mode !== undefined && mode !== 'all' && mode !== 'selected')) throw new Error('Use sessions scope all or sessions scope selected.');
+    const home = dataDirectory(); const { config } = loadConfig(home);
+    if (mode === 'selected' && !config.roots.length) throw new Error('No selected projects. Add roots with projects add PATH before enabling selected mode.');
+    if (mode) { config.sessionScope = mode; saveConfig(home, config); }
+    console.log(`Session discovery: ${config.sessionScope === 'all' ? 'automatic (all interactive sessions and future projects)' : 'selected projects'}.${mode ? ' Restart the relay to apply; ignored sessions remain ignored.' : ''}`);
+    return;
+  }
   if (command === 'sessions' && ['ignore', 'unignore'].includes(args[1] ?? '')) {
     const prefix = args[2];
     if (!prefix || !/^[a-zA-Z0-9-]{6,128}$/u.test(prefix)) throw new Error('Usage: sessions ignore|unignore SESSION_ID_OR_UNIQUE_PREFIX');
@@ -225,7 +246,7 @@ async function main(): Promise<void> {
     console.log('Project added. Restart the relay to apply.'); return;
   }
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
-  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

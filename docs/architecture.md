@@ -16,7 +16,7 @@ Native I/O and Telegram I/O have real adapters and test adapters. Most behaviour
 
 ## Native sessions
 
-The relay asks the existing daemon for loaded thread IDs, reads metadata and selects root interactive sessions (`cli`, `vscode`, `appServer`). Subagents, ephemeral contexts and not-yet-materialized sessions are excluded. Only locally selected project roots are eligible.
+The relay asks the existing daemon for loaded thread IDs, reads metadata and selects root interactive sessions (`cli`, `vscode`, `appServer`). Subagents, ephemeral contexts and not-yet-materialized sessions are excluded. Discovery runs approximately every five seconds. Selected-project mode is the default for setup and legacy configurations. Explicit local `sessions scope all` or `setup --scope all` includes all eligible interactive session directories, including future projects, without changing native execution permissions. Ignored IDs remain excluded in both modes. Input, outgoing events, approval controls and topic recovery use the same scope check; changing scope requires a relay restart and cannot be requested remotely.
 
 If metadata, resume or history fails for one session, discovery continues for healthy sessions and retries the unavailable session later. Sessions missing from a successful discovery are detached locally. Uncertain native transport failures propagate to the connection loop instead of being treated as local session failures.
 
