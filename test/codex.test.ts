@@ -19,6 +19,11 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
     assert.deepEqual(records.find(x => x.method === 'thread/resume')!.params, { threadId: 'a', excludeTurns: true });
     assert.deepEqual(records.find(x => x.method === 'turn/start')!.params, { threadId: 'a', input: [{ type: 'text', text: 'hello' }] });
     assert.deepEqual(records.find(x => x.method === 'turn/steer')!.params, { threadId: 'a', expectedTurnId: 'turn-1', input: [{ type: 'text', text: 'change' }] });
+    const input = [{ type: 'text' as const, text: 'Look at this' }, { type: 'localImage' as const, path: join('private', 'image.png') }];
+    await c.start('a', input); await c.steer('a', 'turn-1', input);
+    const mediaRecords = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/start').at(-1)!.params, { threadId: 'a', input });
+    assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/steer').at(-1)!.params, { threadId: 'a', expectedTurnId: 'turn-1', input });
   } finally { c.close(); }
 });
 

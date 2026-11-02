@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, openSync, readFileSync, un
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
-import { object, string, type Binding, type Json, type MessageMode, type TopicTitleMode } from './types.js';
+import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 
 export interface Delivery { id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null; }
 export interface TopicOperation {
@@ -15,7 +15,7 @@ export class State {
   private db: DatabaseSync;
   private lock: string;
   private lockValue: string;
-  constructor(home: string) {
+  constructor(readonly home: string) {
     privateDirectory(home);
     this.lock = join(home, 'relay.lock');
     this.lockValue = `${process.pid}:${randomUUID()}`;
@@ -42,6 +42,8 @@ export class State {
         CREATE TABLE IF NOT EXISTS incoming(id INTEGER PRIMARY KEY, topicId INTEGER, status TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, topicId INTEGER, text TEXT NOT NULL, markup TEXT, status TEXT NOT NULL DEFAULT 'pending', messageId INTEGER, at INTEGER NOT NULL, projectCwd TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS async_answers(threadId TEXT NOT NULL, callId TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,callId));
+        DELETE FROM settings WHERE key='topicTitleMode';
         CREATE TABLE IF NOT EXISTS replies(threadId TEXT PRIMARY KEY, inputId INTEGER NOT NULL, turnId TEXT);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         UPDATE topic_operations SET status='uncertain' WHERE status='creating';
@@ -99,11 +101,8 @@ export class State {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   baseline(threadId: string, turnId: string): void { this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=?').run(turnId, threadId); }
-  topicTitleMode(): TopicTitleMode { return this.db.prepare("SELECT value FROM settings WHERE key='topicTitleMode'").get()?.value === 'status' ? 'status' : 'simple'; }
-  setTopicTitleMode(mode: TopicTitleMode): void {
-    if (mode !== 'status' && mode !== 'simple') throw new Error('Invalid topic title mode.');
-    this.db.prepare("INSERT INTO settings VALUES('topicTitleMode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(mode);
-  }
+  asyncAnswered(threadId: string, callId: string): boolean { return !!this.db.prepare('SELECT 1 FROM async_answers WHERE threadId=? AND callId=?').get(threadId, callId); }
+  answerAsync(threadId: string, callId: string): void { this.db.prepare('INSERT OR IGNORE INTO async_answers VALUES(?,?,?)').run(threadId, callId, Date.now()); }
   topicTitleRetryAt(threadId: string): number {
     return Math.max(Number(this.db.prepare('SELECT value FROM settings WHERE key=?').get('titleRetry/' + threadId)?.value ?? 0),
       Number(this.db.prepare("SELECT value FROM settings WHERE key='titleRetry/all'").get()?.value ?? 0));
@@ -170,5 +169,6 @@ export class State {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
     this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled')").run(cutoff);
+    this.db.prepare('DELETE FROM async_answers WHERE at<?').run(cutoff);
   }
 }

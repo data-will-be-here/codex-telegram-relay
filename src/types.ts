@@ -6,7 +6,7 @@ export const array = (value: unknown): unknown[] => Array.isArray(value) ? value
 export const integer = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
 export type MessageMode = 'all' | 'compact';
-export type TopicTitleMode = 'simple' | 'status';
+export type UserInput = { type: 'text'; text: string } | { type: 'localImage'; path: string };
 
 export interface Session {
   id: string;
@@ -15,7 +15,6 @@ export interface Session {
   status: string;
   createdAt?: number;
   activeTurnId?: string;
-  activeFlags?: string[];
 }
 
 export interface Binding {
@@ -33,17 +32,19 @@ export interface RpcRequest {
 }
 
 export interface Codex {
+  asyncQuestions?(threadId: string): Promise<import('./async-questions.js').AsyncQuestion[]>;
   list(): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;
   read(threadId: string): Promise<Json>;
   turns(threadId: string): Promise<Json[]>;
-  start(threadId: string, text: string): Promise<unknown>;
-  steer(threadId: string, turnId: string, text: string): Promise<unknown>;
+  start(threadId: string, text: string | UserInput[]): Promise<unknown>;
+  steer(threadId: string, turnId: string, text: string | UserInput[]): Promise<unknown>;
   respond(id: string | number, result: Json): Promise<void>;
   hasRequest(id: string | number): boolean;
 }
 
 export interface Telegram {
+  download?(fileId: string): Promise<Buffer>;
   call(method: string, params?: Json): Promise<unknown>;
 }
 

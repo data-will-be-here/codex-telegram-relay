@@ -2,15 +2,13 @@ import { basename } from 'node:path';
 import { allowedDirectory, type Config } from './config.js';
 import { State } from './state.js';
 import { TelegramError, isMissingTopic } from './telegram.js';
-import { integer, object, type Binding, type Session, type Telegram, type TopicTitleMode } from './types.js';
+import { integer, object, type Binding, type Session, type Telegram } from './types.js';
 
-type TopicSession = Pick<Session, 'id' | 'cwd'> & Partial<Pick<Session, 'status' | 'activeFlags'>>;
+type TopicSession = Pick<Session, 'id' | 'cwd'>;
 
-export function topicTitle(session: TopicSession, mode: TopicTitleMode): string {
+export function topicTitle(session: TopicSession): string {
   const project = basename(session.cwd).replace(/\s+/gu, ' ').trim() || 'project';
-  const waiting = session.activeFlags?.some(flag => flag === 'waitingOnApproval' || flag === 'waitingOnUserInput');
-  const status = waiting ? 'ждёт' : session.status === 'active' ? 'работа' : session.status === 'idle' ? 'готово' : session.status === 'systemError' ? 'ошибка' : 'пауза';
-  const suffix = ' · ' + (mode === 'simple' ? session.id.slice(0, 8) : status);
+  const suffix = ' · ' + session.id.slice(0, 8);
   let name = '';
   for (const char of project) { if (name.length + char.length + suffix.length > 128) break; name += char; }
   return name + suffix;
@@ -24,7 +22,7 @@ export class Topics {
     const binding = this.state.binding(session.id);
     const previous = this.state.topicOperation(session.id);
     if (binding && !previous) return this.syncTitle(binding, session);
-    const title = session.status === undefined ? previous?.title ?? binding?.title ?? topicTitle(session, this.state.topicTitleMode()) : topicTitle(session, this.state.topicTitleMode());
+    const title = topicTitle(session);
     const attempt = this.state.beginTopic(session.id, session.cwd, title);
     if (!attempt) { if (previous?.status === 'uncertain' || previous?.status === 'failed') this.problem(previous.threadId); return undefined; }
     let topicId: number;
@@ -49,7 +47,7 @@ export class Topics {
 
   private async syncTitle(binding: Binding, session: TopicSession): Promise<Binding | undefined> {
     this.state.sessionDirectory(session.id, session.cwd);
-    const title = topicTitle(session, this.state.topicTitleMode());
+    const title = topicTitle(session);
     if (title === binding.title || this.state.topicTitleRetryAt(session.id) > Date.now()) return this.state.binding(session.id);
     try {
       const renamed = await this.telegram.call('editForumTopic', { chat_id: this.config.ownerId, message_thread_id: binding.topicId, name: title });

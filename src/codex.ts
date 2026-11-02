@@ -3,7 +3,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Duplex } from 'node:stream';
 import { type createConnection } from 'node:net';
 import WebSocket from 'ws';
-import { array, object, string, type Codex, type Json, type RpcRequest, type Session } from './types.js';
+import { lstat, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { isAbsolute, join, relative, sep } from 'node:path';
+import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
+import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput } from './types.js';
 
 export class RpcError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
@@ -17,6 +21,7 @@ export class CodexClient extends EventEmitter implements Codex {
   private child?: ChildProcessWithoutNullStreams;
   private closed = false;
   private failure?: Error;
+  private questionReaders = new Map<string, AsyncQuestionReader>();
 
   async connect(binary: string, args = ['app-server', 'proxy']): Promise<void> {
     const env = { ...process.env };
@@ -56,7 +61,7 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.8' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.9' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -100,6 +105,7 @@ export class CodexClient extends EventEmitter implements Codex {
 
   async list(): Promise<Session[]> {
     const loaded = array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string').slice(0, 64);
+    for (const id of this.questionReaders.keys()) if (!loaded.includes(id)) this.questionReaders.delete(id);
     const result: Session[] = [];
     for (const id of loaded) {
       let thread: Json;
@@ -111,7 +117,6 @@ export class CodexClient extends EventEmitter implements Codex {
       }
       if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
       const session: Session = { id, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
-      session.activeFlags = array(object(thread.status).activeFlags).filter((flag): flag is string => typeof flag === 'string');
       if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
       result.push(session);
     }
@@ -119,6 +124,19 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string): Promise<Json> { return object(object(await this.call('thread/read', { threadId })).thread); }
+  async asyncQuestions(threadId: string): Promise<AsyncQuestion[]> {
+    const thread = await this.read(threadId);
+    const path = string(thread.path);
+    const turn = (await this.turns(threadId))[0];
+    if (!turn || !path || typeof turn.startedAt !== 'number' || Date.now() - turn.startedAt * 1000 > 7 * 24 * 60 * 60 * 1000) { this.questionReaders.delete(threadId); return []; }
+    const sessionsRoot = await realpath(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'sessions'));
+    const target = await realpath(path);
+    const diff = relative(sessionsRoot, target);
+    if (!diff || isAbsolute(diff) || diff === '..' || diff.startsWith(`..${sep}`) || !target.endsWith('.jsonl') || (await lstat(path)).isSymbolicLink()) throw new Error('Native question journal is outside the Codex sessions directory.');
+    let reader = this.questionReaders.get(threadId);
+    if (!reader) { reader = new AsyncQuestionReader(); this.questionReaders.set(threadId, reader); }
+    return reader.read(target, string(turn.id), turn.startedAt * 1000);
+  }
   async attach(threadId: string): Promise<Json> {
     // Deliberately omit cwd/model/instructions/approval/sandbox/permissions overrides.
     return object(object(await this.call('thread/resume', { threadId, excludeTurns: true })).thread);
@@ -133,11 +151,11 @@ export class CodexClient extends EventEmitter implements Codex {
       throw error;
     }
   }
-  start(threadId: string, text: string): Promise<unknown> {
-    return this.call('turn/start', { threadId, input: [{ type: 'text', text }] });
+  start(threadId: string, text: string | UserInput[]): Promise<unknown> {
+    return this.call('turn/start', { threadId, input: typeof text === 'string' ? [{ type: 'text', text }] : text });
   }
-  steer(threadId: string, turnId: string, text: string): Promise<unknown> {
-    return this.call('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] });
+  steer(threadId: string, turnId: string, text: string | UserInput[]): Promise<unknown> {
+    return this.call('turn/steer', { threadId, expectedTurnId: turnId, input: typeof text === 'string' ? [{ type: 'text', text }] : text });
   }
   hasRequest(id: string | number): boolean { return this.requests.has(id); }
   async respond(id: string | number, result: Json): Promise<void> {

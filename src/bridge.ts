@@ -3,9 +3,11 @@ import { allowedDirectory, type Config } from './config.js';
 import { RpcError } from './codex.js';
 import { State } from './state.js';
 import { Topics } from './topics.js';
-import { array, integer, object, string, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram } from './types.js';
+import { Attachments, AttachmentError } from './attachments.js';
+import { array, integer, object, string, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
+  asyncCallId?: string;
   token: string;
   request: RpcRequest;
   binding: Binding;
@@ -47,7 +49,7 @@ export class Bridge {
           const previous = this.state.binding(session.id);
           let binding = await this.topics.ensure(session);
           if (!binding) { this.attached.delete(session.id); continue; }
-          if (this.attached.has(session.id) && previous?.topicId === binding.topicId) continue;
+          if (this.attached.has(session.id) && previous?.topicId === binding.topicId) { await this.syncAsyncQuestions(binding); continue; }
           if (previous && previous.topicId !== binding.topicId) {
             for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === session.id) await this.clearPrompt(prompt);
           }
@@ -61,6 +63,7 @@ export class Bridge {
           await this.codex.attach(session.id);
           // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
           await this.catchUp(binding);
+          await this.syncAsyncQuestions(binding);
         } catch (error) {
           this.attached.delete(session.id);
           if (error instanceof RpcError && error.uncertain) throw error;
@@ -95,7 +98,7 @@ export class Bridge {
       }
     } else if (method === 'item/completed') {
       const item = object(params.item);
-      if (item.type === 'agentMessage' && item.phase === 'commentary' && string(item.text).trim()) {
+      if (item.type === 'agentMessage' && ['commentary', 'partial_answer'].includes(string(item.phase)) && string(item.text).trim()) {
         const reply = this.state.reply(threadId);
         const matchingReply = reply && (!reply.turnId || reply.turnId === params.turnId);
         const all = this.state.messageMode() === 'all';
@@ -134,7 +137,7 @@ export class Bridge {
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
     this.finals.delete(`${binding.threadId}/${turnId}`);
-    for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId) await this.clearPrompt(prompt);
+    for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId && !prompt.asyncCallId) await this.clearPrompt(prompt);
   }
 
   async request(request: RpcRequest): Promise<void> {
@@ -206,6 +209,7 @@ export class Bridge {
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
     } catch (error) {
+      if (error instanceof AttachmentError) { this.state.finish(id, 'rejected'); this.notice(topic, error.message); return; }
       this.state.finish(id, 'uncertain');
       this.notice(topic, '⚠️ Delivery could not be confirmed. Check the terminal before sending the same instruction again.');
       throw error;
@@ -213,10 +217,13 @@ export class Bridge {
   }
 
   private async message(message: Json, topicId: number | null, inputId: number): Promise<void> {
+    if (['photo', 'document', 'voice', 'audio', 'video', 'video_note', 'animation'].some(key => message[key])) {
+      await this.mediaMessage(message, topicId, inputId); return;
+    }
     const text = string(message.text).trim();
-    if (!text) { if (message.document || message.voice || message.photo) this.notice(topicId, 'This version supports text only.'); return; }
+    if (!text) return;
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/topics status|simple — project/status or project/ID topic names\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
@@ -241,12 +248,6 @@ export class Bridge {
       if (mode) this.state.setMessageMode(mode);
       this.notice(topicId, `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
     }
-    if (/^\/topics(?:\s|$)/u.test(text)) {
-      const [_, mode, extra] = text.split(/\s+/u);
-      if (extra || (mode !== undefined && mode !== 'status' && mode !== 'simple')) { this.notice(topicId, 'Use /topics status or /topics simple.'); return; }
-      if (mode) this.state.setTopicTitleMode(mode);
-      this.notice(topicId, `Topic names for all sessions: ${this.state.topicTitleMode()}.\n/topics status — project · работа / ждёт / готово\n/topics simple — project · ID\nExisting topics are renamed during the next sync; no restart required and their history stays intact.`); return;
-    }
     if (text === '/questions') {
       const prompts = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length);
       for (const p of prompts) this.showQuestion(p, true);
@@ -256,7 +257,7 @@ export class Bridge {
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding || !this.attached.has(binding.threadId)) { this.notice(topicId, 'Use an attached project topic. Open Codex in a configured project if it is missing.'); return; }
     if (!allowedDirectory(binding.cwd, this.config.roots)) throw new Error('Project is outside configured roots.');
-    const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.codex.hasRequest(p.request.id));
+    const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.pending(p));
     if (!text.startsWith('/say ') && !text.startsWith('/') && question.length) {
       const focused = question.filter(p => p.freeText);
       const target = focused.length === 1 ? focused[0] : question.length === 1 ? question[0] : undefined;
@@ -266,27 +267,54 @@ export class Bridge {
     if (text.startsWith('/') && !text.startsWith('/say ')) { this.notice(topicId, 'Unknown command. Use /help. Codex settings cannot be changed through this bot.'); return; }
     const prompt = text.startsWith('/say ') ? text.slice(5).trim() : text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
-    const thread = await this.codex.read(binding.threadId);
-    if (!allowedDirectory(string(thread.cwd), this.config.roots)) throw new Error('Native session moved outside configured roots.');
-    const status = string(object(thread.status).type);
-    if (status === 'active') {
-      const latest = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
-      const turnId = string(latest?.id);
-      if (!turnId) { this.notice(topicId, 'The active turn could not be identified safely. Send this instruction in the terminal.'); return; }
-      // A failed or ambiguous steer never falls back to a second turn.
-      await this.awaitAssistant(binding.threadId, inputId, turnId, () => this.codex.steer(binding.threadId, turnId, prompt));
-    } else if (status === 'idle') {
-      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt));
-    } else { this.notice(topicId, 'This session is not ready. Open it in Codex and retry.'); return; }
+    await this.sendInput(binding, inputId, prompt);
+  }
+
+  private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {
+    const binding = topicId === null ? undefined : this.state.topic(topicId);
+    if (!binding || !this.attached.has(binding.threadId)) throw new AttachmentError('Send attachments in an attached project topic. No instruction was sent.');
+    if (!await this.stillAllowed(binding)) throw new AttachmentError('This session is outside your selected projects. No attachment was downloaded or instruction sent.');
+    const caption = string(message.caption).trim();
+    if (caption.length > 16_000) throw new AttachmentError('Attachment captions are limited to 16000 characters. No instruction was sent.');
+    const pending = [...this.prompts.values()].filter(p => p.binding.threadId === binding.threadId && p.questions.length && this.pending(p));
+    const focused = pending.filter(p => p.freeText);
+    const question = focused.length === 1 ? focused[0] : pending.length === 1 ? pending[0] : undefined;
+    if (pending.length && !question) throw new AttachmentError('Several questions are pending. Choose “Type an answer” on the intended question before attaching a file. No attachment was downloaded.');
+    let inputs: UserInput[];
+    try { inputs = await new Attachments(this.state.home, this.telegram).prepare(message); }
+    catch (error) {
+      if (error instanceof AttachmentError) throw error;
+      throw new AttachmentError('The attachment could not be saved in the private cache. No instruction was sent.');
+    }
+    if (!inputs.length) throw new AttachmentError('The attachment could not be identified. No instruction was sent.');
+    if (question) {
+      const text = [caption, ...inputs.map(i => i.type === 'text' ? i.text : `Image file available for inspection: ${JSON.stringify(i.path)}`)].filter(Boolean).join('\n\n');
+      if (question.asyncCallId) {
+        if (!await this.stillAllowed(binding) || !await this.asyncStillPending(question)) {
+          await this.clearPrompt(question); throw new AttachmentError('This question is closed or cannot currently be verified. The file was saved, but no instruction was sent.');
+        }
+        const q = question.questions[question.index]!;
+        question.answers[string(q.id)] = { answers: [text] };
+        if (question.index + 1 === question.questions.length) {
+          await this.clearPrompt(question); this.state.answerAsync(binding.threadId, question.asyncCallId);
+          const answerText = question.questions.map(q => `Question: ${string(q.question)}\nAnswer: ${question.answers[string(q.id)]!.answers.join(', ')}`).join('\n\n');
+          await this.sendInput(binding, inputId, [{ type: 'text', text: answerText }, ...inputs.filter(i => i.type === 'localImage')]);
+        } else await this.answer(question, text, inputId);
+      } else await this.answer(question, text, inputId);
+    } else {
+      await this.sendInput(binding, inputId, [{ type: 'text', text: caption || 'Please inspect the attached file.' }, ...inputs]);
+    }
   }
 
   private async callback(callback: Json, _message: Json, topicId: number | null, inputId: number): Promise<void> {
     const data = string(callback.data);
     const match = /^r:([a-f0-9]{32}):([a-z0-9]+)$/u.exec(data);
     const prompt = match ? this.prompts.get(match[1]!) : undefined;
-    if (!prompt || prompt.binding.topicId !== topicId || !this.codex.hasRequest(prompt.request.id)) {
+    if (!prompt || prompt.binding.topicId !== topicId || !this.attached.has(prompt.binding.threadId) || !this.pending(prompt)) {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This request is closed or belongs to another topic.' }); return;
     }
+    if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This question is closed or cannot currently be verified. Check Codex.' }); return; }
+    if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This session is outside your selected projects.' }); return; }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
     const code = match![2]!;
     if (prompt.questions.length) {
@@ -320,6 +348,8 @@ export class Bridge {
     this.state.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows });
   }
   private async answer(prompt: Prompt, text: string, inputId: number): Promise<void> {
+    if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); return; }
+    if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); this.notice(prompt.binding.topicId, 'This question is closed or cannot currently be verified. Check Codex before answering again.'); return; }
     const question = prompt.questions[prompt.index]!;
     prompt.answers[string(question.id)] = { answers: [text] };
     await this.clearPrompt(prompt);
@@ -330,9 +360,69 @@ export class Bridge {
       this.prompts.set(prompt.token, prompt);
       this.showQuestion(prompt);
     } else {
-      await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
-        () => this.codex.respond(prompt.request.id, { answers: prompt.answers }));
+      if (prompt.asyncCallId) {
+        // Host async tools have no pending app-server RPC. Deliver a normal, explicit user answer.
+        this.state.answerAsync(prompt.binding.threadId, prompt.asyncCallId);
+        const text = prompt.questions.map(q => `Question: ${string(q.question)}\nAnswer: ${prompt.answers[string(q.id)]!.answers.join(', ')}`).join('\n\n');
+        await this.sendInput(prompt.binding, inputId, text);
+      } else {
+        await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
+          () => this.codex.respond(prompt.request.id, { answers: prompt.answers }));
+      }
     }
+  }
+  private pending(prompt: Prompt): boolean { return prompt.asyncCallId ? !this.state.asyncAnswered(prompt.binding.threadId, prompt.asyncCallId) : this.codex.hasRequest(prompt.request.id); }
+  private async asyncStillPending(prompt: Prompt): Promise<boolean> {
+    if (!prompt.asyncCallId) return true;
+    try {
+      const questions = await this.codex.asyncQuestions?.(prompt.binding.threadId);
+      return questions?.some(q => q.callId === prompt.asyncCallId && !q.needsTerminal) === true;
+    } catch { return false; }
+  }
+  private async syncAsyncQuestions(binding: Binding): Promise<void> {
+    if (!this.codex.asyncQuestions) return;
+    let questions;
+    try { questions = await this.codex.asyncQuestions(binding.threadId); }
+    catch (error) {
+      if (error instanceof RpcError && error.uncertain) throw error;
+      this.state.enqueue(`question-source-unavailable/${this.generation}/${binding.threadId}`, binding.topicId,
+        'Host questions cannot currently be read from this Codex session. Check the terminal for questions; ordinary messages and native approvals remain connected.'); return;
+    }
+    const current = new Set(questions.map(q => q.callId));
+    for (const p of [...this.prompts.values()]) {
+      if (p.binding.threadId === binding.threadId && p.asyncCallId && !current.has(p.asyncCallId)) await this.clearPrompt(p);
+      else if (p.binding.threadId === binding.threadId && p.asyncCallId) {
+        const updated = questions.find(q => q.callId === p.asyncCallId);
+        if (updated && updated.questions.length < p.questions.length) await this.clearPrompt(p);
+      }
+    }
+    for (const q of questions) {
+      if (q.needsTerminal) {
+        this.attention(binding, { id: q.callId, method: 'request_user_input_async', params: { turnId: q.turnId, itemId: q.callId } },
+          q.callId.startsWith('recovery-gap/') ? 'This session journal exceeds the bounded recovery window. Earlier host questions may require the terminal; newly observed questions will continue arriving here.' :
+            'A host question needs the terminal: its format is unsupported, too large, or marked as sensitive. Its contents were not forwarded.'); continue;
+      }
+      if (this.state.asyncAnswered(binding.threadId, q.callId) || [...this.prompts.values()].some(p => p.binding.threadId === binding.threadId && p.asyncCallId === q.callId)) continue;
+      const prompt: Prompt = {
+        token: randomBytes(16).toString('hex'), asyncCallId: q.callId, binding,
+        request: { id: q.callId, method: 'request_user_input_async', params: { turnId: q.turnId } },
+        options: new Map(), questions: q.questions.map((question, index) => ({ id: string(question.id) || String(index), question: question.title, options: array(question.options).map(o => ({ label: o })) })),
+        answers: Object.create(null) as Record<string, { answers: string[] }>, index: 0, freeText: false,
+      };
+      this.prompts.set(prompt.token, prompt); this.showQuestion(prompt);
+    }
+  }
+  private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
+    const thread = await this.codex.read(binding.threadId);
+    if (!allowedDirectory(string(thread.cwd), this.config.roots)) throw new Error('Native session moved outside configured roots.');
+    const status = string(object(thread.status).type);
+    if (status === 'active') {
+      const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
+      if (!string(turn?.id)) { this.notice(binding.topicId, 'The active turn could not be identified safely. Send this instruction in the terminal.'); return; }
+      await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt));
+    } else if (status === 'idle') {
+      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt));
+    } else this.notice(binding.topicId, 'This session is not ready. Open it in Codex and retry.');
   }
   private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>): Promise<void> {
     this.state.awaitReply(threadId, inputId, turnId);

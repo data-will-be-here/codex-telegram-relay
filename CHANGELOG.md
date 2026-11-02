@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9
+
+- Remove status topic naming and keep stable project/ID names; migrate the old setting without losing bindings/history.
+- Recover host async questions omitted by native App Server, with topic-scoped buttons/text answers and terminal notices for unsupported/sensitive formats. Host answers use normal native user input.
+- Receive owner attachments through bounded official Telegram downloads into a private cache. Pass JPEG/PNG/WebP as native images, other files as paths with bounded UTF-8 excerpts. Audio/video are saved without automatic transcription or frame extraction.
+- Recheck current native project roots before answering approval/question controls. Forward informative partial answers in all-message mode. Bound JSON response reads while streaming.
+
 ## 0.1.8
 
 - Add owner-only `/topics status|simple` selection, defaulting to the existing project/ID format. Status mode uses only the project and a short status.

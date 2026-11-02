@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State } from './state.js';
 import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
+import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
@@ -21,8 +22,7 @@ export class TelegramClient implements Telegram {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
         signal: AbortSignal.timeout(method === 'getUpdates' ? 35_000 : 15_000), redirect: 'error',
       });
-      const body = await response.text();
-      if (body.length > 2 * 1024 * 1024) throw new Error('Telegram response exceeds the relay limit.');
+      const body = (await boundedBody(response, 2 * 1024 * 1024)).toString('utf8');
       const result = object(JSON.parse(body));
       if (!response.ok || result.ok !== true) {
         const retry = integer(object(result.parameters).retry_after);
@@ -35,6 +35,37 @@ export class TelegramClient implements Telegram {
       throw new TelegramError(`Telegram ${method} connection failed. Delivery may be uncertain.`, 0);
     }
   }
+  async download(fileId: string): Promise<Buffer> {
+    try {
+      const file = object(await this.call('getFile', { file_id: fileId }));
+      const path = string(file.file_path);
+      if (!/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*(?:\.[a-zA-Z0-9]+)?$/u.test(path) || Number(file.file_size ?? 0) > MAX_ATTACHMENT_BYTES) throw new Error('Invalid or oversized Telegram file.');
+      const response = await this.fetcher(`https://api.telegram.org/file/bot${this.token}/${path}`, { redirect: 'error', signal: AbortSignal.timeout(45_000) });
+      if (!response.ok) { await response.body?.cancel(); throw new Error('Download failed.'); }
+      return await boundedBody(response, MAX_ATTACHMENT_BYTES);
+    } catch {
+      // A failed download has no native effect and must never leak its credential-bearing URL.
+      throw new AttachmentError('Telegram attachment download failed or exceeded 20 MiB. No instruction was sent.');
+    }
+  }
+}
+
+async function boundedBody(response: Response, limit: number): Promise<Buffer> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Empty HTTP response.');
+  try {
+    if (Number(response.headers.get('content-length') ?? 0) > limit) throw new Error('HTTP response too large.');
+    let length = 0;
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) throw new Error('HTTP response too large.');
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, length);
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
 export class Outbox {

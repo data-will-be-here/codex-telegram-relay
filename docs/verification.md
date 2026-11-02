@@ -4,6 +4,8 @@ Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/sha
 
 ## Automated
 
+Version 0.1.9 adds synthetic tests for owner/root checks before attachment download, safe random cache paths, caption forwarding, image input framing, native-question attachment answers, actual streamed download limits, path traversal and token-error redaction. Host async-question tests cover split journal records, current-turn filtering, native UI answers, secret-format fallback, topic isolation, free-text answers and reconnect consumption. Stale-approval and missing-partial-answer tests failed before their fixes and now pass. The bounded journal reader also recovered the actual missing questions from the local selected tgmcp session without printing their contents. A real Telegram question copy was accepted in the saved project topic. Full live delivery/buttons after restarting the updated relay and a real photo upload remain acceptance checks.
+
 The test suite exercises session/topic routing, duplicate input suppression, owner/private-chat checks before journaling, busy-turn steering, uncertain-write handling, commentary filtering, completion deduplication, one-shot topic-scoped approvals, native resolution, multi-question capability rotation, unsupported/oversized requests, root containment, policy changes being unavailable remotely, SQLite recovery and lock handling, token-error redaction, Unicode chunking, and HTTP/WebSocket-over-pipes framing.
 
 Normal automated tests use synthetic data and no real bot credentials or model turns. `npm audit` reported no known advisories for the locked runtime and development dependencies at the time of qualification. That result is time-dependent.
@@ -52,6 +54,8 @@ The unavailable-session, ambiguous-topic-creation and missing-topic scenarios we
 Project signatures are checked for italic styling without full paths, UTF-16 offsets, each multipart message, project notices outside topics, and migration of older SQLite outbox schemas. The recovery tests never delete or rebind real user topics or mutate real Codex sessions.
 
 ## 0.1.8 topic display and native executable discovery
+
+Historical record: status topic names were removed in 0.1.9 at the owner's request. Current names remain project/short-ID.
 
 Tests cover owner-only title-mode changes, persisted preferences, idempotent renaming, Telegram rename rate limits, duplicate visible names routing to different native threads, and reconnects without topic creation. Status mode intentionally omits dialogue names and IDs; simple mode preserves the original format.
 

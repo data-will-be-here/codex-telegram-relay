@@ -8,6 +8,63 @@ import { Outbox, TelegramError } from '../src/telegram.js';
 import { RpcError } from '../src/codex.js';
 import { array, object, string } from '../src/types.js';
 
+test('host async questions have owner-scoped buttons and text answers, persist after completion, and never fake an RPC response', async () => {
+  const f = await fixture();
+  try {
+    Object.assign(f.codex, { asyncQuestions: async () => [{ callId: 'host-q', turnId: 'turn', questions: [{ title: 'Choose a processor', options: ['Local', 'External'] }] }] });
+    await f.bridge.discover(); await f.bridge.discover(); await f.drain();
+    const questions = f.telegram.sent().filter(s => s.message_thread_id === 101 && string(s.text).includes('Choose a processor'));
+    assert.equal(questions.length, 1);
+    const data = string(object(array(array(object(questions[0]!.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'turn', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Waiting for you' }] } });
+    await f.bridge.update(click(1, data, 101, 99));
+    await f.bridge.update(click(2, data, 102));
+    assert.equal(f.codex.writes.length, 0);
+    await f.bridge.update(message(3, 101, 'Local, please'));
+    await f.bridge.update(click(4, data));
+    assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-a', text: 'Question: Choose a processor\nAnswer: Local, please' } }]);
+    assert.equal(f.state.asyncAnswered('thread-a', 'host-q'), true);
+    await new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover(); await f.drain();
+    assert.equal(f.telegram.sent().filter(s => s.message_thread_id === 101 && string(s.text).includes('Choose a processor')).length, 1);
+  } finally { f.close(); }
+});
+
+test('host questions answered in the native UI invalidate Telegram buttons before the next discovery', async () => {
+  const f = await fixture(); let resolved = false;
+  try {
+    Object.assign(f.codex, { asyncQuestions: async () => resolved ? [] : [{ callId: 'host-q', turnId: 'turn', questions: [{ title: 'Pick', options: ['A', 'B'] }] }] });
+    await f.bridge.discover(); await f.drain();
+    const sent = f.telegram.sent().find(s => s.message_thread_id === 101)!;
+    const data = string(object(array(array(object(sent.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    resolved = true;
+    await f.bridge.update(click(1, data));
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('approval buttons stop working when the session moves outside the selected project roots', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add('moved');
+    await f.bridge.request({ id: 'moved', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command: 'example' } });
+    await f.drain();
+    const data = string(object(array(array(object(f.telegram.sent()[0]!.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    f.codex.sessions[0]!.cwd = f.dir;
+    await f.bridge.update(click(1, data));
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('all mode forwards informative partial answers without forwarding reasoning', async () => {
+  const f = await fixture('all');
+  try {
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn', item: { id: 'p', type: 'agentMessage', phase: 'partial_answer', text: 'Visible progress' } });
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'turn', item: { id: 'r', type: 'reasoning', text: 'Hidden' } });
+    await f.drain();
+    assert.deepEqual(f.telegram.sent().map(messageBody), ['Visible progress']);
+  } finally { f.close(); }
+});
+
 test('two projects get distinct persistent topics; idle messages target the matching native thread', async () => {
   const f = await fixture();
   try {
@@ -184,48 +241,16 @@ test('only the owner can switch message modes; changes apply immediately without
   } finally { f.close(); }
 });
 
-test('topic style toggles between project/status and project/id without creating topics, including after reconnect', async () => {
+test('topic names stay project/id when the native status changes, including reconnects', async () => {
   const f = await fixture();
   try {
+    const original = f.state.binding('thread-a')!;
     f.codex.sessions[0]!.status = 'active';
-    await f.bridge.update(message(1, 101, '/topics status', 99));
     await f.bridge.discover();
-    assert.equal(f.telegram.calls.filter(c => c.method === 'editForumTopic').length, 0);
-    await f.bridge.update(message(2, 101, '/topics status'));
-    await f.bridge.discover();
-    const edits = () => f.telegram.calls.filter(c => c.method === 'editForumTopic');
-    assert.ok(edits().some(c => c.params.message_thread_id === 101 && c.params.name === 'project-a · работа'));
-    assert.ok(edits().some(c => c.params.message_thread_id === 102 && c.params.name === 'project-b · готово'));
-    assert.equal(edits().length, 2);
     await new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover();
-    assert.equal(edits().length, 2);
-    f.codex.sessions[0]!.status = 'idle';
-    await f.bridge.discover();
-    assert.equal(edits().length, 3);
-    assert.equal(edits().at(-1)!.params.name, 'project-a · готово');
-    await f.bridge.update(message(3, 101, '/topics simple'));
-    await f.bridge.discover();
-    assert.equal(f.state.binding('thread-a')?.title, 'project-a · thread-a');
-    assert.equal(f.state.binding('thread-a')?.topicId, 101);
-    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 2);
-    assert.equal(f.codex.writes.length, 0);
-  } finally { f.close(); }
-});
-
-test('two sessions with identical visible project/status names still route by their saved topic IDs', async () => {
-  const f = await fixture();
-  try {
-    f.state.setTopicTitleMode('status');
-    f.codex.sessions[1]!.cwd = f.projectA;
-    await f.bridge.discover();
-    assert.equal(f.state.binding('thread-a')?.title, 'project-a · готово');
-    assert.equal(f.state.binding('thread-b')?.title, 'project-a · готово');
-    const restarted = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
-    await restarted.discover();
-    await restarted.update(message(1, 101, 'A'));
-    await restarted.update(message(2, 102, 'B'));
-    assert.deepEqual(f.codex.writes.map(w => w.params.threadId), ['thread-a', 'thread-b']);
-    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 2);
+    assert.equal(f.state.binding('thread-a')?.title, original.title);
+    assert.equal(f.state.binding('thread-a')?.topicId, original.topicId);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'editForumTopic').length, 0);
   } finally { f.close(); }
 });
 

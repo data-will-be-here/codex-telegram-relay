@@ -66,16 +66,11 @@ test('topic repair cannot hijack another session, bypass roots, unignore a sessi
   } finally { f.close(); }
 });
 
-test('status titles stay short, omit dialogue/ID and reflect native waiting flags', () => {
-  const session = { id: 'thread-a', cwd: join('root', 'project'), status: 'active', activeFlags: [] as string[] };
-  assert.equal(topicTitle(session, 'status'), 'project · работа');
-  assert.equal(topicTitle({ ...session, activeFlags: ['waitingOnApproval'] }, 'status'), 'project · ждёт');
-  assert.equal(topicTitle({ ...session, activeFlags: ['waitingOnUserInput'] }, 'status'), 'project · ждёт');
-  assert.equal(topicTitle({ ...session, status: 'idle' }, 'status'), 'project · готово');
-  assert.equal(topicTitle(session, 'simple'), 'project · thread-a');
-  const long = topicTitle({ ...session, cwd: join('root', '🎁'.repeat(100)) }, 'status');
-  assert.ok(long.length <= 128);
-  assert.ok(long.endsWith(' · работа'));
+test('static project/id titles remain bounded without splitting Unicode', () => {
+  assert.equal(topicTitle({id:'1234567890',cwd:join('root','project')}),'project · 12345678');
+  const long=topicTitle({id:'1234567890',cwd:join('root','🎁'.repeat(100))});
+  assert.ok(long.length<=128);
+  assert.ok(long.endsWith(' · 12345678'));
   assert.ok(!/[\uD800-\uDBFF] · /u.test(long));
 });
 
@@ -84,7 +79,7 @@ test('a lost rename response retries idempotently, accepts not-modified and neve
   try {
     const session = { id: 'thread-a', cwd: f.temp.dir, status: 'idle' };
     const binding = (await f.topics.ensure(session))!;
-    f.state.setTopicTitleMode('status');
+    f.state.confirmTopicTitle('thread-a', 'legacy status title');
     const call = f.telegram.call.bind(f.telegram); let renames = 0;
     f.telegram.call = async (method, params = {}) => {
       if (method === 'editForumTopic') { renames++; throw new TelegramError(renames === 1 ? 'Rename response lost' : 'Bad Request: TOPIC_NOT_MODIFIED', renames === 1 ? 0 : 400); }
@@ -96,7 +91,7 @@ test('a lost rename response retries idempotently, accepts not-modified and neve
     f.state.deferTopicTitle(session.id, 0);
     await f.topics.ensure(session);
     assert.equal(renames, 2);
-    assert.equal(f.state.binding(session.id)?.title, topicTitle(session, 'status'));
+    assert.equal(f.state.binding(session.id)?.title, topicTitle(session));
     await f.topics.ensure(session);
     assert.equal(renames, 2);
     assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 1);
@@ -109,7 +104,7 @@ test('rename rate limits persist globally and do not block existing topic delive
     const a = { id: 'thread-a', cwd: f.temp.dir, status: 'active' };
     const b = { ...a, id: 'thread-b' };
     const first = (await f.topics.ensure(a))!; const second = (await f.topics.ensure(b))!;
-    f.state.setTopicTitleMode('status');
+    f.state.confirmTopicTitle('thread-a', 'legacy status title');
     let renames = 0;
     f.telegram.call = async () => { renames++; throw new TelegramError('Too Many Requests', 429, 60); };
     assert.equal((await f.topics.ensure(a))?.topicId, first.topicId);
@@ -127,7 +122,7 @@ test('a missing topic detected during title sync uses the same journaled recover
     const session = { id: 'thread-a', cwd: f.temp.dir, status: 'active' };
     const first = (await f.topics.ensure(session))!;
     f.state.enqueue('final/a/saved', first.topicId, 'Saved');
-    f.state.setTopicTitleMode('status');
+    f.state.confirmTopicTitle('thread-a', 'legacy status title');
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params = {}) => {
       if (method === 'editForumTopic') throw new TelegramError('Bad Request: message thread not found', 400);

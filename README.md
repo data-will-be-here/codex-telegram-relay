@@ -18,7 +18,7 @@ Your Telegram bot / private project topics
 
 - No VPS, webhook, public port or cloud relay to install.
 - Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
-- Topics default to the project plus a short session ID. `/topics status` switches to compact project/status names; `/topics simple` restores project/ID names. Session routing always uses saved IDs, even if visible names are identical.
+- Topics use the project plus a short session ID. Session routing uses saved IDs, independently of display names.
 - Every message part starts with an italic `» project-name` signature, including project notices outside topics. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
 - Replies immediately steer a running turn or start the next turn when idle.
@@ -54,7 +54,7 @@ npm start -- start
 
 Once running, the relay automatically creates a topic for each eligible session in your selected projects. Type in that topic to talk to its Codex session. Stop with Ctrl+C: the existing Codex daemon and its work keep running.
 
-Topic names are optional display settings: `/topics status` shows compact names such as `tgmcp · работа` (working), `tgmcp · ждёт` (waiting for input/approval), or `tgmcp · готово` (idle). `/topics simple` keeps the original `project · ID` format and is the default. The setting persists and applies on the next metadata sync, without restarting. Topic IDs and history stay unchanged across renaming/restarts; keep the private state directory when moving installations. Two sessions may share the same visible name and still route correctly by saved IDs.
+Topic names use the stable `project · ID` format. Routing uses saved native session IDs and Telegram topic IDs, independently of display names. Keep the private state directory when moving installations. The former status-title setting has been removed.
 
 Discovery uses threads loaded in the shared daemon. This can include an older thread still waiting for approval even when its terminal/IDE window is no longer visible; it is not a list of open windows.
 
@@ -99,7 +99,6 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 | `/sessions` | Show the saved session/topic bindings |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
-| `/topics`, `/topics status`, `/topics simple` | Show or change topic names globally: project/status or the original project/ID format |
 | `/bind SESSION_ID` | Bind an already created topic after uncertain creation; send inside that topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |
@@ -143,3 +142,13 @@ npm pack --dry-run
 CI runs tests on Windows, Linux and macOS with Node 22 and 24. Live model turns, credentials and real Telegram calls are excluded from CI. [Contributing](CONTRIBUTING.md), [security model](SECURITY.md).
 
 This project is independent of OpenAI and Telegram. It uses the documented local [Codex App Server](https://learn.chatgpt.com/docs/app-server) and [Telegram Bot API](https://core.telegram.org/bots/api). MIT licensed.
+
+## Incoming attachments and host questions
+
+Send a photo, screenshot, document, voice/audio recording, video, video note or animation in its project topic. Downloads use Telegram getFile and its official HTTPS file endpoint; the token-bearing URL never reaches Codex. The cloud-download limit is 20 MiB per file. Files are kept in a private cache outside your checkout (200 MiB total, seven-day retention; expired files are cleaned on the next attachment). Captions are forwarded as user input. Albums are delivered as individual messages, not as one atomic prompt.
+
+JPEG, PNG and WebP are passed as native localImage input; other files are supplied as local paths. Small UTF-8 files also include a bounded excerpt. Native questions accept attachment context as text/path; the agent may need its normal permission to inspect the file. The relay never executes or extracts uploads.
+
+Audio/video files are received, but this version does not transcribe speech or extract video frames. That needs a separate local processor or an explicitly approved external service. File access and inspection still follow native Codex permissions; the relay does not widen them.
+
+Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from a bounded tail of the selected session journal because Codex 0.166.0 omits them from App Server items. Their answers are delivered as ordinary user input to the matching session; the host UI form may remain open. Journal recovery is limited to the latest turn, seven days and an 8 MiB tail; it is not a full-history guarantee. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.

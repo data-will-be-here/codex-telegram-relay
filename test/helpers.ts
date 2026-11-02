@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { string, type Codex, type Json, type Session, type Telegram, type MessageMode } from '../src/types.js';
+import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput } from '../src/types.js';
 
 export function messageBody(message: Json): string {
   const text = string(message.text);
@@ -34,8 +34,8 @@ export class FakeCodex implements Codex {
     return { ...session, status: { type: session.status } };
   }
   async turns(threadId: string): Promise<Json[]> { return this.histories.get(threadId) ?? []; }
-  async start(threadId: string, text: string): Promise<unknown> { this.writes.push({ method: 'start', params: { threadId, text } }); return {}; }
-  async steer(threadId: string, turnId: string, text: string): Promise<unknown> {
+  async start(threadId: string, text: string | UserInput[]): Promise<unknown> { this.writes.push({ method: 'start', params: { threadId, text } }); return {}; }
+  async steer(threadId: string, turnId: string, text: string | UserInput[]): Promise<unknown> {
     this.writes.push({ method: 'steer', params: { threadId, turnId, text } });
     if (this.failSteer) throw new Error('Ambiguous native timeout.');
     return {};
