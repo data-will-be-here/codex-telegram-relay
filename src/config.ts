@@ -10,6 +10,7 @@ export interface Config {
   ownerId: number;
   roots: string[];
   codexBinary: string;
+  sessionScope?: 'all' | 'selected';
   ignoredThreadIds?: string[];
 }
 
@@ -104,8 +105,9 @@ export function privateRead(path: string, maxBytes = 64 * 1024): string {
 
 export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
   const raw = object(JSON.parse(privateRead(join(home, 'config.json'))));
+  if (raw.sessionScope !== undefined && raw.sessionScope !== 'all' && raw.sessionScope !== 'selected') throw new Error('Invalid session scope in configuration.');
   if (raw.version !== 1 || !Number.isSafeInteger(raw.ownerId) || Number(raw.ownerId) <= 0 ||
-      !Array.isArray(raw.roots) || raw.roots.length === 0 || !raw.roots.every(x => typeof x === 'string' && isAbsolute(x))) {
+      !Array.isArray(raw.roots) || (raw.sessionScope !== 'all' && raw.roots.length === 0) || !raw.roots.every(x => typeof x === 'string' && isAbsolute(x))) {
     throw new Error('Invalid configuration; run setup again.');
   }
   const savedBinary = string(raw.codexBinary);
@@ -118,6 +120,7 @@ export function loadConfig(home: string, options: { codexBinary?: string; recove
     catch { throw new Error('The saved Codex executable is missing and no replacement was found. Install/start Codex, or run start --codex-bin PATH. Bot pairing and topics are preserved.'); }
   }
   const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: binary };
+  if (raw.sessionScope === 'all' || raw.sessionScope === 'selected') config.sessionScope = raw.sessionScope;
   if (raw.ignoredThreadIds !== undefined) {
     if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
       throw new Error('Invalid ignored session list.');
@@ -150,6 +153,13 @@ export function allowedDirectory(cwd: string, roots: readonly string[]): boolean
       return diff === '' || (!isAbsolute(diff) && diff !== '..' && !diff.startsWith(`..${sep}`));
     });
   } catch { return false; }
+}
+
+/** Automatic mode authorizes interactive session directories, without altering native execution policy. */
+export function allowedSessionDirectory(cwd: string, config: Pick<Config, 'roots' | 'sessionScope'>): boolean {
+  if (config.sessionScope !== 'all') return allowedDirectory(cwd, config.roots);
+  try { return isAbsolute(cwd) && statSync(realpathSync(cwd)).isDirectory(); }
+  catch { return false; }
 }
 
 function packageBinaries(root: string): string[] {

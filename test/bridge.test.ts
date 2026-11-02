@@ -8,6 +8,31 @@ import { Outbox, TelegramError } from '../src/telegram.js';
 import { RpcError } from '../src/codex.js';
 import { array, object, string } from '../src/types.js';
 
+test('automatic discovery picks up a later session in a new project and routes its messages while preserving ignored sessions', async () => {
+  const f = await fixture();
+  try {
+    const newProject = join(f.dir, 'new-project'); mkdirSync(newProject);
+    f.codex.sessions.push({ id: 'new-session', cwd: newProject, name: '', status: 'idle' }, { id: 'ignored-session', cwd: newProject, name: '', status: 'idle' });
+    await f.bridge.discover();
+    assert.equal(f.state.binding('new-session'), undefined);
+    const config = { ...f.bridge.config, sessionScope: 'all' as const, ignoredThreadIds: ['ignored-session'] };
+    const automatic = new Bridge(config, f.state, f.codex, f.telegram);
+    await automatic.discover();
+    const topic = f.state.binding('new-session')?.topicId;
+    assert.ok(topic, 'A session in a newly opened project must receive a topic automatically.');
+    assert.equal(f.state.binding('ignored-session'), undefined);
+    await automatic.update(message(990, topic, 'Continue in the new project'));
+    assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'new-session', text: 'Continue in the new project' } }]);
+    await automatic.notification('item/completed', { threadId: 'new-session', turnId: 'turn', item: { id: 'reply', type: 'agentMessage', phase: 'commentary', text: 'Working in the new project' } });
+    await automatic.notification('item/completed', { threadId: 'ignored-session', turnId: 'turn', item: { id: 'ignored-reply', type: 'agentMessage', phase: 'commentary', text: 'Do not relay this' } });
+    await f.drain();
+    assert.deepEqual(f.telegram.sent().map(messageBody), ['Working in the new project']);
+    assert.equal(f.telegram.sent()[0]!.message_thread_id, topic);
+    await automatic.discover();
+    assert.equal(f.state.bindings().length, 3);
+  } finally { f.close(); }
+});
+
 test('known host questions remain answerable after a later turn and reconnect without importing unrelated old questions', async () => {
   const f = await fixture();
   const askedAtMs = Date.parse('2026-11-02T10:00:01Z'); let later = false;

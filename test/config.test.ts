@@ -48,6 +48,20 @@ test('local session preferences persist without changing the bot token', () => {
   } finally { temp.close(); }
 });
 
+test('automatic session scope persists with no project allowlist and invalid scopes are rejected', () => {
+  const f = temporary();
+  try {
+    const config = { version: 1 as const, ownerId: 42, roots: [], codexBinary: process.execPath, sessionScope: 'all' as const, ignoredThreadIds: ['ignored'] };
+    saveConfig(f.dir, config, String(12345) + ':' + 'synthetic'.repeat(4));
+    const loaded = loadConfig(f.dir).config;
+    assert.equal(loaded.sessionScope, 'all');
+    assert.deepEqual(loaded.roots, []);
+    assert.deepEqual(loaded.ignoredThreadIds, ['ignored']);
+    writeFileSync(join(f.dir, 'config.json'), JSON.stringify({ ...config, sessionScope: 'invalid' }));
+    assert.throws(() => loadConfig(f.dir), /session scope/u);
+  } finally { f.close(); }
+});
+
 test('a missing saved Codex binary is rediscovered without rewriting the token or saved config before compatibility checks', () => {
   const f = temporary(); const previousPath = process.env.PATH;
   try {

@@ -2,6 +2,14 @@
 
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
+## 0.1.12 automatic discovery
+
+Windows validation: 98 tests, 96 passed and two Unix-only tests skipped; type checking and package-content checks passed. Regression coverage verifies a later session in a new project receives one persistent topic, accepts native input and returns assistant output in automatic mode; ignored sessions remain excluded. Topic recovery also accepts explicitly enabled automatic scope while retaining ignored-session checks. Selected-project regressions remain unchanged. Runtime dependency audit reported zero known vulnerabilities.
+
+The implementation commit c5c0b48 passed all six CI jobs on Windows, macOS and Linux with Node 22/24. Release instructions point agents to main and installation to the version tag; selected-project defaults remain unchanged.
+
+A read-only check against the existing daemon confirmed the missing new-project session was loaded but outside selected roots. After explicitly enabling automatic scope in the local configuration, that same session passed directory eligibility and the previously ignored session remained ignored. No model turn or native attachment was used for this check. Real topic creation under the new mode still requires restarting the existing relay and observing the resulting binding.
+
 ## Public preview acceptance
 
 Version 0.1.11 passed CI on Windows/macOS/Linux with Node 22/24. The final Windows environment fix isolates the ACL helper from inherited PowerShell 7 module paths. Real Telegram photo input reached the selected native session and was visually identified. A live host-question choice returned from Telegram to that same session, confirming the reverse question-answer path. Full authenticated installation and bot exchange on a clean Mac/Linux machine, and sleep/network-outage acceptance, remain follow-up checks; they are not implied by CI success.

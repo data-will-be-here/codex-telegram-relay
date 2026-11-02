@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { allowedDirectory, type Config } from './config.js';
+import { allowedSessionDirectory, type Config } from './config.js';
 import { RpcError } from './codex.js';
 import { State } from './state.js';
 import { Topics } from './topics.js';
@@ -44,7 +44,7 @@ export class Bridge {
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.attached) if (!loaded.has(id)) this.attached.delete(id);
       for (const session of sessions) {
-        if (this.config.ignoredThreadIds?.includes(session.id) || !allowedDirectory(session.cwd, this.config.roots)) { this.attached.delete(session.id); continue; }
+        if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) { this.attached.delete(session.id); continue; }
         try {
           const previous = this.state.binding(session.id);
           let binding = await this.topics.ensure(session);
@@ -228,9 +228,9 @@ export class Bridge {
       this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
-      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Start Codex in a configured project.'); return;
+      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
     if (/^\/(?:bind|repair)(?:\s|$)/u.test(text)) {
       const [command, prefix, extra] = text.split(/\s+/u);
       if (!prefix || extra || (command === '/bind' && topicId === null)) { this.notice(topicId, 'Use /bind SESSION_ID inside the existing topic, or /repair SESSION_ID to explicitly retry creation.'); return; }
@@ -258,7 +258,7 @@ export class Bridge {
     }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding || !this.attached.has(binding.threadId)) { this.notice(topicId, 'Use an attached project topic. Open Codex in a configured project if it is missing.'); return; }
-    if (!allowedDirectory(binding.cwd, this.config.roots)) throw new Error('Project is outside configured roots.');
+    if (!allowedSessionDirectory(binding.cwd, this.config)) throw new Error('Project is outside configured roots.');
     const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.pending(p));
     if (!text.startsWith('/say ') && !text.startsWith('/') && question.length) {
       const focused = question.filter(p => p.freeText);
@@ -441,7 +441,7 @@ export class Bridge {
   }
   private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
     const thread = await this.codex.read(binding.threadId);
-    if (!allowedDirectory(string(thread.cwd), this.config.roots)) throw new RpcError('Native session moved outside configured roots.', false);
+    if (!allowedSessionDirectory(string(thread.cwd), this.config)) throw new RpcError('Native session moved outside configured roots.', false);
     const status = string(object(thread.status).type);
     if (status === 'active') {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
@@ -478,7 +478,7 @@ export class Bridge {
   }
   private async stillAllowed(binding: Binding): Promise<boolean> {
     const current = await this.codex.read(binding.threadId);
-    if (allowedDirectory(string(current.cwd), this.config.roots)) return true;
+    if (allowedSessionDirectory(string(current.cwd), this.config)) return true;
     this.attached.delete(binding.threadId);
     this.notice(binding.topicId, 'This native session moved outside your selected projects. Relaying is paused; select that project locally to reconnect it.');
     return false;
