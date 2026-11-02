@@ -77,10 +77,10 @@ export class Outbox {
     if (binding && this.ignoredThreadIds.includes(binding.threadId)) { this.state.cancelDelivery(delivery.id); return true; }
     this.state.sending(delivery.id);
     try {
-      // Approval payloads stay verbatim so Markdown cannot conceal command/diff characters.
+      // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
       const limit = 3500 - projectHeader(project).length - 2;
-      const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:final|reply|assistant)\//u.test(delivery.key), limit);
+      const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:(?:final|reply|assistant)\/|prompt\/approval\/)/u.test(delivery.key), limit);
       let messageId: number | null = null;
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;

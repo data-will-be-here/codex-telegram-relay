@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 (unreleased)
+
+- Replace raw command-approval JSON with reason, working directory and a literal command block. Omit transport IDs and duplicate parsed actions while retaining additional permission/security context.
+- Render approval cards with escaped dynamic text and command/diff code blocks, preserving exact command characters and placing buttons after the final message part. Approval validation, one-shot owner callbacks and oversized-request terminal fallback remain unchanged.
+
 ## 0.1.12
 
 - Add explicit local automatic discovery with `sessions scope all` or `setup --scope all`, including future projects without repeated setup. Preserve selected-project defaults and ignored-session/subagent exclusions.

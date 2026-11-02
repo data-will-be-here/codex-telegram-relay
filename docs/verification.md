@@ -2,6 +2,10 @@
 
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
+## 0.1.13 command approval cards (unreleased)
+
+Regression tests reproduced the raw JSON command display before the fix. New command cards retain literal command characters (including nested Markdown fences and trailing whitespace), show reason and working directory, remove transport metadata and duplicate parsed actions, and retain additional permission/security fields. Multipart commands remain complete and expose controls only on the final part. File/permission approval payloads remain complete inside literal code blocks. Existing owner/topic checks, one-shot callbacks, request resolution and oversized-request terminal fallback remain covered. Local Windows validation: 101 tests, 99 passed, two platform skips; type/package checks passed and the runtime audit reported zero known vulnerabilities. Live appearance requires restarting the local relay and receiving a new native approval; no real approval was created or answered during these tests.
+
 ## 0.1.12 automatic discovery
 
 Windows validation: 98 tests, 96 passed and two Unix-only tests skipped; type checking and package-content checks passed. Regression coverage verifies a later session in a new project receives one persistent topic, accepts native input and returns assistant output in automatic mode; ignored sessions remain excluded. Topic recovery also accepts explicitly enabled automatic scope while retaining ignored-session checks. Selected-project regressions remain unchanged. Runtime dependency audit reported zero known vulnerabilities.
