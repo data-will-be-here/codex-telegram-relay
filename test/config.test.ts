@@ -22,6 +22,17 @@ test('saving configuration removes pre-existing broad Windows grants from both t
   } finally { temp.close(); }
 });
 
+test('Windows protection ignores incompatible module paths inherited through npm from PowerShell 7', { skip: process.platform !== 'win32' }, () => {
+  const f = temporary(); const previous = process.env.PSModulePath;
+  try {
+    const modules = join(f.dir, 'modules'); const security = join(modules, 'Microsoft.PowerShell.Security');
+    mkdirSync(security, { recursive: true });
+    writeFileSync(join(security, 'Microsoft.PowerShell.Security.psd1'), "@{ RootModule = 'missing-runtime.dll'; ModuleVersion = '99.0.0'; GUID = '2601270a-0448-4cbe-8f49-a063638be25c' }");
+    process.env.PSModulePath = modules;
+    assert.doesNotThrow(() => saveConfig(join(f.dir, 'home'), { version: 1, ownerId: 42, roots: [f.dir], codexBinary: process.execPath }, String(12345) + ':' + 'synthetic'.repeat(4)));
+  } finally { if (previous === undefined) delete process.env.PSModulePath; else process.env.PSModulePath = previous; f.close(); }
+});
+
 test('local session preferences persist without changing the bot token', () => {
   const temp = temporary();
   try {

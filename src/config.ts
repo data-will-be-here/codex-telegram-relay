@@ -34,8 +34,11 @@ export function protectWindowsDirectory(path: string): void {
   // Replace access rules, preserving audit policy. /grant:r alone replaces only our own entry.
   const script = `
 $ErrorActionPreference = 'Stop'
+$privateStage = 'identity'
+try {
 $privateSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $privateRoot = $env:CODEX_RELAY_PRIVATE_DIRECTORY
+$privateStage = 'inventory'
 $privateTargets = @($privateRoot)
 foreach ($privateName in @('config.json','bot.token','state.sqlite','state.sqlite-wal','state.sqlite-shm','relay.lock')) {
   $privateFile = Join-Path $privateRoot $privateName
@@ -49,9 +52,11 @@ if (Test-Path -LiteralPath $privateCache) {
   $privateTargets += @(Get-ChildItem -LiteralPath $privateCache -Force | Where-Object { $_.Name -match '^[a-f0-9-]{36}\\.[a-z0-9]{1,10}$' } | ForEach-Object { $_.FullName })
 }
 foreach ($privateTarget in $privateTargets) {
+  $privateStage = 'read'
   $privateItem = Get-Item -LiteralPath $privateTarget -Force
   if ($privateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Private paths must not be links' }
   $privateAcl = Get-Acl -LiteralPath $privateTarget
+  $privateStage = 'rules'
   $privateAcl.SetAccessRuleProtection($true, $false)
   foreach ($privateOldRule in @($privateAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) { $privateAcl.RemoveAccessRuleSpecific($privateOldRule) }
   if ($privateItem.PSIsContainer) {
@@ -59,17 +64,33 @@ foreach ($privateTarget in $privateTargets) {
   } else {
     $privateRule = New-Object System.Security.AccessControl.FileSystemAccessRule($privateSid, 'FullControl', 'Allow')
   }
+  $privateStage = 'owner'
   if ($privateAcl.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $privateSid) { $privateAcl.SetOwner($privateSid) }
   $privateAcl.AddAccessRule($privateRule)
+  $privateStage = 'write'
   if ($privateItem.PSIsContainer) { [IO.Directory]::SetAccessControl($privateTarget, $privateAcl) }
   else { [IO.File]::SetAccessControl($privateTarget, $privateAcl) }
+  $privateStage = 'verify'
   $privateActual = Get-Acl -LiteralPath $privateTarget
   $privateRules = @($privateActual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
   if (!$privateActual.AreAccessRulesProtected -or $privateRules.Count -ne 1 -or $privateRules[0].IdentityReference -ne $privateSid -or $privateRules[0].AccessControlType -ne 'Allow' -or $privateRules[0].FileSystemRights -ne 'FullControl') { throw 'Private ACL verification failed' }
 }
+} catch {
+  $privateFailure = $_.Exception
+  if ($privateFailure.InnerException) { $privateFailure = $privateFailure.InnerException }
+  [Console]::Out.WriteLine('ACL_FAILURE/' + $privateStage + '/' + $privateFailure.GetType().Name + '/' + $privateFailure.HResult)
+  exit 1
+}
 `;
-  try { execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore', windowsHide: true, timeout: 30_000, env: { ...process.env, CODEX_RELAY_PRIVATE_DIRECTORY: path } }); }
-  catch { throw new Error('Cannot protect private relay files on Windows. Check directory ownership and access permissions.'); }
+  const env: NodeJS.ProcessEnv = { ...process.env, CODEX_RELAY_PRIVATE_DIRECTORY: path };
+  // npm can inherit PS7 module paths that Windows PowerShell 5.1 cannot load.
+  for (const key of Object.keys(env)) if (key.toUpperCase() === 'PSMODULEPATH') delete env[key];
+  try { execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30_000, env }); }
+  catch (error) {
+    const stdout = object(error).stdout;
+    const code = Buffer.isBuffer(stdout) ? /ACL_FAILURE\/[a-z]+\/[A-Za-z][A-Za-z0-9]+\/-?\d+/u.exec(stdout.toString('utf8'))?.[0] : undefined;
+    throw new Error(`Cannot protect private relay files on Windows${code ? ` (${code})` : ''}. Check directory ownership and access permissions.`);
+  }
 }
 
 export function privateRead(path: string, maxBytes = 64 * 1024): string {
