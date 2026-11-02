@@ -1,8 +1,9 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
-import { type State } from './state.js';
+import { type State, type Delivery, type RichDeliveryPart } from './state.js';
 import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
+import { richMessages, type RichPart } from './rich.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
@@ -79,6 +80,11 @@ export class Outbox {
     try {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
+      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project) : undefined;
+      if (delivery.richPlan || rich) {
+        this.state.delivered(delivery.id, await this.richDelivery(delivery, rich, project));
+        return true;
+      }
       const limit = 3500 - projectHeader(project).length - 2;
       const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:(?:final|reply|assistant)\/|prompt\/approval\/)/u.test(delivery.key), limit);
       let messageId: number | null = null;
@@ -118,5 +124,49 @@ export class Outbox {
       throw error;
     }
     return true;
+  }
+
+  private async richDelivery(delivery: Delivery, rich: RichPart[] | undefined, project?: string | null): Promise<number | null> {
+    const parts: RichDeliveryPart[] = delivery.richPlan ?? rich!.map(part => ({
+      method: 'sendRichMessage', params: { rich_message: part.richMessage }, fallback: part.fallback,
+    }));
+    if (!delivery.richPlan) this.state.saveRichPlan(delivery.id, parts);
+    let messageId: number | null = delivery.messageId;
+    for (let index = delivery.nextPart; index < parts.length; index++) {
+      const part = parts[index]!;
+      const params = { ...part.params, chat_id: this.ownerId } as Json;
+      if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
+      if (index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
+      try {
+        let retries = 0;
+        while (true) {
+          try { messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null; break; }
+          catch (error) {
+            if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
+            await delay(Math.min(error.retryAfter ?? 2, 60) * 1000);
+          }
+        }
+      } catch (error) {
+        if (part.method === 'sendMessage' && Array.isArray(part.params.entities) && error instanceof TelegramError && error.status === 400 &&
+            /can't parse entities|entity.*(?:URL|offset|length|invalid)|wrong HTTP URL/iu.test(error.message)) {
+          delete part.params.entities;
+          this.state.saveRichPlan(delivery.id, parts);
+          index--; continue;
+        }
+        const rejectedRich = error instanceof TelegramError && [400, 404].includes(error.status) &&
+          /can't parse|\bunknown method\b|\bmethod (?:is )?not found\b|\brich[ _]message.*(?:invalid|unsupported|not supported|too|limit)|\b(?:table|block).*(?:invalid|too|limit)|\bmessage is too long\b/iu.test(error.message);
+        if (part.method !== 'sendRichMessage' || part.fallback === undefined || !rejectedRich || isMissingTopic(error)) throw error;
+        const limit = 3500 - projectHeader(project).length - 2;
+        parts.splice(index, 1, ...formatMessages(part.fallback, false, limit).map(chunk => {
+          const formatted = withProjectHeader(chunk, project);
+          return { method: 'sendMessage' as const, params: { ...formatted, link_preview_options: { is_disabled: true } } };
+        }));
+        this.state.saveRichPlan(delivery.id, parts);
+        index--; continue;
+      }
+      this.state.acceptRichPart(delivery.id, index, messageId);
+      if (this.interval > 0) await delay(this.interval);
+    }
+    return messageId;
   }
 }

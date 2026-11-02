@@ -5,7 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
 import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 
-export interface Delivery { id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null; }
+export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage'; params: Json; fallback?: string; }
+export interface Delivery {
+  id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null;
+  richPlan: RichDeliveryPart[] | null; nextPart: number; messageId: number | null;
+}
 export interface TopicOperation {
   threadId: string; cwd: string; title: string; attempt: string;
   status: 'missing' | 'creating' | 'uncertain' | 'failed' | 'retry'; retryAt: number;
@@ -53,6 +57,8 @@ export class State {
         UPDATE outbox SET status='uncertain' WHERE status='sending';
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
+      if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
+      if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(async_answers)').all().some(column => column.name === 'status')) this.db.exec("ALTER TABLE async_answers ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
       this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'");
       this.prune();
@@ -181,9 +187,20 @@ export class State {
   next(): Delivery | undefined {
     const row = this.db.prepare("SELECT * FROM outbox WHERE status='pending' ORDER BY id LIMIT 1").get();
     if (!row) return undefined;
-    return { id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text), markup: row.markup === null ? null : object(JSON.parse(string(row.markup))), projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null };
+    return {
+      id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text),
+      markup: row.markup === null ? null : object(JSON.parse(string(row.markup))), projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null,
+      richPlan: typeof row.richPlan === 'string' ? JSON.parse(row.richPlan) as RichDeliveryPart[] : null,
+      nextPart: Number(row.nextPart), messageId: row.messageId === null ? null : Number(row.messageId),
+    };
   }
   sending(id: number): void { this.db.prepare("UPDATE outbox SET status='sending' WHERE id=? AND status='pending'").run(id); }
+  saveRichPlan(id: number, parts: RichDeliveryPart[]): void {
+    this.db.prepare("UPDATE outbox SET richPlan=? WHERE id=? AND status='sending'").run(JSON.stringify(parts), id);
+  }
+  acceptRichPart(id: number, index: number, messageId: number | null): void {
+    this.db.prepare("UPDATE outbox SET nextPart=?,messageId=? WHERE id=? AND status='sending' AND nextPart=?").run(index + 1, messageId, id, index);
+  }
   delivered(id: number, messageId: number | null): void { this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id); }
   uncertain(id: number): void { this.db.prepare("UPDATE outbox SET status='uncertain' WHERE id=?").run(id); }
   cancelDelivery(id: number): void { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE id=? AND status='pending'").run(id); }

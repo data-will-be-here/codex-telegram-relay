@@ -167,6 +167,8 @@ Duplicate incoming updates do not execute twice. Writes with an ambiguous result
 
 ## Development
 
+Unreleased changes on `dev` (0.1.13): assistant answers containing tables or headings use native Telegram rich messages. Long tables split between rows with repeated headers; wide tables and oversized cells use labelled paragraphs. A definite format rejection falls back to readable row cards. Short replies and approvals retain ordinary messages. This is independent of `/mode all|compact`. The release installation instructions above remain pinned to v0.1.12 until the next release.
+
 ```sh
 npm ci
 npm run typecheck
