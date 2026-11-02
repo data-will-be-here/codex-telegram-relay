@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.1.12 (unreleased)
+## 0.1.12
 
 - Add explicit local automatic discovery with `sessions scope all` or `setup --scope all`, including future projects without repeated setup. Preserve selected-project defaults and ignored-session/subagent exclusions.
 - Apply session scope consistently to discovery, input, outgoing events, approval controls and topic recovery. Show discovery mode at startup, in `/status` and in read-only `doctor` eligibility diagnostics.
+- Add agent-assisted installation prompts and workflows in both READMEs: read release documentation from main, install the version tag, explain session scopes and wait for the owner's choice before configuring them.
 
 ## 0.1.11
 
