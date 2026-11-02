@@ -30,11 +30,46 @@ export function privateDirectory(path: string): void {
 
 export function protectWindowsDirectory(path: string): void {
   if (process.platform !== 'win32') return;
-  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-  const identity = execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true });
-  const sid = identity.match(/S-1-5-[0-9-]+/u)?.[0];
-  if (!sid) throw new Error('Cannot identify Windows account to protect configuration.');
-  execFileSync(join(system, 'icacls.exe'), [path, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { stdio: 'ignore', windowsHide: true });
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  // Replace access rules, preserving audit policy. /grant:r alone replaces only our own entry.
+  const script = `
+$ErrorActionPreference = 'Stop'
+$privateSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$privateRoot = $env:CODEX_RELAY_PRIVATE_DIRECTORY
+$privateTargets = @($privateRoot)
+foreach ($privateName in @('config.json','bot.token','state.sqlite','state.sqlite-wal','state.sqlite-shm','relay.lock')) {
+  $privateFile = Join-Path $privateRoot $privateName
+  if (Test-Path -LiteralPath $privateFile) { $privateTargets += $privateFile }
+}
+$privateCache = Join-Path $privateRoot 'attachments'
+if (Test-Path -LiteralPath $privateCache) {
+  $privateCacheItem = Get-Item -LiteralPath $privateCache -Force
+  if (($privateCacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or !$privateCacheItem.PSIsContainer) { throw 'Invalid private cache' }
+  $privateTargets += $privateCache
+  $privateTargets += @(Get-ChildItem -LiteralPath $privateCache -Force | Where-Object { $_.Name -match '^[a-f0-9-]{36}\\.[a-z0-9]{1,10}$' } | ForEach-Object { $_.FullName })
+}
+foreach ($privateTarget in $privateTargets) {
+  $privateItem = Get-Item -LiteralPath $privateTarget -Force
+  if ($privateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Private paths must not be links' }
+  $privateAcl = Get-Acl -LiteralPath $privateTarget
+  $privateAcl.SetAccessRuleProtection($true, $false)
+  foreach ($privateOldRule in @($privateAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) { $privateAcl.RemoveAccessRuleSpecific($privateOldRule) }
+  if ($privateItem.PSIsContainer) {
+    $privateRule = New-Object System.Security.AccessControl.FileSystemAccessRule($privateSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+  } else {
+    $privateRule = New-Object System.Security.AccessControl.FileSystemAccessRule($privateSid, 'FullControl', 'Allow')
+  }
+  if ($privateAcl.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $privateSid) { $privateAcl.SetOwner($privateSid) }
+  $privateAcl.AddAccessRule($privateRule)
+  if ($privateItem.PSIsContainer) { [IO.Directory]::SetAccessControl($privateTarget, $privateAcl) }
+  else { [IO.File]::SetAccessControl($privateTarget, $privateAcl) }
+  $privateActual = Get-Acl -LiteralPath $privateTarget
+  $privateRules = @($privateActual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+  if (!$privateActual.AreAccessRulesProtected -or $privateRules.Count -ne 1 -or $privateRules[0].IdentityReference -ne $privateSid -or $privateRules[0].AccessControlType -ne 'Allow' -or $privateRules[0].FileSystemRights -ne 'FullControl') { throw 'Private ACL verification failed' }
+}
+`;
+  try { execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore', windowsHide: true, timeout: 30_000, env: { ...process.env, CODEX_RELAY_PRIVATE_DIRECTORY: path } }); }
+  catch { throw new Error('Cannot protect private relay files on Windows. Check directory ownership and access permissions.'); }
 }
 
 export function privateRead(path: string, maxBytes = 64 * 1024): string {
@@ -46,13 +81,22 @@ export function privateRead(path: string, maxBytes = 64 * 1024): string {
   return readFileSync(path, 'utf8');
 }
 
-export function loadConfig(home: string): { config: Config; token: string } {
+export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
   const raw = object(JSON.parse(privateRead(join(home, 'config.json'))));
   if (raw.version !== 1 || !Number.isSafeInteger(raw.ownerId) || Number(raw.ownerId) <= 0 ||
       !Array.isArray(raw.roots) || raw.roots.length === 0 || !raw.roots.every(x => typeof x === 'string' && isAbsolute(x))) {
     throw new Error('Invalid configuration; run setup again.');
   }
-  const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: validateBinary(string(raw.codexBinary)) };
+  const savedBinary = string(raw.codexBinary);
+  let binary: string;
+  try { binary = validateBinary(options.codexBinary ?? savedBinary); }
+  catch (error) {
+    // An existing but invalid executable is a configuration/security error, not permission to replace it.
+    if (!options.recoverBinary || options.codexBinary || !isAbsolute(savedBinary) || existsSync(savedBinary) || (process.platform === 'win32' && !savedBinary.toLowerCase().endsWith('.exe'))) throw error;
+    try { binary = findCodex(); }
+    catch { throw new Error('The saved Codex executable is missing and no replacement was found. Install/start Codex, or run start --codex-bin PATH. Bot pairing and topics are preserved.'); }
+  }
+  const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: binary };
   if (raw.ignoredThreadIds !== undefined) {
     if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
       throw new Error('Invalid ignored session list.');
@@ -61,7 +105,7 @@ export function loadConfig(home: string): { config: Config; token: string } {
   }
   const token = privateRead(join(home, 'bot.token'), 4096).trim();
   if (!/^\d{5,16}:[A-Za-z0-9_-]{20,200}$/u.test(token)) throw new Error('Invalid bot token file.');
-  return { config, token };
+  return { config, token, binaryChanged: binary !== savedBinary };
 }
 
 export function saveConfig(home: string, config: Config, token?: string): void {

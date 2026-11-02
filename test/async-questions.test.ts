@@ -79,3 +79,63 @@ test('sensitive or malformed host questions produce a terminal-only marker witho
     assert.ok(!JSON.stringify(result).includes('Private secret'));
   } finally { f.close(); }
 });
+
+test('an oversized host question produces a terminal notice without exposing its payload or treating tool output as a question', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    const event = (payload: unknown) => JSON.stringify({ timestamp: '2026-11-02T10:00:01Z', type: 'response_item', payload }) + '\n';
+    writeFileSync(path, event({ type: 'function_call', name: 'request_user_input_async', call_id: 'large', arguments: JSON.stringify({ questions: [{ title: 'private'.repeat(50_000) }] }) }) +
+      event({ type: 'function_call_output', output: 'request_user_input_async'.repeat(30_000) }));
+    const result = await new AsyncQuestionReader().read(path, 'turn', 0);
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.needsTerminal, true);
+    assert.ok(!JSON.stringify(result).includes('private'));
+  } finally { f.close(); }
+});
+
+test('question capacity overflow is visible and an external answer retires its notice', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    const event = (payload: unknown) => JSON.stringify({ timestamp: '2026-11-02T10:00:01Z', type: 'response_item', payload }) + '\n';
+    writeFileSync(path, Array.from({ length: 33 }, (_, index) => event({ type: 'function_call', name: 'request_user_input_async', call_id: `q-${index}`, arguments: JSON.stringify({ questions: [{ title: 'Question' }] }) })).join(''));
+    const reader = new AsyncQuestionReader();
+    const questions = await reader.read(path, 'turn', 0);
+    assert.equal(questions.filter(q => !q.needsTerminal).length, 32);
+    assert.equal(questions.find(q => q.callId === 'q-32')?.needsTerminal, true);
+    const reply = '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'q-32', 0]), answer: 'Done' }]) + '\n</send_user_message_question_reply>';
+    appendFileSync(path, event({ type: 'message', role: 'user', content: [{ type: 'input_text', text: reply }] }));
+    assert.equal((await reader.read(path, 'turn', 0)).some(q => q.callId === 'q-32'), false);
+  } finally { f.close(); }
+});
+
+test('an unanswered question survives a new turn until an explicit native answer arrives', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    const event = (type: string, payload: unknown, timestamp = '2026-11-02T10:00:01Z') => JSON.stringify({ timestamp, type, payload }) + '\n';
+    writeFileSync(path, event('event_msg', { type: 'task_started', turn_id: 'turn-1' }) + event('response_item', { type: 'function_call', name: 'request_user_input_async', call_id: 'waiting', arguments: JSON.stringify({ questions: [{ title: 'Pick' }] }) }));
+    const since = Date.parse('2026-11-02T10:00:00Z');
+    const reader = new AsyncQuestionReader();
+    assert.equal((await reader.read(path, 'turn-1', since))[0]?.callId, 'waiting');
+    appendFileSync(path, event('event_msg', { type: 'task_started', turn_id: 'turn-2' }, '2026-11-02T10:01:01Z'));
+    const next = await reader.read(path, 'turn-2', since + 60_000);
+    assert.equal(next[0]?.callId, 'waiting');
+    assert.equal(next[0]?.turnId, 'turn-1');
+    assert.equal((await new AsyncQuestionReader().read(path, 'turn-2', since))[0]?.turnId, 'turn-1');
+  } finally { f.close(); }
+});
+
+test('questions already answered through Telegram do not consume journal question capacity', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'session.jsonl');
+    writeFileSync(path, Array.from({ length: 33 }, (_, i) => JSON.stringify({ timestamp: '2026-11-02T10:00:01Z', type: 'response_item', payload: { type: 'function_call', name: 'request_user_input_async', call_id: `q-${i}`, arguments: JSON.stringify({ questions: [{ title: 'Question' }] }) } }) + '\n').join(''));
+    const reader = new AsyncQuestionReader();
+    await reader.read(path, 'turn', 0);
+    const result = await reader.read(path, 'turn', 0, Array.from({ length: 32 }, (_, i) => `q-${i}`));
+    assert.deepEqual(result.map(q => q.callId), ['q-32']);
+    assert.equal(result[0]?.needsTerminal, undefined);
+  } finally { f.close(); }
+});

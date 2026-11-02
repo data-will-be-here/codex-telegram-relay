@@ -61,7 +61,7 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.10' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.11' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -124,18 +124,19 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string): Promise<Json> { return object(object(await this.call('thread/read', { threadId })).thread); }
-  async asyncQuestions(threadId: string): Promise<AsyncQuestion[]> {
+  async asyncQuestions(threadId: string, historySinceMs?: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
     const thread = await this.read(threadId);
     const path = string(thread.path);
     const turn = (await this.turns(threadId))[0];
-    if (!turn || !path || typeof turn.startedAt !== 'number' || Date.now() - turn.startedAt * 1000 > 7 * 24 * 60 * 60 * 1000) { this.questionReaders.delete(threadId); return []; }
+    if (!turn || !path || typeof turn.startedAt !== 'number') { this.questionReaders.delete(threadId); return []; }
     const sessionsRoot = await realpath(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'sessions'));
     const target = await realpath(path);
     const diff = relative(sessionsRoot, target);
     if (!diff || isAbsolute(diff) || diff === '..' || diff.startsWith(`..${sep}`) || !target.endsWith('.jsonl') || (await lstat(path)).isSymbolicLink()) throw new Error('Native question journal is outside the Codex sessions directory.');
     let reader = this.questionReaders.get(threadId);
     if (!reader) { reader = new AsyncQuestionReader(); this.questionReaders.set(threadId, reader); }
-    return reader.read(target, string(turn.id), turn.startedAt * 1000);
+    const since = historySinceMs === undefined ? Math.max(turn.startedAt * 1000, Date.now() - 7 * 24 * 60 * 60 * 1000) : Math.min(turn.startedAt * 1000, historySinceMs);
+    return reader.read(target, string(turn.id), since, answeredCallIds);
   }
   async attach(threadId: string): Promise<Json> {
     // Deliberately omit cwd/model/instructions/approval/sandbox/permissions overrides.

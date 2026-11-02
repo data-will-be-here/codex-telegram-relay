@@ -7,7 +7,7 @@ import { realpathSync, existsSync, statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
-import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, type Config } from './config.js';
+import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, type Config } from './config.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
 import { withProjectHeader } from './format.js';
@@ -96,24 +96,30 @@ async function setup(args: string[]): Promise<void> {
 }
 
 async function doctor(args: string[]): Promise<void> {
-  const binary = binaryFlag(args) ?? (configExists(dataDirectory()) ? loadConfig(dataDirectory()).config.codexBinary : findCodex());
+  const override = binaryFlag(args);
+  const configured = configExists(dataDirectory()) ? loadConfig(dataDirectory(), { recoverBinary: true, ...(override ? { codexBinary: override } : {}) }) : undefined;
+  const binary = configured?.config.codexBinary ?? override ?? findCodex();
   const codex = new CodexClient();
   try {
     await codex.connect(binary);
     const sessions = await codex.list();
     console.log(`Native shared-daemon connection: OK\nLoaded interactive sessions: ${sessions.length}\nNo threads resumed, no model turns started, no settings changed.`);
     for (const session of sessions) console.log(`  ${session.id.slice(0, 8)}  ${session.status}  ${session.cwd}`);
-    if (configExists(dataDirectory())) {
-      const { config, token } = loadConfig(dataDirectory());
+    if (configured) {
+      const { config, token } = configured;
       const username = await verifyBot(new TelegramClient(token));
       console.log(`Bot: @${username}; private topics: OK; owner configured; project roots: ${config.roots.length}`);
+      if (configured.binaryChanged) console.log('A replacement Codex executable was found. Doctor changed no files; start will save it after checking the shared daemon.');
     } else console.log('Bot configuration: not yet created. Run setup.');
   } finally { codex.close(); }
 }
 
-async function start(): Promise<void> {
+async function start(args: string[]): Promise<void> {
   const home = dataDirectory();
-  const { config, token } = loadConfig(home);
+  if (!configExists(home)) throw new Error('No relay configuration found. Run setup to pair your bot first.');
+  protectWindowsDirectory(home);
+  const override = binaryFlag(args);
+  const { config, token, binaryChanged } = loadConfig(home, { recoverBinary: true, ...(override ? { codexBinary: override } : {}) });
   const telegram = new TelegramClient(token);
   await verifyBot(telegram);
   const { State } = await import('./state.js');
@@ -121,6 +127,7 @@ async function start(): Promise<void> {
   const outbox = new Outbox(state, telegram, config.ownerId, 1100, config.ignoredThreadIds);
   let stopping = false;
   let current: CodexClient | undefined;
+  let saveRecoveredBinary = binaryChanged;
   const stop = (): void => { stopping = true; current?.close(); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   const output = async (): Promise<void> => {
@@ -154,6 +161,12 @@ async function start(): Promise<void> {
         });
         codex.on('request', request => schedule(() => bridge.request(request)));
         await codex.connect(config.codexBinary);
+        if (saveRecoveredBinary) {
+          if (!Array.isArray(object(await codex.call('thread/loaded/list', {})).data)) throw new Error('Replacement Codex returned an incompatible loaded-session response. Its path was not saved.');
+          saveConfig(home, config);
+          saveRecoveredBinary = false;
+          console.log('Codex executable path updated after a successful shared-daemon check. Bot pairing and topic bindings are preserved.');
+        }
         await bridge.discover();
         console.log('Relay connected. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.');
         let lastDiscovery = Date.now();
@@ -183,7 +196,7 @@ async function main(): Promise<void> {
   const command = args[0] ?? 'help';
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
-  if (command === 'start') return start();
+  if (command === 'start') return start(args);
   if (command === 'sessions' && ['ignore', 'unignore'].includes(args[1] ?? '')) {
     const prefix = args[2];
     if (!prefix || !/^[a-zA-Z0-9-]{6,128}$/u.test(prefix)) throw new Error('Usage: sessions ignore|unignore SESSION_ID_OR_UNIQUE_PREFIX');
@@ -212,7 +225,7 @@ async function main(): Promise<void> {
     console.log('Project added. Restart the relay to apply.'); return;
   }
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
-  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup and doctor accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a local project (restart the relay afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

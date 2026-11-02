@@ -32,7 +32,7 @@ export interface RpcRequest {
 }
 
 export interface Codex {
-  asyncQuestions?(threadId: string): Promise<import('./async-questions.js').AsyncQuestion[]>;
+  asyncQuestions?(threadId: string, historySinceMs?: number, answeredCallIds?: readonly string[]): Promise<import('./async-questions.js').AsyncQuestion[]>;
   list(): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;
   read(threadId: string): Promise<Json>;

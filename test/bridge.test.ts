@@ -8,6 +8,73 @@ import { Outbox, TelegramError } from '../src/telegram.js';
 import { RpcError } from '../src/codex.js';
 import { array, object, string } from '../src/types.js';
 
+test('known host questions remain answerable after a later turn and reconnect without importing unrelated old questions', async () => {
+  const f = await fixture();
+  const askedAtMs = Date.parse('2026-11-02T10:00:01Z'); let later = false;
+  try {
+    Object.assign(f.codex, { asyncQuestions: async (_threadId: string, since?: number) => !later || (since !== undefined && since <= askedAtMs)
+      ? [{ callId: 'kept', turnId: 'old-turn', askedAtMs, questions: [{ title: 'Still waiting?', options: ['Yes'] }] }] : [] });
+    await f.bridge.discover(); await f.drain(); later = true;
+    const restarted = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
+    await restarted.discover(); await f.drain();
+    const cards = f.telegram.sent().filter(s => s.message_thread_id === 101 && string(s.text).includes('Still waiting?'));
+    assert.equal(cards.length, 2);
+    const data = string(object(array(array(object(cards.at(-1)!.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    await restarted.update(click(900, data));
+    assert.equal(f.codex.writes.length, 1);
+  } finally { f.close(); }
+});
+
+test('a host answer rejected by an unready session stays available and can be retried exactly once when ready', async () => {
+  const f = await fixture();
+  try {
+    Object.assign(f.codex, { asyncQuestions: async () => [{ callId: 'retry', turnId: 'turn', questions: [{ title: 'Choose', options: ['A'] }] }] });
+    await f.bridge.discover(); await f.drain();
+    const card = f.telegram.sent().find(s => s.message_thread_id === 101)!;
+    const data = string(object(array(array(object(card.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    f.codex.sessions[0]!.status = 'systemError';
+    await f.bridge.update(click(901, data));
+    assert.equal(f.codex.writes.length, 0);
+    assert.equal(f.state.asyncAnswered('thread-a', 'retry'), false);
+    f.codex.sessions[0]!.status = 'idle';
+    await f.bridge.update(click(902, data)); await f.bridge.update(click(903, data));
+    assert.equal(f.codex.writes.length, 1);
+    assert.equal(f.state.asyncAnswered('thread-a', 'retry'), true);
+  } finally { f.close(); }
+});
+
+test('an uncertain host answer stays consumed after reconnect and is never automatically sent again', async () => {
+  const f = await fixture();
+  try {
+    Object.assign(f.codex, { asyncQuestions: async () => [{ callId: 'uncertain', turnId: 'turn', questions: [{ title: 'Choose', options: ['A'] }] }] });
+    f.codex.start = async (threadId, text) => { f.codex.writes.push({ method: 'start', params: { threadId, text } }); throw new RpcError('Uncertain delivery', true); };
+    await f.bridge.discover(); await f.drain();
+    const card = f.telegram.sent().find(s => s.message_thread_id === 101)!;
+    const data = string(object(array(array(object(card.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    await assert.rejects(f.bridge.update(click(906, data)), /Uncertain delivery/u);
+    await new Bridge(f.bridge.config, f.state, f.codex, f.telegram).discover();
+    await f.bridge.update(click(907, data));
+    assert.equal(f.codex.writes.length, 1);
+    assert.equal(f.state.asyncAnswered('thread-a', 'uncertain'), true);
+  } finally { f.close(); }
+});
+
+test('partial native question answers survive reconnect with a new RPC id and fresh controls', async () => {
+  const f = await fixture();
+  try {
+    const params = { threadId: 'thread-a', turnId: 'turn', itemId: 'item', questions: [{ id: 'one', question: 'First?', options: [{ label: 'A' }] }, { id: 'two', question: 'Second?', options: [{ label: 'B' }] }] };
+    f.codex.pending.add('old'); await f.bridge.request({ id: 'old', method: 'item/tool/requestUserInput', params }); await f.drain();
+    const first = string(object(array(array(object(f.telegram.sent()[0]!.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    await f.bridge.update(click(904, first));
+    f.codex.pending.delete('old'); f.codex.pending.add('new');
+    const restarted = new Bridge(f.bridge.config, f.state, f.codex, f.telegram); await restarted.discover();
+    await restarted.request({ id: 'new', method: 'item/tool/requestUserInput', params }); await f.drain();
+    assert.ok(string(f.telegram.sent().at(-1)!.text).includes('Second?'));
+    await restarted.update(message(905, 101, 'B'));
+    assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'new', result: { answers: { one: { answers: ['A'] }, two: { answers: ['B'] } } } } }]);
+  } finally { f.close(); }
+});
+
 test('host async questions have owner-scoped buttons and text answers, persist after completion, and never fake an RPC response', async () => {
   const f = await fixture();
   try {
@@ -372,8 +439,11 @@ test('moved native cwd outside approved roots cannot receive an instruction', as
   try {
     const outside = join(f.dir, 'other-project'); mkdirSync(outside);
     f.codex.sessions[0]!.cwd = outside;
-    await assert.rejects(f.bridge.update(message(1)), /outside configured roots/u);
+    await f.bridge.update(message(1));
     assert.equal(f.codex.writes.length, 0);
+    assert.equal(f.state.uncertainCount(), 0);
+    await f.drain();
+    assert.ok(f.telegram.sent().some(s => string(s.text).includes('outside configured roots')));
   } finally { f.close(); }
 });
 

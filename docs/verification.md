@@ -2,6 +2,12 @@
 
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
+## 0.1.11 audited fixes
+
+Regression tests first reproduced broad pre-existing Windows grants, silent oversized/capacity-limited questions, a question disappearing after a later turn/reconnect, an answer consumed before any native write, and partial answers lost across a new RPC ID. These scenarios now pass through the real configuration/reader/Bridge interfaces with synthetic native/Telegram adapters. Windows tests inspect actual filesystem ACLs on disposable directories/files; repeated saves preserve access without requiring audit-policy privileges. SQLite reopen tests verify interrupted host-answer attempts remain non-replayable and matching drafts/recovery timestamps survive.
+
+Missing-executable tests verify native rediscovery changes only the in-memory candidate until compatibility checks succeed; tokens/config remain byte-identical during resolution. Existing invalid files are rejected unless explicitly overridden. Runtime start checks initialization and the loaded-session interface before saving a replacement path. Installation of official Codex on CI remains a command/install smoke check; a complete live Mac installation is still an acceptance check.
+
 ## 0.1.10 journal recovery
 
 Large-journal tests reproduced both false restart/next-turn warnings and an actual current question lost before a 9 MiB tool output. They pass with streamed recovery, including an answer after a large output suppressing an already resolved question. Read-only checks of four selected live journals (largest approximately 99 MiB) returned no false recovery markers; native sessions were not modified. A real Telegram photo subsequently reached the native conversation and was visually identified, completing the incoming-photo acceptance check. Live host-question buttons after restart remain a separate acceptance check.

@@ -43,6 +43,8 @@ export class State {
         CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, topicId INTEGER, text TEXT NOT NULL, markup TEXT, status TEXT NOT NULL DEFAULT 'pending', messageId INTEGER, at INTEGER NOT NULL, projectCwd TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS async_answers(threadId TEXT NOT NULL, callId TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,callId));
+        CREATE TABLE IF NOT EXISTS host_watch(threadId TEXT PRIMARY KEY, sinceMs INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS question_progress(key TEXT PRIMARY KEY,signature TEXT NOT NULL,answers TEXT NOT NULL,at INTEGER NOT NULL);
         DELETE FROM settings WHERE key='topicTitleMode';
         CREATE TABLE IF NOT EXISTS replies(threadId TEXT PRIMARY KEY, inputId INTEGER NOT NULL, turnId TEXT);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
@@ -51,6 +53,8 @@ export class State {
         UPDATE outbox SET status='uncertain' WHERE status='sending';
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
+      if (!this.db.prepare('PRAGMA table_info(async_answers)').all().some(column => column.name === 'status')) this.db.exec("ALTER TABLE async_answers ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
+      this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'");
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
   }
@@ -102,7 +106,31 @@ export class State {
   }
   baseline(threadId: string, turnId: string): void { this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=?').run(turnId, threadId); }
   asyncAnswered(threadId: string, callId: string): boolean { return !!this.db.prepare('SELECT 1 FROM async_answers WHERE threadId=? AND callId=?').get(threadId, callId); }
-  answerAsync(threadId: string, callId: string): void { this.db.prepare('INSERT OR IGNORE INTO async_answers VALUES(?,?,?)').run(threadId, callId, Date.now()); }
+  asyncAnswerIds(threadId: string): string[] { return this.db.prepare('SELECT callId FROM async_answers WHERE threadId=?').all(threadId).map(row => string(row.callId)); }
+  beginAsyncAnswer(threadId: string, callId: string): boolean { return Number(this.db.prepare("INSERT OR IGNORE INTO async_answers(threadId,callId,at,status) VALUES(?,?,?,'sending')").run(threadId, callId, Date.now()).changes) > 0; }
+  finishAsyncAnswer(threadId: string, callId: string, status: 'accepted' | 'rejected' | 'uncertain'): void {
+    if (status === 'rejected') this.db.prepare("DELETE FROM async_answers WHERE threadId=? AND callId=? AND status='sending'").run(threadId, callId);
+    else this.db.prepare('UPDATE async_answers SET status=?,at=? WHERE threadId=? AND callId=?').run(status, Date.now(), threadId, callId);
+  }
+  hostSince(threadId: string): number | undefined {
+    const row = this.db.prepare('SELECT sinceMs FROM host_watch WHERE threadId=?').get(threadId);
+    return row ? Number(row.sinceMs) : undefined;
+  }
+  trackHostQuestions(threadId: string, questions: import('./async-questions.js').AsyncQuestion[]): void {
+    const pending = questions.filter(q => !this.asyncAnswered(threadId, q.callId));
+    for (const q of questions) this.db.prepare('UPDATE async_answers SET at=? WHERE threadId=? AND callId=?').run(Date.now(), threadId, q.callId);
+    if (!pending.length) { this.db.prepare('DELETE FROM host_watch WHERE threadId=?').run(threadId); return; }
+    const since = Math.min(...pending.map(q => q.askedAtMs ?? Date.now()));
+    this.db.prepare('INSERT INTO host_watch VALUES(?,?) ON CONFLICT(threadId) DO UPDATE SET sinceMs=MIN(sinceMs,excluded.sinceMs)').run(threadId, since);
+  }
+  questionAnswers(key: string, signature: string): Json {
+    const row = this.db.prepare('SELECT answers FROM question_progress WHERE key=? AND signature=?').get(key, signature);
+    return row ? object(JSON.parse(string(row.answers))) : {};
+  }
+  saveQuestionAnswers(key: string, signature: string, answers: Json): void {
+    this.db.prepare('INSERT INTO question_progress VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET signature=excluded.signature,answers=excluded.answers,at=excluded.at').run(key, signature, JSON.stringify(answers), Date.now());
+  }
+  clearQuestionAnswers(key: string): void { this.db.prepare('DELETE FROM question_progress WHERE key=?').run(key); }
   topicTitleRetryAt(threadId: string): number {
     return Math.max(Number(this.db.prepare('SELECT value FROM settings WHERE key=?').get('titleRetry/' + threadId)?.value ?? 0),
       Number(this.db.prepare("SELECT value FROM settings WHERE key='titleRetry/all'").get()?.value ?? 0));
@@ -169,6 +197,7 @@ export class State {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
     this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled')").run(cutoff);
-    this.db.prepare('DELETE FROM async_answers WHERE at<?').run(cutoff);
+    this.db.prepare('DELETE FROM async_answers WHERE at<? AND threadId NOT IN (SELECT threadId FROM host_watch)').run(cutoff);
+    this.db.prepare('DELETE FROM question_progress WHERE at<?').run(cutoff);
   }
 }

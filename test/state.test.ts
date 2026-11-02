@@ -8,6 +8,22 @@ import { projectHeader } from '../src/format.js';
 import { DatabaseSync } from 'node:sqlite';
 import { string, array, object } from '../src/types.js';
 
+test('interrupted host-answer reservations, question drafts and recovery timestamps survive a real database reopen', () => {
+  const f = temporary(); let state = new State(join(f.dir, 'home'));
+  try {
+    assert.equal(state.beginAsyncAnswer('thread', 'call'), true);
+    state.saveQuestionAnswers('native/thread/turn/item', 'signature', { one: { answers: ['A'] } });
+    state.trackHostQuestions('thread', [{ callId: 'waiting', turnId: 'turn', askedAtMs: 1234, questions: [{ title: 'Pick' }] }]);
+    state.close(); state = new State(join(f.dir, 'home'));
+    assert.equal(state.beginAsyncAnswer('thread', 'call'), false);
+    state.finishAsyncAnswer('thread', 'call', 'rejected');
+    assert.equal(state.asyncAnswered('thread', 'call'), true, 'An interrupted write cannot be reclassified as definitely rejected.');
+    assert.deepEqual(state.questionAnswers('native/thread/turn/item', 'signature'), { one: { answers: ['A'] } });
+    assert.deepEqual(state.questionAnswers('native/thread/turn/item', 'changed'), {});
+    assert.equal(state.hostSince('thread'), 1234);
+  } finally { state.close(); f.close(); }
+});
+
 test('restart preserves bindings and marks dispatched inputs/sends uncertain without replay', () => {
   const temp = temporary(); const home = join(temp.dir, 'home');
   let state = new State(home);

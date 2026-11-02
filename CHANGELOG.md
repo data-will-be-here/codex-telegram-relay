@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.11
+
+- Remove pre-existing broad Windows ACLs from private directories and credential/state/cache files; verify current-user grants at setup/start without changing audit policy.
+- Report oversized/capacity-limited host questions instead of silently dropping them. Preserve known unanswered questions across later turns/reconnects and exclude locally answered forms from reader capacity.
+- Persist partial question drafts using stable request identity and content fingerprints.
+- Track sending/accepted/uncertain host-answer attempts durably; definite rejections remain retryable and uncertain writes are not replayed.
+- Rediscover a missing Codex executable or accept an explicit start --codex-bin override. Save a replacement only after a successful daemon protocol check, preserving pairing and topics; doctor stays read-only.
+
 ## 0.1.10
 
 - Fix false recovery-window warnings after restart and subsequent user turns: journal size was incorrectly treated as missing question history.

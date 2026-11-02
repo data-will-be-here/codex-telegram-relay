@@ -151,4 +151,18 @@ JPEG, PNG and WebP are passed as native localImage input; other files are suppli
 
 Audio/video files are received, but this version does not transcribe speech or extract video frames. That needs a separate local processor or an explicitly approved external service. File access and inspection still follow native Codex permissions; the relay does not widen them.
 
-Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only current-turn question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. Recovery remains limited to the latest turn within seven days, rather than a complete conversation mirror. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
+Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only current-turn question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. First attachment recovers the latest turn within seven days. Known unanswered questions extend that range across subsequent turns and reconnects, without importing unrelated earlier history. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
+
+## Updating Codex and recovering its executable
+
+If a Codex update removes the saved executable, restart the relay after starting your normal Codex sessions. The relay searches the supported native installation locations and saves a replacement path only after initialization and a successful shared-daemon session-list check. Pairing, bot token, session/topic IDs and native permissions are preserved. No CLI is downloaded, no alternate daemon is started, and no model turn is used for this check. Compatibility beyond the qualified Codex version still needs acceptance testing.
+
+If discovery fails, select the installed native executable explicitly:
+
+```sh
+npm start -- start --codex-bin /absolute/path/to/native/codex
+```
+
+On Windows use an absolute path to codex.exe. An existing but invalid executable is rejected rather than silently replaced. doctor --codex-bin PATH can inspect a replacement without saving any configuration.
+
+Known unanswered host questions now survive later turns and reconnects. Recovery extends only as far back as those known questions require; unrelated older questions are not imported. Very large questions and capacity limits produce terminal notices. Partial question answers are kept privately for up to seven days and restored only when stable identity and question contents match. A rejected native input remains retryable; accepted or uncertain input is not automatically repeated.

@@ -4,13 +4,13 @@
 
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
 - `bridge.ts`: project/topic bindings, owner authentication, completion filtering, input routing, questions and explicit one-time approvals. It does not own native sandbox policy.
-- `async-questions.ts`: streaming recovery of host question/answer records omitted by App Server, using 1 MiB read chunks and a 256 KiB record bound. Each source snapshot is scanned completely before publishing questions so later answer records can invalidate them. Only the latest selected session turn is eligible; unrelated tools and internal reasoning are not forwarded. Answers use ordinary native user input; unavailable journal sources produce terminal notices. Journal size alone is not evidence of missed questions.
+- `async-questions.ts`: streaming recovery of host question/answer records omitted by App Server, using 1 MiB read chunks and a 256 KiB record bound. Each source snapshot is scanned completely before publishing questions so later answer records can invalidate them. Initial recovery starts at the latest selected turn. Durable host_watch timestamps extend recovery for previously observed unanswered questions across later turns/reconnects; unrelated tools and internal reasoning are not forwarded. Locally accepted/uncertain call IDs are excluded before applying reader capacity. Answers use ordinary native user input; unavailable journal sources produce terminal notices. Journal size alone is not evidence of missed questions.
 - `attachments.ts`: authenticated incoming file preparation, private cache quotas/retention, detected image input and bounded UTF-8 excerpts. It never executes or unpacks uploads.
 - `topics.ts`: durable topic creation and repair, ambiguous-result handling, rate-limit scheduling and owner-directed binding/retry. It never changes native execution policy or starts a turn.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.
 - `format.ts`: CommonMark/GFM parsing into Telegram text entities, safe external links and UTF-16-aware splitting. Raw HTML is displayed literally; code never nests inside formatting entities.
 - `state.ts`: SQLite bindings, update IDs, delivery status and a local singleton lock. Unknown users' payloads are not stored.
-- `config.ts` / `cli.ts`: local pairing, secret input, project selection, user-profile state and process lifecycle.
+- `config.ts` / `cli.ts`: local pairing, secret input, project selection, user-profile state and process lifecycle, verified Windows ACL protection, and missing-executable recovery after a read-only native compatibility check.
 
 Native I/O and Telegram I/O have real adapters and test adapters. Most behaviour is exercised through Bridge's request/event/update interface; a separate integration fixture tests actual WebSocket-over-pipes framing.
 
