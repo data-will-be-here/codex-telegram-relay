@@ -4,6 +4,8 @@ A local companion for your existing Codex sessions. Each session gets its own to
 
 [Русский README](README.ru.md)
 
+[Public preview v0.1.11](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.11). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+
 ## How it works
 
 ```text
@@ -37,12 +39,12 @@ This is an initial developer release. Native transport, completion, questions, l
 - A dedicated bot created through [@BotFather](https://t.me/BotFather), with **private-chat topics enabled**.
 - Your computer stays on and connected to the internet while you use the relay.
 
-The repository is currently private; installation requires repository access. No npm registry publication is configured.
+Install from the GitHub source release. No npm registry package is published.
 
 ## Install and pair
 
 ```sh
-git clone https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.11 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -105,7 +107,7 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
-The relay accepts only the paired owner in their private chat. It does not expose shell commands, filesystem uploads, `/sandbox`, `/approval`, `/login`, new-session creation or history imports through Telegram.
+The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, new-session creation, or automatic history imports. Instructions sent to your session follow its existing Codex permissions.
 
 ## State and recovery
 
@@ -114,7 +116,7 @@ Configuration and state live outside your projects:
 - Windows: `%LOCALAPPDATA%\codex-telegram-relay`
 - Linux/macOS: `$XDG_CONFIG_HOME/codex-telegram-relay`, or `~/.config/codex-telegram-relay`
 
-`config.json` stores the owner, project roots and native executable path. `bot.token` contains the token. `state.sqlite` stores topic bindings, delivery text and delivery status. Treat the entire directory as private. Setup restricts POSIX modes or the Windows directory ACL.
+`config.json` stores the owner, project roots and native executable path. `bot.token` contains the token. `state.sqlite` stores topic bindings, delivery text and delivery status. Treat the entire directory as private. POSIX modes are restricted; setup/start verify current-user Windows access rules on private relay files.
 
 The optional `CODEX_TELEGRAM_RELAY_HOME` environment variable changes this directory, for example for an isolated installation. No other environment variables are required.
 
@@ -151,7 +153,7 @@ JPEG, PNG and WebP are passed as native localImage input; other files are suppli
 
 Audio/video files are received, but this version does not transcribe speech or extract video frames. That needs a separate local processor or an explicitly approved external service. File access and inspection still follow native Codex permissions; the relay does not widen them.
 
-Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only current-turn question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. First attachment recovers the latest turn within seven days. Known unanswered questions extend that range across subsequent turns and reconnects, without importing unrelated earlier history. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
+Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only eligible question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. First attachment recovers the latest turn within seven days. Known unanswered questions extend that range across subsequent turns and reconnects, without importing unrelated earlier history. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
 
 ## Updating Codex and recovering its executable
 

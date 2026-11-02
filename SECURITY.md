@@ -26,4 +26,4 @@ User-selected project code and Codex tools remain subject to the native harness'
 
 ## Reporting
 
-Do not put tokens, private conversations, real session histories or private filesystem contents in GitHub issues. Share the relay version, Codex version, OS, a synthetic reproduction and the affected code paths. While the repository is private, coordinate a fix with the maintainer before disclosing details outside its collaborators. No automatic vulnerability-report publishing is implemented.
+Do not put tokens, private conversations, real session histories or private filesystem contents in GitHub issues. Share the relay version, Codex version, OS and affected code paths. Use GitHub private vulnerability reporting if available. Otherwise, open a minimal issue requesting a private contact route, without credentials, exploit details or user data. Coordinate a fix before publishing sensitive evidence. No automatic vulnerability-report publishing is implemented.

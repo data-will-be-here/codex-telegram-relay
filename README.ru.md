@@ -4,6 +4,8 @@
 
 [English README](README.md)
 
+[Предварительный релиз v0.1.11](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.11). Проверен с Codex CLI 0.166.0; ограничения совместимости описаны ниже.
+
 ## Что понадобится
 
 - Node.js 22.13+, желательно Node 24 LTS. На Node 22 возможно предупреждение об экспериментальном SQLite.
@@ -11,12 +13,12 @@
 - Отдельный бот от [@BotFather](https://t.me/BotFather) с включёнными **топиками в личных чатах**.
 - Включённый компьютер и интернет. VPS, webhook и открытые порты не требуются.
 
-Репозиторий пока приватный: для установки нужен доступ к нему. Публикация в npm не настроена.
+Установка выполняется из исходников GitHub-релиза. Пакет в npm не опубликован.
 
 ## Установка
 
 ```sh
-git clone https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.11 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
