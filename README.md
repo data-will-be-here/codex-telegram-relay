@@ -2,7 +2,7 @@
 
 A local companion for your existing Codex sessions. Each session gets its own topic in a private chat with **your own Telegram bot**. Receive questions, approval requests and completed answers; reply from Telegram to the same native session.
 
-<!-- English demo attachment is added before this PR is merged. -->
+https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 *40-second English demo · 16:9 · Fictional sessions and conversations. Native rich messages shown in the demo are currently available on [`dev`](https://github.com/data-will-be-here/codex-telegram-relay/tree/dev); the tagged installation below uses v0.1.12.*
 
