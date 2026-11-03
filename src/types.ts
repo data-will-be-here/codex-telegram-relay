@@ -44,6 +44,7 @@ export interface Codex {
 }
 
 export interface Telegram {
+  upload?(method: 'sendVideo' | 'sendDocument', params: Json, file: { name: string; bytes: Buffer }, signal: AbortSignal): Promise<unknown>;
   download?(fileId: string): Promise<Buffer>;
   call(method: string, params?: Json): Promise<unknown>;
 }

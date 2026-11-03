@@ -77,6 +77,16 @@ export class Bridge {
     });
   }
 
+  /** File exports require a still-loaded, attached session and its original destination. */
+  async allowsFile(binding: Binding): Promise<boolean> {
+    const eligible = (): boolean => this.attached.has(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && !this.state.topicOperation(binding.threadId) &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId);
+    if (!eligible() || !(await this.codex.list()).some(session => session.id === binding.threadId)) return false;
+    const current = await this.codex.read(binding.threadId, 1000);
+    return string(current.cwd) === binding.cwd && allowedSessionDirectory(binding.cwd, this.config) && eligible();
+  }
+
   async discover(): Promise<void> {
     if (this.discovering) return;
     this.discovering = true;

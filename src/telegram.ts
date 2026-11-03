@@ -16,6 +16,25 @@ export function isMissingTopic(error: unknown): error is TelegramError {
 
 export class TelegramClient implements Telegram {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
+  async upload(method: 'sendVideo' | 'sendDocument', params: Json, file: { name: string; bytes: Buffer }, signal: AbortSignal): Promise<unknown> {
+    if (method !== 'sendVideo' && method !== 'sendDocument') throw new Error('Invalid upload method.');
+    const form = new FormData();
+    for (const [key, value] of Object.entries(params)) form.set(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+    form.set(method === 'sendVideo' ? 'video' : 'document', new Blob([new Uint8Array(file.bytes)], { type: method === 'sendVideo' ? 'video/mp4' : 'application/octet-stream' }), file.name);
+    try {
+      const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
+        method: 'POST', body: form, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+      });
+      const result = object(JSON.parse((await boundedBody(response, 2 * 1024 * 1024)).toString('utf8')));
+      if (!response.ok || result.ok !== true) {
+        throw new TelegramError(`Telegram ${method} failed (${integer(result.error_code) ?? response.status}): ${string(result.description).replaceAll(this.token, '[redacted]').slice(0, 200)}`, integer(result.error_code) ?? response.status, integer(object(result.parameters).retry_after));
+      }
+      return result.result;
+    } catch (error) {
+      if (error instanceof TelegramError) throw error;
+      throw new TelegramError(`Telegram ${method} connection failed. Delivery may be uncertain.`, 0);
+    }
+  }
   async call(method: string, params: Json = {}): Promise<unknown> {
     if (!/^[A-Za-z]+$/u.test(method)) throw new Error('Invalid Telegram method.');
     try {

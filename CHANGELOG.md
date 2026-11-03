@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add locally enabled outgoing project files through `send-file`, using the running relay's paired bot and exact session topic without exposing its token to the producer command. MP4 uploads as video; other files and forced-original media upload as documents.
+- Bound and snapshot files, reserve queue capacity transactionally across simultaneous producers, recheck live sessions and local revocation, and keep large network uploads independent of assistant output and questions.
+- Persist delivery receipts and idempotent request IDs. Interrupted/ambiguous uploads remain uncertain with no automatic replay; expose them in `/status` and local `files status`. Document opt-in, usage, limits and the trusted remote-control security model in both languages.
+
 ## 0.1.16 — 2026-11-03
 
 - Explain the trusted remote-control security model before pairing and in both READMEs. Recommend Telegram Two-Step Verification, app/device locks, auto-lock, protected recovery email and active-session review, distinguishing new-login protection from existing-session access.

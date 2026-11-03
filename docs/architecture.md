@@ -8,6 +8,7 @@
 - `attachments.ts`: authenticated incoming file preparation, private cache quotas/retention, detected image input and bounded UTF-8 excerpts. It never executes or unpacks uploads.
 - `topics.ts`: durable topic creation and repair, ambiguous-result handling, rate-limit scheduling and owner-directed binding/retry. It never changes native execution policy or starts a turn.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.
+- `files.ts`: non-secret local export producer, bounded private snapshots, durable receipts and a separate single-upload consumer.
 - `drafts.ts`: bounded ephemeral assistant previews, shared chat pacing, fair topic scheduling, rich/text fallback and cancellation. It never stores or replaces a permanent answer.
 - `commands.ts`: one command catalog for `/help` and English/Russian Telegram menus. Setup and start synchronize only `BotCommandScopeChat` for the owner; broader scopes are untouched. Start runs synchronization separately from native attachment and polling; failures are nonfatal and retried next start. `doctor` never registers commands. Menus do not authorize inputs: Bridge still rejects foreign senders, non-private chats and sender/chat mismatches before command parsing or payload storage.
 - `format.ts`: CommonMark/GFM parsing into Telegram text entities, safe external links and UTF-16-aware splitting. Raw HTML is displayed literally; code never nests inside formatting entities.
@@ -66,6 +67,14 @@ All topics share at most one draft call per second, with fair scheduling, 15-sec
 
 Every outgoing part includes an italic `» project-name` signature. Project context is captured with queued output so project-specific notices retain their identity outside topics; general notices identify the relay. The signature uses only the last path component and sanitizes control characters. Chunk budgets include the signature, and body entity offsets are shifted without overlapping its italic span. Existing outbox schemas migrate without losing queued output; legacy queued messages can derive project identity from their binding.
 
+## Outgoing project files (development version)
+
+Local `files enable` opts this installation into exports; absent/false configuration keeps them off. `send-file` uses a second SQLite connection alongside State's singleton lock, without reading the token or contacting Telegram. It verifies that the active relay lock matches the file worker's generation; old relay versions cannot silently accumulate unconsumed jobs. Routing comes from an explicit session, `CODEX_THREAD_ID`, or a unique working-directory binding. The caller cannot choose chat IDs. The worker rechecks local opt-in and native loaded/attached session eligibility immediately before sending, including unchanged directory and destination.
+
+Each request snapshots one bounded regular project file to an exclusive 0600 cache entry and commits `preparing → pending`. Admission reserves quota transactionally before writing the snapshot. A single worker, independent of the permanent-message/draft sender and input loop, verifies snapshot identity, commits `sending`, and uses multipart `sendVideo` (MP4) or `sendDocument`. A matching owner/topic/message receipt commits `sent`. Definitive API rejection commits `rejected`, except bounded 429 cooldown retries; ambiguous transport, abort or mismatched receipt commits `uncertain`. Startup changes interrupted `sending` jobs to uncertain, and interrupted preparation to rejected. Only unsent pending jobs can resume automatically. No native turn or permission overrides are added by exporting.
+
+The queue caps files at 49,000,000 bytes, 16 active requests and 200 MB of snapshots. Unsent jobs expire after ten minutes. Terminal snapshot bytes are removed; successful/rejected receipts deduplicate for seven days and uncertain receipts remain. At 10,000 retained receipts, admission fails rather than growing without bound. Default identity hashes owner/session/topic/project/name/content/kind/caption; explicit caller IDs must match their original fingerprint. CLI success requires `sent`; a three-minute wait ending before delivery returns code 2 with the durable request ID. A 120-second upload timeout is ambiguous and never authorizes replay. Local disabling affects requests that have not begun uploading; in-flight sends cannot be recalled. See [security](../SECURITY.md#outgoing-files-development-version).
+
 ## Initial release limits
 
 Native executable discovery resolves Unix symlinks and known npm launchers to native platform packages without executing the launcher. Current `vendor/<triple>/bin` and older `vendor/<triple>/codex` layouts are supported, with Node package resolution covering nested/hoisted dependencies. Executable format and POSIX permissions are checked; `.cmd`/`.bat` entry points remain rejected on Windows. Private configuration/token symlinks are still rejected independently.
@@ -74,7 +83,7 @@ Native executable discovery resolves Unix symlinks and known npm launchers to na
 - No MCP server is needed to use the relay. Future MCP registration can be an optional adapter; it is not the core execution interface.
 - There is no real Telegram bot exchange in automated tests. BotFather settings, user pairing and actual mobile/desktop topic UI require a live acceptance pass.
 - Existing approvals from before attachment, connector elicitations, native approval routing between clients and reconnect replay depend on Codex behaviour. Use the terminal whenever the request cannot be safely identified/displayed by this client.
-- Incoming attachments are supported; audio transcription/video decoding, outgoing file export, new-thread creation, server deployment and auto-start installation are not implemented.
+- Incoming attachments and opt-in outgoing project files are supported in development; audio transcription/video decoding, new-thread creation, server deployment and auto-start installation are not implemented.
 - Native settings are inherited. The relay does not enforce a stronger sandbox than the native owner selected.
 - Slow/failed Telegram deliveries are not an excuse to repeat a native instruction. Outgoing ambiguity is visible in `/status`; inspect the terminal and local state before retrying.
 

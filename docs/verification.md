@@ -1,5 +1,9 @@
 # Verification record
 
+## Outgoing-file development checks
+
+Synthetic export tests exercise a separate CLI process concurrently with the relay's singleton state, with no bot token present; local opt-in; exact session/topic/owner routing; ambiguous selection; path escapes, private-data paths, links/junctions, hard links, empty/oversized files and Windows alternate streams; frozen and tampered snapshots; disabled/ignored/closed/moved sessions; deduplication; queue bounds; interrupted/expired work; 429 cooldowns; uncertain transport and shutdown; and an ordinary message with buttons completing while an upload is held. Multipart adapter checks use an injected fetch implementation, verify the fixed endpoint and actual FormData contents, and check token redaction. These are not a real Telegram upload acceptance check.
+
 ## 0.1.16: account-security onboarding (2026-11-03)
 
 The English and Russian installation prompts and bare-link instructions now require an explicit user-facing security explanation before pairing, changing discovery scope or starting the relay. Setup prints a one-time warning before connection/pairing. No acknowledgement gate, new permission grant or Telegram account-setting change is introduced; existing owner checks and native approvals are unchanged.

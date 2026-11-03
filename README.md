@@ -14,6 +14,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 - **Read formatted results.** Messages preserve Markdown emphasis, links, inline code and code blocks, including when a long answer spans several messages.
 - **Get native rich messages.** Headings and tables render as Telegram rich messages, with repeated table headers and readable fallbacks for wide tables or unsupported formatting.
 - **Send screenshots and documents as context.** Attach files in the project's topic and Codex receives them through its normal image/file inputs and permissions.
+- **Receive generated files (development version).** After a one-time local opt-in, your agent can send a specific project file back to its session topic: MP4 as video, other files as documents.
 - **Choose how much to receive.** Switch between all assistant messages and compact updates; shell output and file/tool events stay out of the chat.
 - **Run locally with your own bot.** No VPS, webhook or public port is required. The relay accepts messages from its paired owner and keeps Codex's native approval and sandbox settings.
 
@@ -131,6 +132,29 @@ When installing this repository for a user, follow this workflow whether they su
 4. Help the user create a dedicated bot in @BotFather and enable private-chat topics. For a fresh installation, run `npm start -- setup --scope all` or `npm start -- setup --scope selected` according to their answer. If your terminal cannot accept private interactive input, have the user run that command in their own terminal. The token must be entered only into the hidden local prompt: never request it in chat, command arguments, environment variables or logs. The user sends the displayed `/start CODE` to their bot in a private chat; pairing must finish successfully.
 5. For an already paired installation, skip setup. Run `npm start -- sessions scope all` or `npm start -- sessions scope selected` after their choice; selected mode needs at least one root added with `npm start -- projects add /absolute/path`. Keep the token, owner, ignored IDs and topic bindings intact.
 6. Start one foreground relay with `npm start -- start`, or ask the user to restart their already running relay. Keep the process running; do not create an unattended service without a separate request. Confirm the startup discovery mode, matching `/status`, and a topic for an eligible session. In automatic mode, ask the user to open a session in a new project, send its first prompt and check its topic appears. If a real bot check is pending, report it as pending rather than claiming success.
+
+For versions with outgoing files, explain that export is disabled by default and ask whether to enable it once locally with `files enable`. A person controlling the paired account can request files within Codex's effective permissions. Once enabled, individual files need no extra relay confirmation. Follow [Sending files back](#sending-files-back-development-version) when the user requests an artifact; `sent` is the success criterion.
+
+### Sending files back (development version)
+
+This feature is on `dev`, **not in v0.1.16**. Use it after installing the version containing it and restarting the relay once. Pairing and existing topics are preserved. Enable exports locally on that computer/server:
+
+```sh
+npm start -- files enable
+npm start -- send-file /absolute/project/path/demo.mp4 --session SESSION_ID
+npm start -- files status REQUEST_ID
+npm start -- files disable
+```
+
+`send-file` talks to the existing relay through a private SQLite queue; its process never reads the bot token. No extra server, MCP registration or poller is needed. MP4 is uploaded with Telegram's [sendVideo](https://core.telegram.org/bots/api#sendvideo); other files use [sendDocument](https://core.telegram.org/bots/api#senddocument). `--as document` preserves any file as a document, including images, audio, video and archives. The conservative per-file limit is **49,000,000 bytes**. Files must be inside the target session's project; links, hard links, special files, relay-private data, network paths and Windows alternate streams are rejected. This prevents accidental path escapes; it does not determine whether a file contains secrets.
+
+**For agents:** invoke the installed CLI using its absolute path when working in another project, for example `node /absolute/relay/dist/src/cli.js send-file /absolute/project/report.pdf --session SESSION_ID`. The session defaults to `CODEX_THREAD_ID` when available, otherwise to the unique binding for the command's working directory. Specify `--session` when ambiguous; never choose an arbitrary topic. There is no caller-controlled chat ID. Native permission prompts for invoking the command still apply.
+
+The command returns a JSON receipt and normally waits up to three minutes. Only `status: "sent"` with a message ID confirms delivery. Exit code 1 means rejected/uncertain; code 2 means the wait ended with work still pending. Save the request ID and inspect it with `files status ID`; `--no-wait` returns immediately. `--caption "text"` supplies a literal caption (up to 800 UTF-16 units) beneath the project signature.
+
+An identical request deduplicates by session, destination, content and caption; successful/rejected receipts remain for seven days. An explicit `--request-id ID` must be reused for the same attempt and cannot be reused for different content. After `uncertain`, inspect Telegram before deliberately submitting a new ID: **no automatic replay** occurs after a timeout, crash or uncertain response. Uncertain receipts remain for inspection and contribute to `/status`.
+
+Private snapshots freeze the queued bytes and are removed on completion/rejection/uncertainty. The queue allows 16 outstanding files and 200 MB of snapshots; unsent requests expire after ten minutes. A separate single-upload worker keeps message, question and button handling independent of slow network uploads. Disabling export blocks new/unstarted requests immediately; it cannot recall an upload already in flight. Neither the bot menu nor Telegram commands can enable export. These controls follow the [trusted remote-control model](SECURITY.md).
 
 ### Windows
 

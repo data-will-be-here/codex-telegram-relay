@@ -213,7 +213,11 @@ export class State {
     this.db.prepare("UPDATE outbox SET status='cancelled' WHERE key=? AND status='pending'").run(key);
     return typeof id === 'number' ? id : undefined;
   }
-  uncertainCount(): number { return Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain') AS n").get()?.n ?? 0); }
+  uncertainCount(): number {
+    const files = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_jobs'").get()
+      ? Number(this.db.prepare("SELECT count(*) AS n FROM file_jobs WHERE status='uncertain'").get()?.n ?? 0) : 0;
+    return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain') AS n").get()?.n ?? 0);
+  }
   prune(): void {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
