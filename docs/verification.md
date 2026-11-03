@@ -1,8 +1,8 @@
 # Verification record
 
-## Unreleased: per-installation command menus (2026-11-03)
+## 0.1.15: per-installation command menus (2026-11-03)
 
-Windows local checks: clean installation, typecheck, 134 tests (132 passed, two POSIX-only skips) and dependency audit with zero findings passed. Seven menu tests cover owner-chat scoping with a distinct synthetic owner ID, English/Russian descriptions, idempotent synchronization, independent language failures, uncertain settings-response readback and usable no-argument menu commands. Explicit hostile-input checks send every advertised command and parameterized variants from a stranger, an owner in a group, and a mismatched sender/chat pair: no replies, native instructions, preference changes or topic changes result.
+Windows local checks: clean installation, typecheck, 134 tests (132 passed, two POSIX-only skips), package allowlist and dependency audit with zero findings passed. The implementation commit `67d5ca2` also passed all six Windows/Linux/macOS Node 22/24 CI jobs; release metadata requires its own checks before promotion. Seven menu tests cover owner-chat scoping with a distinct synthetic owner ID, English/Russian descriptions, idempotent synchronization, independent language failures, uncertain settings-response readback and usable no-argument menu commands. Explicit hostile-input checks send every advertised command and parameterized variants from a stranger, an owner in a group, and a mismatched sender/chat pair: no replies, native instructions, preference changes or topic changes result.
 
 The real paired bot accepted nine commands in its configured owner's chat, with default English and Russian descriptions. `getMyCommands` confirmed both lists; broader default-language scopes were unchanged. A second synchronization made no writes. This acceptance used the local pairing configuration, not a hardcoded account, and did not poll updates or change native sessions. Menu rendering/caching depends on the Telegram client. Registration happens during setup/start, while `doctor` stays read-only; failed UI synchronization does not stop relay delivery.
 
