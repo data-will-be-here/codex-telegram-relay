@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 — 2026-11-03
+
+- Register the connected bot's command menu during setup/start, using owner-chat scope, English fallback and Russian descriptions. Share the catalog with `/help`, skip unchanged lists and isolate menu errors from relay delivery; diagnostics remain read-only.
+- Show usage when `/say` is selected without arguments. Preserve owner/private-chat authorization for every command, including manual commands sent by strangers who cannot see the menu.
+
 ## 0.1.14 — 2026-11-03
 
 - Stream public assistant answers through native Telegram rich drafts, including simple prose and tables, without forwarding command output or private reasoning. Keep all/compact filtering and add persisted owner-only `/stream on|off` controls.

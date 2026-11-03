@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
 import { Drafts } from './drafts.js';
+import { syncCommandMenu } from './commands.js';
 import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
@@ -48,6 +49,10 @@ async function verifyBot(telegram: TelegramClient): Promise<string> {
   const webhook = object(await telegram.call('getWebhookInfo'));
   if (string(webhook.url)) throw new Error('This bot has a webhook. Use a dedicated bot; the relay will not remove another application’s webhook.');
   return string(me.username);
+}
+
+async function commandMenu(telegram: TelegramClient, ownerId: number): Promise<void> {
+  if (!await syncCommandMenu(telegram, ownerId)) console.error('Command menu could not be fully updated. Relay messaging is unaffected; restart to retry.');
 }
 
 async function setup(args: string[]): Promise<void> {
@@ -100,6 +105,7 @@ async function setup(args: string[]): Promise<void> {
     const config: Config = { version: 1, ownerId, roots, codexBinary: binary, sessionScope: scope };
     saveConfig(home, config, token);
     await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: `Paired with your local Codex Telegram Relay. Start the relay on your computer to connect ${scope === 'all' ? 'all interactive Codex sessions, including future projects' : 'the selected projects'}.`, entities: [] }) });
+    await commandMenu(telegram, ownerId);
     console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start -- start`);
   } finally { codex.close(); }
 }
@@ -158,6 +164,8 @@ async function start(args: string[]): Promise<void> {
     }
   };
   const sender = output();
+  // Optional UI settings must not hold up native attachment or Telegram update handling.
+  const menu = commandMenu(telegram, config.ownerId);
   try {
     while (!stopping) {
       const codex = new CodexClient(); current = codex;
@@ -209,7 +217,7 @@ async function start(args: string[]): Promise<void> {
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {
-    stopping = true; current?.close(); await sender; state.close();
+    stopping = true; current?.close(); await sender; await menu; state.close();
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
 }

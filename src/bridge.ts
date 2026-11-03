@@ -3,6 +3,7 @@ import { approvalMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
+import { commandHelp } from './commands.js';
 import { State } from './state.js';
 import { Topics } from './topics.js';
 import { Attachments, AttachmentError } from './attachments.js';
@@ -267,7 +268,7 @@ export class Bridge {
     const text = string(message.text).trim();
     if (!text) return;
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/stream on|off — live answer previews for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, commandHelp()); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
@@ -304,6 +305,7 @@ export class Bridge {
       if (!prompts.length) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
     }
+    if (text === '/say') { this.notice(topicId, 'Use /say TEXT in a project topic to send an instruction while a question is pending.'); return; }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding || !this.attached.has(binding.threadId)) { this.notice(topicId, 'Use an attached project topic. Open Codex in a configured project if it is missing.'); return; }
     if (!allowedSessionDirectory(binding.cwd, this.config)) throw new Error('Project is outside configured roots.');

@@ -21,7 +21,7 @@ export class TelegramClient implements Telegram {
     try {
       const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
-        signal: AbortSignal.timeout(method === 'getUpdates' ? 35_000 : method.endsWith('MessageDraft') ? 3000 : 15_000), redirect: 'error',
+        signal: AbortSignal.timeout(method === 'getUpdates' ? 35_000 : method.endsWith('MessageDraft') ? 3000 : /^(?:get|set)MyCommands$/u.test(method) ? 5000 : 15_000), redirect: 'error',
       });
       const body = (await boundedBody(response, 2 * 1024 * 1024)).toString('utf8');
       const result = object(JSON.parse(body));
