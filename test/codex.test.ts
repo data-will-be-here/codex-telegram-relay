@@ -102,3 +102,28 @@ test('a session disappearing during discovery does not hide healthy sessions', a
   c.read = async () => { throw new RpcError('Transport disconnected', true); };
   await assert.rejects(c.list(), /Transport disconnected/u);
 });
+
+test('many loaded subagents do not hide later interactive sessions', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const base = { source: 'cli', cwd: process.cwd(), path: '/synthetic', status: { type: 'idle' } };
+    const agents = Array.from({ length: 80 }, (_, index) => ({ ...base, id: `agent-${index}`, parentThreadId: 'root' }));
+    await client.call('test/discovery', { threads: [...agents, { ...base, id: 'project-a' }, { ...base, id: 'project-b' }] });
+    assert.deepEqual((await client.list()).map(session => session.id), ['project-a', 'project-b']);
+  } finally { client.close(); }
+});
+
+test('discovery applies project selection before its session cap and warns on true overflow', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const threads = Array.from({ length: 80 }, (_, index) => ({ id: `thread-${index}`, source: 'cli', cwd: process.cwd(), path: '/synthetic', status: { type: 'idle' } }));
+    await client.call('test/discovery', { threads });
+    const warnings: number[] = []; client.on('discoveryLimit', (limit: number) => warnings.push(limit));
+    assert.deepEqual((await client.list(session => ['thread-78', 'thread-79'].includes(session.id))).map(session => session.id), ['thread-78', 'thread-79']);
+    assert.deepEqual(warnings, []);
+    assert.equal((await client.list()).length, 64);
+    assert.deepEqual(warnings, [64]);
+  } finally { client.close(); }
+});

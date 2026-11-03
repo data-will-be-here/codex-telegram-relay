@@ -145,7 +145,7 @@ async function start(args: string[]): Promise<void> {
   await verifyBot(telegram);
   const { State } = await import('./state.js');
   const state = new State(home);
-  const outbox = new Outbox(state, telegram, config.ownerId, 1100, config.ignoredThreadIds);
+  const outbox = new Outbox(state, telegram, config, 1100);
   const drafts = new Drafts(telegram, config.ownerId);
   const files = new Files(home);
   files.startWorker(config.ownerId);
@@ -185,12 +185,22 @@ async function start(args: string[]): Promise<void> {
       const codex = new CodexClient(); current = codex;
       let connected = true;
       let pendingEvents = Promise.resolve();
+      let discovery = Promise.resolve();
+      let discovering = false;
       let eventCount = 0;
       try {
         const bridge = new Bridge(config, state, codex, telegram, drafts);
         const unavailable = new Set<string>();
         codex.on('sessionUnavailable', (id: string) => {
           if (!unavailable.has(id)) { unavailable.add(id); console.error(`Skipping unavailable Codex session ${id.slice(0, 8)}; other sessions remain connected.`); }
+        });
+        let warnedLimit = false;
+        codex.on('discoveryLimit', (limit: number) => {
+          if (warnedLimit) return;
+          warnedLimit = true;
+          const warning = `Discovery reached the limit of ${limit} eligible interactive sessions. Some sessions are not connected. Ignore unused sessions or select fewer projects locally, then restart the relay. Subagents do not count toward this limit.`;
+          console.error(warning);
+          state.enqueue(`attention/discovery-limit/${limit}`, null, warning);
         });
         codex.on('disconnected', () => { connected = false; });
         // Serialize control events so completed native requests invalidate buttons in order.
@@ -216,7 +226,14 @@ async function start(args: string[]): Promise<void> {
         console.log(`Relay connected. Discovery: ${config.sessionScope === 'all' ? 'automatic, all interactive sessions' : 'selected projects'}. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.`);
         let lastDiscovery = Date.now();
         while (!stopping && connected) {
-          if (Date.now() - lastDiscovery > 5000) { await bridge.discover(); state.prune(); lastDiscovery = Date.now(); }
+          if (!discovering && Date.now() - lastDiscovery > 5000) {
+            discovering = true; lastDiscovery = Date.now();
+            // Incoming replies/buttons keep moving while metadata and journals are scanned.
+            discovery = bridge.discover().then(() => { state.prune(); }).catch(error => {
+              console.error(string(object(error).message) || 'Discovery failed; reconnecting.');
+              connected = false; codex.close();
+            }).finally(() => { discovering = false; });
+          }
           const updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
           for (const raw of updates) {
             if (stopping || !connected) break;
@@ -227,7 +244,7 @@ async function start(args: string[]): Promise<void> {
       } catch (error) {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
         console.error(string(object(error).message) || 'Relay connection failed.');
-      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await pendingEvents; }
+      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {

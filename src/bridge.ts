@@ -82,7 +82,7 @@ export class Bridge {
     const eligible = (): boolean => this.attached.has(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && !this.state.topicOperation(binding.threadId) &&
       !this.config.ignoredThreadIds?.includes(binding.threadId);
-    if (!eligible() || !(await this.codex.list()).some(session => session.id === binding.threadId)) return false;
+    if (!eligible() || !(await this.codex.list(session => session.id === binding.threadId)).some(session => session.id === binding.threadId)) return false;
     const current = await this.codex.read(binding.threadId, 1000);
     return string(current.cwd) === binding.cwd && allowedSessionDirectory(binding.cwd, this.config) && eligible();
   }
@@ -91,7 +91,7 @@ export class Bridge {
     if (this.discovering) return;
     this.discovering = true;
     try {
-      const sessions = await this.codex.list();
+      const sessions = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && allowedSessionDirectory(session.cwd, this.config));
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
       for (const session of sessions) {
@@ -119,7 +119,7 @@ export class Bridge {
           this.attached.delete(session.id);
           if (error instanceof RpcError && error.uncertain) throw error;
           this.state.enqueue(`session-unavailable/${this.generation}/${session.id}`, null,
-            `Codex session ${session.id.slice(0, 8)} is temporarily unavailable. Other sessions remain connected; this session will be retried automatically.`, null, session.cwd);
+            `Codex session ${session.id.slice(0, 8)} is temporarily unavailable. Other sessions remain connected; this session will be retried automatically.`, null, session.cwd, session.id);
         }
       }
     } finally { this.discovering = false; }
@@ -283,7 +283,7 @@ export class Bridge {
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }

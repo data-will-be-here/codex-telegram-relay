@@ -27,7 +27,7 @@ export class FakeCodex implements Codex {
   writes: { method: string; params: Json }[] = [];
   pending = new Set<string | number>();
   failSteer = false;
-  async list(): Promise<Session[]> { return this.sessions; }
+  async list(eligible?: (session: Session) => boolean): Promise<Session[]> { return eligible ? this.sessions.filter(eligible) : this.sessions; }
   async attach(threadId: string): Promise<Json> { return this.read(threadId); }
   async read(threadId: string): Promise<Json> {
     const session = this.sessions.find(s => s.id === threadId)!;
@@ -73,7 +73,7 @@ export async function fixture(mode: MessageMode = 'compact'): Promise<{
   state.setMessageMode(mode);
   const bridge = new Bridge({ version: 1, ownerId: 42, roots: [projectA, projectB], codexBinary: process.execPath }, state, codex, telegram);
   await bridge.discover();
-  const outbox = new Outbox(state, telegram, 42, 0);
+  const outbox = new Outbox(state, telegram, bridge.config, 0);
   return { dir: temp.dir, projectA, projectB, state, codex, telegram, bridge, drain: async () => { while (await outbox.flushOne()) { /* Drain persisted deliveries. */ } }, close: () => { state.close(); temp.close(); } };
 }
 

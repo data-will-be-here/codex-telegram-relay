@@ -9,6 +9,9 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
 import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput } from './types.js';
 
+const MAX_DISCOVERED_SESSIONS = 64;
+const METADATA_READ_CONCURRENCY = 8;
+
 export class RpcError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
 }
@@ -103,22 +106,30 @@ export class CodexClient extends EventEmitter implements Codex {
     });
   }
 
-  async list(): Promise<Session[]> {
-    const loaded = array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string').slice(0, 64);
-    for (const id of this.questionReaders.keys()) if (!loaded.includes(id)) this.questionReaders.delete(id);
+  async list(eligible: (session: Session) => boolean = () => true): Promise<Session[]> {
+    const loaded = [...new Set(array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string'))];
+    const loadedSet = new Set(loaded);
+    for (const id of this.questionReaders.keys()) if (!loadedSet.has(id)) this.questionReaders.delete(id);
     const result: Session[] = [];
-    for (const id of loaded) {
-      let thread: Json;
-      try { thread = await this.read(id); }
-      catch (error) {
-        if (error instanceof RpcError && error.uncertain) throw error;
-        this.emit('sessionUnavailable', id);
-        continue;
+    // Bound concurrent metadata reads, not the number of ineligible contexts we can skip.
+    for (let offset = 0; offset < loaded.length; offset += METADATA_READ_CONCURRENCY) {
+      const ids = loaded.slice(offset, offset + METADATA_READ_CONCURRENCY);
+      const batch = await Promise.allSettled(ids.map(id => this.read(id)));
+      for (let index = 0; index < batch.length; index++) {
+        const read = batch[index]!;
+        if (read.status === 'rejected') {
+          if (read.reason instanceof RpcError && read.reason.uncertain) throw read.reason;
+          this.emit('sessionUnavailable', ids[index]!); continue;
+        }
+        const thread = read.value;
+        if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
+        const session: Session = { id: ids[index]!, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
+        if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
+        if (!eligible(session)) continue;
+        if (result.length === MAX_DISCOVERED_SESSIONS) { this.emit('discoveryLimit', MAX_DISCOVERED_SESSIONS); return result; }
+        result.push(session);
       }
-      if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
-      const session: Session = { id, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
-      if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
-      result.push(session);
+      await new Promise<void>(done => setImmediate(done));
     }
     return result;
   }

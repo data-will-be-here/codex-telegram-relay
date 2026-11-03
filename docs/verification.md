@@ -1,5 +1,9 @@
 # Verification record
 
+## Development: queue, scope and discovery regressions
+
+Three failing tests reproduced completion loss at a full 1,000-entry queue, old excluded-project output still sending after scope narrowing, and root sessions hidden behind more than 64 loaded subagents. After the fixes, synthetic tests retain two finals through a later baseline and an actual SQLite reopen, expose the pending-final count, and deliver each once without native writes. Scope tests cancel blocked/deferred finals, queued controls and project notices, prevent cancelled work returning after scope expansion, and stop ordinary/rich multipart output when scope is revoked between parts. Discovery integration tests use the real stdio/WebSocket peer with 80 subagent contexts, filter selected roots before capacity, and observe an explicit overflow warning only for more than 64 eligible sessions. These checks use disposable stores and adapters; no real bot request or user session is started by them.
+
 ## Outgoing-file development checks
 
 Synthetic export tests exercise a separate CLI process concurrently with the relay's singleton state, with no bot token present; local opt-in; exact session/topic/owner routing; ambiguous selection; path escapes, private-data paths, links/junctions, hard links, empty/oversized files and Windows alternate streams; frozen and tampered snapshots; disabled/ignored/closed/moved sessions; deduplication; queue bounds; interrupted/expired work; 429 cooldowns; uncertain transport and shutdown; and an ordinary message with buttons completing while an upload is held. Multipart adapter checks use an injected fetch implementation, verify the fixed endpoint and actual FormData contents, and check token redaction. These are not a real Telegram upload acceptance check.
