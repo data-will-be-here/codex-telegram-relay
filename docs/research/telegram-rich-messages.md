@@ -2,7 +2,7 @@
 
 Research date: 2026-11-02. Official documentation only. No bot messages, native model turns or implementation changes were used for this research.
 
-Implementation follow-up: the initial table/heading integration is now on dev for 0.1.13. See [architecture](../architecture.md) and [verification](../verification.md). The local-code findings below describe the pre-integration snapshot; rich deliveries now have durable per-part progress. Research notes remain source-only and are excluded from the installable package.
+Implementation follow-up: the initial table/heading integration is included in 0.1.13. See [architecture](../architecture.md) and [verification](../verification.md). The local-code findings below describe the pre-integration snapshot; rich deliveries now have durable per-part progress. Research notes remain source-only and are excluded from the installable package.
 
 ## Confirmed API contract
 

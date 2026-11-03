@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.13 (unreleased)
+## 0.1.13 — 2026-11-03
 
 - Automatically send assistant replies containing Markdown tables or headings with Telegram rich blocks. Preserve surrounding text, inline styling, code, safe links and italic project signatures; keep short replies and approval controls on ordinary messages.
 - Split large rich answers at block/table-row boundaries with repeated headers. Use complete labelled paragraphs for tables wider than 20 columns or oversized rows; after a definite rich-format rejection, fall back to readable text cards rather than raw table markup.
@@ -8,6 +8,7 @@
 
 - Replace raw command-approval JSON with reason, working directory and a literal command block. Omit transport IDs and duplicate parsed actions while retaining additional permission/security context.
 - Render approval cards with escaped dynamic text and command/diff code blocks, preserving exact command characters and placing buttons after the final message part. Approval validation, one-shot owner callbacks and oversized-request terminal fallback remain unchanged.
+- Publish the English landscape demonstration and feature highlights in both READMEs, with reproducible installation pinned to v0.1.13.
 
 ## 0.1.12
 

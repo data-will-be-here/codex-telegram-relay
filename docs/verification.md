@@ -2,7 +2,7 @@
 
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
-## 0.1.13 command approval cards (unreleased)
+## 0.1.13 rich messages and readable approval cards
 
 Rich-message regressions first reproduced ordinary pipe-table output, missing row-boundary splitting, failure to provide readable fallback and replay of an accepted table prefix after topic recovery/restart. These now pass through State/Outbox and a Telegram test adapter. Coverage includes native table/header/topic/signature fields, Unicode and oversized cells, wide-table row cards, literal HTML/code and blocked local links, partial fallback, final-part controls, rate-limit handling, unrelated/uncertain failures, and SQLite recovery with accepted-part progress. Windows validation: 111 tests, 109 passed, two platform skips.
 
