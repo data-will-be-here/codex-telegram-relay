@@ -24,6 +24,12 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.method === 'test/oversized') result = { output: 'x'.repeat(17 * 1024 * 1024) };
   if (message.method === 'test/request') ws.send(JSON.stringify({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'a', command: 'echo safe' } }));
   if (message.method === 'test/resolved') ws.send(JSON.stringify({ method: 'serverRequest/resolved', params: { threadId: 'a', requestId: 'approval-1' } }));
+  if (message.method === 'test/stream') {
+    const params = { threadId: 'a', turnId: 'turn-1' };
+    ws.send(JSON.stringify({ method: 'item/started', params: { ...params, item: { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: '' } } }));
+    ws.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { ...params, itemId: 'answer', delta: 'Streamed answer' } }));
+    ws.send(JSON.stringify({ method: 'item/completed', params: { ...params, item: { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: 'Streamed answer' } } }));
+  }
   ws.send(JSON.stringify({ id: message.id, result }));
 }));
 server.listen(0, '127.0.0.1', () => {

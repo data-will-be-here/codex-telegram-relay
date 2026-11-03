@@ -7,6 +7,7 @@ import { realpathSync, existsSync, statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
+import { Drafts } from './drafts.js';
 import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
@@ -137,6 +138,8 @@ async function start(args: string[]): Promise<void> {
   const { State } = await import('./state.js');
   const state = new State(home);
   const outbox = new Outbox(state, telegram, config.ownerId, 1100, config.ignoredThreadIds);
+  const drafts = new Drafts(telegram, config.ownerId);
+  let liveBridge: Bridge | undefined;
   let stopping = false;
   let current: CodexClient | undefined;
   let saveRecoveredBinary = binaryChanged;
@@ -144,7 +147,13 @@ async function start(args: string[]): Promise<void> {
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   const output = async (): Promise<void> => {
     while (!stopping) {
-      try { if (!await outbox.flushOne()) await delay(250); }
+      try {
+        // Order settled preview calls before permanent answers; remote timeout outcomes remain uncertain.
+        // Saved answers and controls always take priority over ephemeral previews.
+        if (await outbox.flushOne()) continue;
+        if (await liveBridge?.flushDraft()) continue;
+        await delay(100);
+      }
       catch (error) { console.error(string(object(error).message) || 'Telegram delivery failed.'); await delay(1000); }
     }
   };
@@ -156,7 +165,8 @@ async function start(args: string[]): Promise<void> {
       let pendingEvents = Promise.resolve();
       let eventCount = 0;
       try {
-        const bridge = new Bridge(config, state, codex, telegram);
+        const bridge = new Bridge(config, state, codex, telegram, drafts);
+        liveBridge = bridge;
         const unavailable = new Set<string>();
         codex.on('sessionUnavailable', (id: string) => {
           if (!unavailable.has(id)) { unavailable.add(id); console.error(`Skipping unavailable Codex session ${id.slice(0, 8)}; other sessions remain connected.`); }
@@ -169,6 +179,7 @@ async function start(args: string[]): Promise<void> {
           pendingEvents = pendingEvents.then(work).catch(error => { console.error(string(object(error).message) || 'Codex event failed.'); }).finally(() => { eventCount--; });
         };
         codex.on('notification', (method: string, params: Json) => {
+          bridge.streamEvent(method, params);
           if (['item/completed', 'turn/completed', 'serverRequest/resolved'].includes(method) || (method === 'item/started' && object(params.item).type === 'fileChange')) schedule(() => bridge.notification(method, params));
         });
         codex.on('request', request => schedule(() => bridge.request(request)));
@@ -194,7 +205,7 @@ async function start(args: string[]): Promise<void> {
       } catch (error) {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
         console.error(string(object(error).message) || 'Relay connection failed.');
-      } finally { codex.close(); await pendingEvents; }
+      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {

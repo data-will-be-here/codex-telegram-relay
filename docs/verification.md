@@ -1,5 +1,18 @@
 # Verification record
 
+## Unreleased: streaming acceptance (2026-11-03)
+
+Windows, Node 22.21.1, Codex 0.166.0: `npm ci`, typecheck, the full suite (127 tests: 125 passed, two POSIX-only skips), runtime dependency audit (zero findings), isolated official CLI installation smoke check, and distribution allowlist (21 files, approximately 74 KB, no local state/secrets/test data) passed. Cross-platform CI results must be checked for the committed SHA separately.
+
+New automated checks cover burst coalescing, fair topic pacing, shared cooldowns across reconnects, stable draft identity, valid paragraph-to-table rich snapshots, literal HTML/media handling, Unicode-safe preview bounds, stale item/turn rejection, owner-only persisted settings, all/compact eligibility, native directory scope checks, detach/topic changes, completion during scope validation and an in-flight draft followed by a permanent final. A table longer than the preview buffer arrives with every row and its end marker even after preview transport failure. The existing 40,000-unit final-source limit is unchanged.
+
+Two separate local acceptance checks were performed; they are not an end-to-end mobile UI claim:
+
+- Real paired Telegram bot, this project's existing owner topic: four `sendRichMessageDraft` updates succeeded, followed by one permanent ordinary answer and one permanent rich table. Test payloads were synthetic. No updates were polled, no topics were created/renamed/deleted, and the running relay's state was opened read-only. API acceptance was verified; client animations and final visual replacement still need the owner's Android/Desktop check.
+- Real shared Codex daemon, isolated ephemeral no-tool turn, Telegram simulator: 288 native assistant deltas, `final_answer` phase, three rich previews, all 30 final table rows and the end marker preserved. Native execution policy was not overridden. Ephemeral threads have no rollout/resume/turn-history support, so the acceptance adapter used its already-owned session and in-memory empty history; live events and directory reads were real. Normal persistent-session attachment remains covered by the existing transport/release qualification.
+
+The single writer orders settled local preview calls before permanent sends. A network timeout still has an uncertain server outcome; no absolute client-order or delivery guarantee is claimed. Preview failures remain separate from the durable outbox and never authorize replay of native instructions or uncertain permanent messages.
+
 Initial local qualification: 2026-11-02, Windows, Node.js 22.21.1, Codex CLI/shared daemon 0.166.0.
 
 ## 0.1.13 rich messages and readable approval cards

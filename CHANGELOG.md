@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Stream public assistant answers through native Telegram rich drafts, including simple prose and tables, without forwarding command output or private reasoning. Keep all/compact filtering and add persisted owner-only `/stream on|off` controls.
+- Coalesce token bursts outside the control-event queue, fairly share one chat-wide preview budget and recheck native session scope before sending. Keep bounded previews separate from complete durable answers; preview failures do not suppress final delivery or repeat instructions.
+- Prioritize permanent output, settle in-flight preview calls before final sends, honor cooldowns and fall back to ordinary previews after a definite rich-draft rejection. Preserve existing final formatting, multipart recovery and the 40,000-unit source-text safety limit.
+
 ## 0.1.13 — 2026-11-03
 
 - Automatically send assistant replies containing Markdown tables or headings with Telegram rich blocks. Preserve surrounding text, inline styling, code, safe links and italic project signatures; keep short replies and approval controls on ordinary messages.

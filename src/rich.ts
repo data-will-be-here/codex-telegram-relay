@@ -121,10 +121,10 @@ function structured(tokens: Token[], depth = 0): boolean {
 }
 
 /** Convert only known Markdown constructs; raw HTML/media never become active Telegram blocks. */
-export function richMessages(source: string, cwd?: string | null): RichPart[] | undefined {
+export function richMessages(source: string, cwd?: string | null, force = false): RichPart[] | undefined {
   let tokens: Token[];
   try { tokens = Lexer.lex(source, { gfm: true }); } catch { return undefined; }
-  if (!structured(tokens)) return undefined;
+  if (!force && !structured(tokens)) return undefined;
   const content = blocks(tokens);
   const header: RichBlock = { type: 'paragraph', text: { type: 'italic', text: projectHeader(cwd) } };
   // Count serialized UTF-8 bytes and all objects conservatively, below Telegram's text/block ceilings.

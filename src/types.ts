@@ -35,7 +35,7 @@ export interface Codex {
   asyncQuestions?(threadId: string, historySinceMs?: number, answeredCallIds?: readonly string[]): Promise<import('./async-questions.js').AsyncQuestion[]>;
   list(): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;
-  read(threadId: string): Promise<Json>;
+  read(threadId: string, timeoutMs?: number): Promise<Json>;
   turns(threadId: string): Promise<Json[]>;
   start(threadId: string, text: string | UserInput[]): Promise<unknown>;
   steer(threadId: string, turnId: string, text: string | UserInput[]): Promise<unknown>;
