@@ -1,5 +1,11 @@
 # Verification record
 
+## 0.1.16: account-security onboarding (2026-11-03)
+
+The English and Russian installation prompts and bare-link instructions now require an explicit user-facing security explanation before pairing, changing discovery scope or starting the relay. Setup prints a one-time warning before connection/pairing. No acknowledgement gate, new permission grant or Telegram account-setting change is introduced; existing owner checks and native approvals are unchanged.
+
+Local Windows verification passed: clean installation, typecheck, 134 tests (132 passed, two POSIX-only skips), runtime dependency audit with zero findings and the distribution allowlist. Research notes remain excluded from the installable package. CI must be checked for the final release SHA before claiming cross-platform validation. Human instructions specify what agents must explain; compliance by arbitrary third-party agents is not an enforceable security boundary.
+
 ## 0.1.15: per-installation command menus (2026-11-03)
 
 Windows local checks: clean installation, typecheck, 134 tests (132 passed, two POSIX-only skips), package allowlist and dependency audit with zero findings passed. The implementation commit `67d5ca2` also passed all six Windows/Linux/macOS Node 22/24 CI jobs; release metadata requires its own checks before promotion. Seven menu tests cover owner-chat scoping with a distinct synthetic owner ID, English/Russian descriptions, idempotent synchronization, independent language failures, uncertain settings-response readback and usable no-argument menu commands. Explicit hostile-input checks send every advertised command and parameterized variants from a stranger, an owner in a group, and a mismatched sender/chat pair: no replies, native instructions, preference changes or topic changes result.

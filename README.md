@@ -19,14 +19,16 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 **Install with your coding agent:** send it the repository link and this prompt:
 
+**For installation agents:** follow [Agent-assisted installation](#agent-assisted-installation) for both a bare repository URL and the prompt below. Explain account security to the user before pairing or starting the relay.
+
 ```text
 Install Codex Telegram Relay on my computer: https://github.com/data-will-be-here/codex-telegram-relay/tree/main
-Follow the README's "Agent-assisted installation" instructions. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
+Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.15](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.15). Includes live rich answer streaming and a per-installation command menu. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.16](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.16). Includes live rich answer streaming, per-installation command menus and account-security guidance during installation. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -74,8 +76,10 @@ Install from the GitHub source release. No npm registry package is published.
 
 ## Install and pair
 
+> **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
+
 ```sh
-git clone --branch v0.1.15 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.16 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -114,7 +118,9 @@ Version 0.1.15 synchronizes the command menu for your paired owner's chat during
 
 ### Agent-assisted installation
 
-When the user asks you to install this repository, follow this workflow. The session-scope choice belongs to the user; a repository link alone does not authorize connecting every project.
+When installing this repository for a user, follow this workflow whether they supplied only its URL or copied the prompt above. The session-scope choice belongs to the user; a repository link alone does not authorize connecting every project.
+
+**First, explain account security before pairing, changing session scope or starting the relay.** Send a short explanation in the user's language unless it has already been discussed in this installation conversation. State that a person controlling the paired Telegram account can instruct Codex and obtain data within its effective permissions, including on a connected server. Recommend Two-Step Verification/cloud password, a separate app passcode with auto-lock, device screen lock and review of active sessions. Explain that the cloud password protects new logins, not an already authorized/unlocked session. Use [SECURITY.md](SECURITY.md#protect-the-account-you-pair) for details; merely linking it or relying on setup's console warning does not complete this step. No separate risk-acceptance confirmation is required. Do not change the user's Telegram settings or native permissions yourself.
 
 1. Check the OS, Git, Node.js 22.13+ and the existing authenticated Codex installation. Use its native executable, following the platform instructions below. Ask the user to start a normal session and send its first prompt if no eligible session is loaded. No server, webhook or MCP registration is needed.
 2. Explain these two session-discovery modes and ask the user to choose, unless they already made that choice:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16 — 2026-11-03
+
+- Explain the trusted remote-control security model before pairing and in both READMEs. Recommend Telegram Two-Step Verification, app/device locks, auto-lock, protected recovery email and active-session review, distinguishing new-login protection from existing-session access.
+- Document operator responsibilities and practical local shutdown limits without adding acknowledgement gates or changing owner checks, native permissions or approvals.
+- Require installation agents to explain account security to the user for both bare repository URLs and copied installation prompts, including already-paired installations. Keep session-scope consent separate and leave account security settings under the user's control.
+
 ## 0.1.15 — 2026-11-03
 
 - Register the connected bot's command menu during setup/start, using owner-chat scope, English fallback and Russian descriptions. Share the catalog with `/help`, skip unchanged lists and isolate menu errors from relay delivery; diagnostics remain read-only.

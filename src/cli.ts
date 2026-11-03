@@ -61,6 +61,7 @@ async function setup(args: string[]): Promise<void> {
   const scopeIndex = args.indexOf('--scope');
   const scope = scopeIndex >= 0 ? args[scopeIndex + 1] : 'selected';
   if (scope !== 'all' && scope !== 'selected') throw new Error('Use setup --scope all or setup --scope selected.');
+  console.log('Security: this bot is remote control of Codex. Anyone controlling your paired Telegram account can act within connected-session permissions and may access readable data.\nProtect your account, bot token and computer/server. Enable Telegram Two-Step Verification, an app passcode with auto-lock, and device screen lock; review active sessions.\nThe cloud password protects new logins, not an already unlocked session. See SECURITY.md.');
   const binary = binaryFlag(args) ?? findCodex();
   const codex = new CodexClient();
   try {
