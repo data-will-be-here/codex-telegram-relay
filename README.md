@@ -2,6 +2,21 @@
 
 A local companion for your existing Codex sessions. Each session gets its own topic in a private chat with **your own Telegram bot**. Receive questions, approval requests and completed answers; reply from Telegram to the same native session.
 
+https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
+
+*40-second English demo · 16:9 · Fictional sessions and conversations. Native rich messages shown in the demo are currently available on [`dev`](https://github.com/data-will-be-here/codex-telegram-relay/tree/dev); the tagged installation below uses v0.1.12.*
+
+### Why use it?
+
+- **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
+- **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
+- **Answer with buttons or your own words.** Structured questions offer inline choices; supported approvals have action buttons. You can also type a reply or provide attachment context.
+- **Read formatted results.** Messages preserve Markdown emphasis, links, inline code and code blocks, including when a long answer spans several messages.
+- **Get native rich messages (development preview).** On `dev`, headings and tables render as Telegram rich messages, with repeated table headers and readable fallbacks for wide tables or unsupported formatting.
+- **Send screenshots and documents as context.** Attach files in the project's topic and Codex receives them through its normal image/file inputs and permissions.
+- **Choose how much to receive.** Switch between all assistant messages and compact updates; shell output and file/tool events stay out of the chat.
+- **Run locally with your own bot.** No VPS, webhook or public port is required. The relay accepts messages from its paired owner and keeps Codex's native approval and sandbox settings.
+
 **Install with your coding agent:** send it the repository link and this prompt:
 
 ```text
