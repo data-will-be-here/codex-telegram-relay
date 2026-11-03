@@ -28,7 +28,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 [English README](README.md)
 
-[Предварительный релиз v0.1.15](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.15). Включает потоковые rich-превью и меню команд для каждой установки. Проверен с Codex CLI 0.166.0; ограничения совместимости описаны ниже.
+[Предварительный релиз v0.1.16](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.16). Включает потоковые rich-превью, меню команд и рекомендации по защите аккаунта при установке. Проверен с Codex CLI 0.166.0; ограничения совместимости описаны ниже.
 
 `main` — релизная ветка; разработка и обычные PR идут в `dev`. Для установки конкретной версии используй тег, как в инструкции ниже.
 
@@ -46,7 +46,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 > **Защита аккаунта:** Бот даёт удалённое управление Codex. Получив доступ к привязанному Telegram-аккаунту, другой человек сможет действовать в пределах прав подключённых сессий и потенциально получить доступные файлы или их содержимое. Защищай аккаунт, токен бота и компьютер/сервер. Включи облачный пароль Telegram (двухэтапную аутентификацию), отдельный код-пароль приложения с автоблокировкой и блокировку устройства; проверяй активные сеансы. Облачный пароль защищает новые входы, а не уже разблокированный сеанс. Подробнее: [модель безопасности](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.15 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.16 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor

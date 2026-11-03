@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.16 — 2026-11-03
 
 - Explain the trusted remote-control security model before pairing and in both READMEs. Recommend Telegram Two-Step Verification, app/device locks, auto-lock, protected recovery email and active-session review, distinguishing new-login protection from existing-session access.
 - Document operator responsibilities and practical local shutdown limits without adding acknowledgement gates or changing owner checks, native permissions or approvals.

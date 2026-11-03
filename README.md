@@ -28,7 +28,7 @@ Follow the README's "Agent-assisted installation" instructions. Before pairing o
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.15](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.15). Includes live rich answer streaming and a per-installation command menu. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.16](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.16). Includes live rich answer streaming, per-installation command menus and account-security guidance during installation. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -79,7 +79,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.15 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.16 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
