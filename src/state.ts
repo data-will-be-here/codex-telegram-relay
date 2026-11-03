@@ -154,6 +154,10 @@ export class State {
     if (mode !== 'all' && mode !== 'compact') throw new Error('Invalid message mode.');
     this.db.prepare("INSERT INTO settings VALUES('messageMode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(mode);
   }
+  streamingEnabled(): boolean { return this.db.prepare("SELECT value FROM settings WHERE key='streaming'").get()?.value !== 'off'; }
+  setStreaming(enabled: boolean): void {
+    this.db.prepare("INSERT INTO settings VALUES('streaming',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(enabled ? 'on' : 'off');
+  }
   offset(): number | undefined {
     const value = this.db.prepare("SELECT value FROM settings WHERE key='offset'").get()?.value;
     return value === undefined ? undefined : Number(value);

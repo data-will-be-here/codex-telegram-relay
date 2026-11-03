@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-relay",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "A local, private-topic Telegram companion for existing Codex CLI sessions.",
   "type": "module",
   "license": "MIT",

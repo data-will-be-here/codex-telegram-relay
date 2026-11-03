@@ -61,6 +61,17 @@ test('message mode defaults to all and persists across restarts', () => {
   } finally { state.close(); temp.close(); }
 });
 
+test('streaming defaults to enabled and its owner preference survives restarts independently of message mode', () => {
+  const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
+  try {
+    assert.equal(state.streamingEnabled(), true);
+    state.setStreaming(false); state.setMessageMode('compact'); state.close(); state = new State(home);
+    assert.equal(state.streamingEnabled(), false); assert.equal(state.messageMode(), 'compact');
+    state.setStreaming(true); state.close(); state = new State(home);
+    assert.equal(state.streamingEnabled(), true); assert.equal(state.messageMode(), 'compact');
+  } finally { state.close(); temp.close(); }
+});
+
 test('a crash during topic creation leaves an uncertain operation that cannot create a duplicate after restart', () => {
   const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
   try {

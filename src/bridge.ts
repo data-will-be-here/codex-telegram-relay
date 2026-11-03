@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { approvalMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { RpcError } from './codex.js';
+import { Drafts } from './drafts.js';
 import { State } from './state.js';
 import { Topics } from './topics.js';
 import { Attachments, AttachmentError } from './attachments.js';
@@ -35,7 +36,45 @@ export class Bridge {
   private startedAt = Date.now();
   private topics: Topics;
 
-  constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram) { this.topics = new Topics(config, state, telegram); }
+  constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
+    private readonly drafts = new Drafts(telegram, config.ownerId)) { this.topics = new Topics(config, state, telegram); }
+
+  /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
+  streamEvent(method: string, params: Json): void {
+    if (!['item/started', 'item/agentMessage/delta', 'item/completed', 'turn/completed'].includes(method)) return;
+    const threadId = string(params.threadId);
+    const binding = this.state.binding(threadId);
+    if (!this.state.streamingEnabled() || !binding || !this.attached.has(threadId) ||
+        this.config.ignoredThreadIds?.includes(threadId)) return;
+    const turnId = string(params.turnId);
+    if (method === 'item/started') {
+      const item = object(params.item);
+      if (item.type === 'agentMessage') this.drafts.begin(binding, turnId, string(item.id), string(item.phase), string(item.text));
+    } else if (method === 'item/agentMessage/delta') {
+      this.drafts.append(threadId, turnId, string(params.itemId), string(params.delta));
+    } else if (method === 'item/completed') {
+      this.drafts.finish(threadId, turnId, string(object(params.item).id));
+    } else if (method === 'turn/completed') {
+      this.drafts.finish(threadId, string(object(params.turn).id));
+    }
+  }
+
+  async flushDraft(): Promise<boolean> {
+    if (!this.state.streamingEnabled()) { this.drafts.clear(); return false; }
+    return this.drafts.flushOne(async (binding, turnId, phase) => {
+      const eligible = (): boolean => {
+        const current = this.state.binding(binding.threadId);
+        const reply = this.state.reply(binding.threadId);
+        return this.state.streamingEnabled() && this.attached.has(binding.threadId) && current?.topicId === binding.topicId &&
+          !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+          (!phase || phase === 'final_answer' || this.state.messageMode() === 'all' || !!reply && (!reply.turnId || reply.turnId === turnId));
+      };
+      if (!eligible()) return false;
+      // Recheck the live native directory before forwarding text, with a short read-only timeout.
+      const current = await this.codex.read(binding.threadId, 1000);
+      return allowedSessionDirectory(string(current.cwd), this.config) && eligible();
+    });
+  }
 
   async discover(): Promise<void> {
     if (this.discovering) return;
@@ -43,7 +82,7 @@ export class Bridge {
     try {
       const sessions = await this.codex.list();
       const loaded = new Set(sessions.map(s => s.id));
-      for (const id of this.attached) if (!loaded.has(id)) this.attached.delete(id);
+      for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
       for (const session of sessions) {
         if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) { this.attached.delete(session.id); continue; }
         try {
@@ -87,6 +126,7 @@ export class Bridge {
   }
 
   async notification(method: string, params: Json): Promise<void> {
+    this.streamEvent(method, params);
     const threadId = string(params.threadId) || string(object(params.thread).id);
     const binding = this.state.binding(threadId);
     if (!binding || !this.attached.has(threadId)) return;
@@ -227,12 +267,18 @@ export class Bridge {
     const text = string(message.text).trim();
     if (!text) return;
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
-      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
+      this.notice(topicId, 'Codex Telegram Relay\n\nOpen a project topic and send a message to its existing Codex session.\n/sessions — attached sessions\n/status — connection status\n/mode all|compact — assistant message detail for all sessions\n/stream on|off — live answer previews for all sessions\n/bind ID — bind an existing topic after uncertain creation\n/repair ID — explicitly retry a failed topic creation\n/questions — pending questions\n/say TEXT — steer work while a question is pending'); return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.notice(topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (/^\/stream(?:\s|$)/u.test(text)) {
+      const [, mode, extra] = text.split(/\s+/u);
+      if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
+      if (mode) { this.state.setStreaming(mode === 'on'); if (mode === 'off') this.drafts.clear(); }
+      this.notice(topicId, `Live previews for all sessions: ${this.state.streamingEnabled() ? 'on' : 'off'}.\n/stream on — show answers as they are generated, with rich formatting\n/stream off — deliver completed messages only\nComplete answers and tables are saved separately in both modes. Changes apply immediately; an existing preview may take up to 30 seconds to disappear.`); return;
+    }
     if (/^\/(?:bind|repair)(?:\s|$)/u.test(text)) {
       const [command, prefix, extra] = text.split(/\s+/u);
       if (!prefix || extra || (command === '/bind' && topicId === null)) { this.notice(topicId, 'Use /bind SESSION_ID inside the existing topic, or /repair SESSION_ID to explicitly retry creation.'); return; }

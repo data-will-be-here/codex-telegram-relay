@@ -61,8 +61,8 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.13' },
-      capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.14' },
+      capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
   }
@@ -123,7 +123,7 @@ export class CodexClient extends EventEmitter implements Codex {
     return result;
   }
 
-  async read(threadId: string): Promise<Json> { return object(object(await this.call('thread/read', { threadId })).thread); }
+  async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
   async asyncQuestions(threadId: string, historySinceMs?: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
     const thread = await this.read(threadId);
     const path = string(thread.path);

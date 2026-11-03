@@ -16,6 +16,8 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
     assert.deepEqual(await c.turns('empty'), []);
     await c.attach('a'); await c.start('a', 'hello'); await c.steer('a', 'turn-1', 'change');
     const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    const capabilities = records.find(x => x.method === 'initialize')!.params.capabilities as Json;
+    assert.deepEqual(capabilities.optOutNotificationMethods, ['item/commandExecution/outputDelta', 'item/reasoning/textDelta']);
     assert.deepEqual(records.find(x => x.method === 'thread/resume')!.params, { threadId: 'a', excludeTurns: true });
     assert.deepEqual(records.find(x => x.method === 'turn/start')!.params, { threadId: 'a', input: [{ type: 'text', text: 'hello' }] });
     assert.deepEqual(records.find(x => x.method === 'turn/steer')!.params, { threadId: 'a', expectedTurnId: 'turn-1', input: [{ type: 'text', text: 'change' }] });
@@ -24,6 +26,18 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
     const mediaRecords = await c.call('test/records', {}) as { method: string; params: Json }[];
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/start').at(-1)!.params, { threadId: 'a', input });
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/steer').at(-1)!.params, { threadId: 'a', expectedTurnId: 'turn-1', input });
+  } finally { c.close(); }
+});
+
+test('native assistant streaming preserves started, delta and completed event identities over the actual proxy transport', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const events: { method: string; params: Json }[] = [];
+    c.on('notification', (method: string, params: Json) => events.push({ method, params }));
+    await c.call('test/stream', {});
+    assert.deepEqual(events.map(e => e.method), ['item/started', 'item/agentMessage/delta', 'item/completed']);
+    assert.deepEqual(events[1]!.params, { threadId: 'a', turnId: 'turn-1', itemId: 'answer', delta: 'Streamed answer' });
   } finally { c.close(); }
 });
 
