@@ -4,7 +4,7 @@ A local companion for your existing Codex sessions. Each session gets its own to
 
 https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
-*40-second English demo · 16:9 · Fictional sessions and conversations. Native rich messages shown in the demo are currently available on [`dev`](https://github.com/data-will-be-here/codex-telegram-relay/tree/dev); the tagged installation below uses v0.1.12.*
+*40-second English demo · 16:9 · Fictional sessions and conversations. Native rich messages, headings and tables are included in v0.1.13.*
 
 ### Why use it?
 
@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 - **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
 - **Answer with buttons or your own words.** Structured questions offer inline choices; supported approvals have action buttons. You can also type a reply or provide attachment context.
 - **Read formatted results.** Messages preserve Markdown emphasis, links, inline code and code blocks, including when a long answer spans several messages.
-- **Get native rich messages (development preview).** On `dev`, headings and tables render as Telegram rich messages, with repeated table headers and readable fallbacks for wide tables or unsupported formatting.
+- **Get native rich messages.** Headings and tables render as Telegram rich messages, with repeated table headers and readable fallbacks for wide tables or unsupported formatting.
 - **Send screenshots and documents as context.** Attach files in the project's topic and Codex receives them through its normal image/file inputs and permissions.
 - **Choose how much to receive.** Switch between all assistant messages and compact updates; shell output and file/tool events stay out of the chat.
 - **Run locally with your own bot.** No VPS, webhook or public port is required. The relay accepts messages from its paired owner and keeps Codex's native approval and sandbox settings.
@@ -26,7 +26,7 @@ Follow the README's "Agent-assisted installation" instructions. Explain automati
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.12](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.12). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.13](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.13). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -50,6 +50,10 @@ Your Telegram bot / private project topics
 - Replies immediately steer a running turn or start the next turn when idle.
 - `/mode all` delivers all assistant commentary and final answers; `/mode compact` delivers the first reply to Telegram input and final answer. This owner-only preference applies to all sessions, persists and changes immediately for future messages.
 - Assistant messages render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file and preview links show their targets as text. A definite Telegram entity rejection falls back to plain text without repeating accepted parts.
+- Answers containing headings or tables use native Telegram rich messages. Long tables split between rows with repeated headers; wide tables and oversized cells use labelled paragraphs. A definite format rejection falls back to readable row cards. Short replies, questions and approval controls retain ordinary messages. This is independent of `/mode all|compact`.
+  Oversized formatted blocks may simplify inline styling to preserve their complete text within Telegram's limits.
+- Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
+  Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
@@ -68,7 +72,7 @@ Install from the GitHub source release. No npm registry package is published.
 ## Install and pair
 
 ```sh
-git clone --branch v0.1.12 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.13 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -94,6 +98,12 @@ codex-telegram-relay doctor
 codex-telegram-relay setup
 codex-telegram-relay start
 ```
+
+### Upgrade an existing installation
+
+Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.
+
+Use one relay process per private state directory. Version 0.1.13 adds durable rich-message delivery progress; older versions do not understand that progress. Do not downgrade while rich deliveries are pending or unresolved.
 
 ### Agent-assisted installation
 
@@ -181,6 +191,8 @@ If Telegram explicitly reports that a saved topic no longer exists, the relay re
 Duplicate incoming updates do not execute twice. Writes with an ambiguous result are **not** automatically retried. Check the Codex terminal before repeating an instruction after an uncertainty notice. On reconnection, the relay catches up recent completions for saved bindings; it does not dump old history on the first attachment. See [delivery guarantees](docs/architecture.md).
 
 ## Development
+
+Develop on `dev` or a feature branch targeting `dev`. Tested releases are promoted to `main` through a release PR; published version tags remain pinned to their release commits.
 
 ```sh
 npm ci

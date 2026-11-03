@@ -346,6 +346,83 @@ test('topic names stay project/id when the native status changes, including reco
   } finally { f.close(); }
 });
 
+test('command approvals show readable literal commands without transport metadata or duplicate parsed actions', async () => {
+  const f = await fixture();
+  try {
+    const command = '"C:\\Tools\\powershell.exe" -Command "Get-Content -LiteralPath \'C:\\Relay cache\\sample.md\' -Raw -Encoding UTF8"';
+    await f.bridge.request({ id: 'read-file', method: 'item/commandExecution/requestApproval', params: {
+      kind: 'command', threadId: 'thread-a', turnId: 'private-turn-id', itemId: 'private-item-id', startedAtMs: 123456,
+      environmentId: 'local', reason: 'Read the attached file outside the sandbox.', command, cwd: f.projectA,
+      commandActions: [{ type: 'unknown', command: 'Get-Content -LiteralPath sample.md' }],
+      additionalPermissions: { fileSystem: { read: ['C:\\Relay cache'] } }, availableDecisions: ['accept', 'decline'],
+    } });
+    await f.drain();
+    const sent = f.telegram.sent()[0]!;
+    const body = messageBody(sent);
+    assert.ok(body.includes(command), 'The actual command must be visible with its original backslashes and quotes.');
+    assert.ok(body.includes('Read the attached file outside the sandbox.'));
+    assert.ok(body.includes(f.projectA));
+    assert.ok(body.includes('additionalPermissions'), 'Permission context must not be hidden.');
+    assert.ok(!/threadId|turnId|itemId|startedAtMs|commandActions|private-turn-id/u.test(body));
+    assert.ok(array(sent.entities).map(object).some(e => e.type === 'pre' && string(sent.text).slice(Number(e.offset), Number(e.offset) + Number(e.length)) === command));
+    assert.ok(sent.reply_markup);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('approval formatting cannot hide literal Markdown in a command or justification', async () => {
+  const f = await fixture();
+  try {
+    const command = 'echo "```\n[harmless](https://example.com)\n```"; echo **literal**\n \t';
+    const reason = '**Read** [this file](https://example.com)';
+    await f.bridge.request({ id: 'literal', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, reason, cwd: f.projectA } });
+    await f.drain();
+    const sent = f.telegram.sent()[0]!;
+    assert.ok(messageBody(sent).includes(reason));
+    assert.ok(array(sent.entities).map(object).some(e => e.type === 'pre' && string(sent.text).slice(Number(e.offset), Number(e.offset) + Number(e.length)) === command));
+    assert.ok(array(sent.entities).map(object).every(e => e.type !== 'text_link'));
+  } finally { f.close(); }
+});
+
+test('approval control characters remain visible and round-trip without Markdown newline normalization', async () => {
+  const commands = [
+    'Write-Output "a\r\nb"\r\nGet-ChildItem',
+    'printf "a\rb"',
+    'echo "\\r literal"; printf "\u0000\u001b\u007f"\n\t',
+  ];
+  for (const [index, command] of commands.entries()) {
+    const f = await fixture();
+    try {
+      await f.bridge.request({ id: `controls-${index}`, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, cwd: f.projectA } });
+      await f.drain();
+      const sent = f.telegram.sent()[0]!;
+      const expected = JSON.stringify(command).replace(/\x7f/gu, '\\u007f');
+      const blocks = array(sent.entities).map(object).filter(e => e.type === 'pre')
+        .map(e => string(sent.text).slice(Number(e.offset), Number(e.offset) + Number(e.length)));
+      assert.ok(blocks.includes(expected), 'The command must have an unambiguous JSON-escaped display.');
+      assert.equal(JSON.parse(blocks.find(block => block === expected)!), command);
+      assert.ok(messageBody(sent).includes('Control characters are shown as JSON escapes'));
+      assert.ok(sent.reply_markup);
+      assert.equal(f.codex.writes.length, 0);
+    } finally { f.close(); }
+  }
+});
+
+test('a multipart approval retains its entire command and offers buttons only after the last part', async () => {
+  const f = await fixture();
+  try {
+    const command = 'echo ' + 'literal'.repeat(900);
+    await f.bridge.request({ id: 'long-command', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, cwd: f.projectA } });
+    await f.drain();
+    const sent = f.telegram.sent();
+    assert.ok(sent.length > 1);
+    assert.ok(sent.map(messageBody).join('').includes(command));
+    assert.ok(sent.slice(0, -1).every(s => !s.reply_markup));
+    assert.ok(sent.at(-1)!.reply_markup);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
 test('native approval needs an owner click in its own topic, then becomes one-shot', async () => {
   const f = await fixture();
   try {

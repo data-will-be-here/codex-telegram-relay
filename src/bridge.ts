@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { approvalMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { RpcError } from './codex.js';
 import { State } from './state.js';
@@ -173,7 +174,8 @@ export class Bridge {
       detailsParams.proposedChanges = changes;
     }
     const details = JSON.stringify(detailsParams, null, 2);
-    if (details.length > 18_000) {
+    const card = details.length <= 18_000 ? approvalMessage(request.method, detailsParams) : undefined;
+    if (card === undefined || card.length > 18_000) {
       this.attention(binding, request, 'An approval is too large to display completely here. Review and answer it in the terminal.'); return;
     }
     if (request.method === 'item/permissions/requestApproval') {
@@ -189,7 +191,7 @@ export class Bridge {
     if (!prompt.options.size) { this.attention(binding, request, 'Approval choices are unsupported. Use the terminal.'); return; }
     this.prompts.set(prompt.token, prompt);
     const keyboard: Keyboard = { inline_keyboard: [[...prompt.options.keys()].map(code => ({ text: code === 'a' ? 'Allow once' : code === 'c' ? 'Cancel turn' : 'Decline', callback_data: `r:${prompt.token}:${code}` }))] };
-    this.state.enqueue(this.promptKey(prompt), binding.topicId, '🔐 Approval required\n\n' + details, keyboard as unknown as Json);
+    this.state.enqueue(this.promptKey(prompt), binding.topicId, card, keyboard as unknown as Json);
   }
 
   async update(update: Json): Promise<void> {
@@ -459,7 +461,7 @@ export class Bridge {
       if (acceptedTurn) this.state.replyTurn(threadId, inputId, acceptedTurn);
     } catch (error) { this.state.clearReply(threadId, inputId); throw error; }
   }
-  private promptKey(prompt: Prompt): string { return `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }
+  private promptKey(prompt: Prompt): string { return `prompt/${prompt.request.method.endsWith('/requestApproval') ? 'approval/' : ''}${this.generation}/${prompt.token}/${prompt.index}`; }
   private async clearPrompt(prompt: Prompt): Promise<void> {
     this.prompts.delete(prompt.token);
     const messageId = this.state.cancelPrompt(this.promptKey(prompt));

@@ -24,7 +24,7 @@ export function withProjectHeader(message: FormattedText, cwd?: string | null): 
   ] };
 }
 
-function linkable(url: URL): boolean {
+export function linkable(url: URL): boolean {
   if (url.protocol === 'mailto:') return true;
   if (!['https:', 'http:'].includes(url.protocol)) return false;
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/gu, '').replace(/\.$/u, '');
