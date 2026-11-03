@@ -159,6 +159,8 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 
 ## Telegram controls
 
+Setup and each relay start synchronize the command menu with `setMyCommands` for the owner's private chat only, with English fallback and Russian descriptions. Each installation uses its own paired owner ID from local configuration. The same command list powers `/help`. Menu synchronization is optional: a failure does not stop message delivery, and the next start retries it. `doctor` remains read-only. Commands always require the configured owner in their private chat, even if someone types a command without seeing the menu.
+
 | Input | Behaviour |
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |

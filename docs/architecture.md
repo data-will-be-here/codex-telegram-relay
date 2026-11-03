@@ -9,6 +9,7 @@
 - `topics.ts`: durable topic creation and repair, ambiguous-result handling, rate-limit scheduling and owner-directed binding/retry. It never changes native execution policy or starts a turn.
 - `telegram.ts`: fixed official HTTPS endpoint, bounded messages, request timeouts, outgoing throttling and a durable outbox consumer.
 - `drafts.ts`: bounded ephemeral assistant previews, shared chat pacing, fair topic scheduling, rich/text fallback and cancellation. It never stores or replaces a permanent answer.
+- `commands.ts`: one command catalog for `/help` and English/Russian Telegram menus. Setup and start synchronize only `BotCommandScopeChat` for the owner; broader scopes are untouched. Start runs synchronization separately from native attachment and polling; failures are nonfatal and retried next start. `doctor` never registers commands. Menus do not authorize inputs: Bridge still rejects foreign senders, non-private chats and sender/chat mismatches before command parsing or payload storage.
 - `format.ts`: CommonMark/GFM parsing into Telegram text entities, safe external links and UTF-16-aware splitting. Raw HTML is displayed literally; code never nests inside formatting entities.
 - `state.ts`: SQLite bindings, update IDs, delivery status and a local singleton lock. Unknown users' payloads are not stored.
 - `config.ts` / `cli.ts`: local pairing, secret input, project selection, user-profile state and process lifecycle, verified Windows ACL protection, and missing-executable recovery after a read-only native compatibility check.
