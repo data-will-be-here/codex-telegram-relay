@@ -26,7 +26,7 @@ Follow the README's "Agent-assisted installation" instructions. Explain automati
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.13](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.13). Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.14](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.14). Includes live rich answer streaming. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -75,7 +75,7 @@ Install from the GitHub source release. No npm registry package is published.
 ## Install and pair
 
 ```sh
-git clone --branch v0.1.13 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.14 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -107,6 +107,8 @@ codex-telegram-relay start
 Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.
 
 Use one relay process per private state directory. Version 0.1.13 adds durable rich-message delivery progress; older versions do not understand that progress. Do not downgrade while rich deliveries are pending or unresolved.
+
+Version 0.1.14 enables live rich previews by default. After restarting the relay, use `/stream off` for completed messages only, or `/stream on` to restore streaming. Pairing and existing topic bindings are preserved; Codex sessions do not need restarting.
 
 ### Agent-assisted installation
 

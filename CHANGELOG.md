@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.14 — 2026-11-03
 
 - Stream public assistant answers through native Telegram rich drafts, including simple prose and tables, without forwarding command output or private reasoning. Keep all/compact filtering and add persisted owner-only `/stream on|off` controls.
 - Coalesce token bursts outside the control-event queue, fairly share one chat-wide preview budget and recheck native session scope before sending. Keep bounded previews separate from complete durable answers; preview failures do not suppress final delivery or repeat instructions.

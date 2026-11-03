@@ -2,7 +2,7 @@
 
 Research date: 2026-11-03. Official Telegram sources and local source inspection only. No live bot calls, model turns, credentials or runtime changes were used. Local snapshot: `0fbf1c307355ed8196607906556354c44258179c`.
 
-Implementation follow-up: the unreleased implementation follows the rich-preview recommendation below. Subsequent synthetic Telegram API and isolated native-stream checks are recorded separately in [verification](../verification.md#unreleased-streaming-acceptance-2026-11-03). The local findings below describe the pre-implementation snapshot.
+Implementation follow-up: version 0.1.14 follows the rich-preview recommendation below. Subsequent synthetic Telegram API, isolated native-stream and owner visual checks are recorded separately in [verification](../verification.md). The local findings below describe the pre-implementation snapshot.
 
 ## Confirmed contracts
 
