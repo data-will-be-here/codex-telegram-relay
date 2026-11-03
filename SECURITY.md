@@ -4,6 +4,21 @@
 
 This program runs on the same computer and account as Codex. Telegram is a remote control channel, not a new sandbox. Anyone controlling the paired Telegram account can instruct the selected native sessions within their existing permissions. Enable Telegram two-step verification and protect the local account.
 
+## Protect the account you pair
+
+The intended model is trusted remote control of your own computer or server. Each installation pairs its own Telegram account and bot. Choose the connected sessions and native permissions deliberately, and protect the paired account, bot token and host. An account takeover can expose data readable by Codex, including through ordinary text replies; restricting file attachments alone does not prevent that.
+
+- Enable Telegram **Two-Step Verification** (the cloud password) and protect its recovery email. This helps protect new logins; it does not lock an already authorized session.
+- Enable a separate **Telegram app passcode**, biometric unlock where supported, and a short **auto-lock** interval. Use a strong device screen lock too. These protect access to the app/device, separately from the cloud password.
+- Review **Settings > Devices / Active Sessions** and terminate sessions you do not recognize or no longer use. Do not share login codes, account QR authorizations or the bot token.
+- Use the native Codex permissions appropriate to the work. Project discovery scope selects sessions, not a filesystem read sandbox. Stop the relay locally or on its host if remote access is no longer trusted; stopping the relay does not cancel work already running in Codex or recall data already sent.
+
+See Telegram's [two-step verification guidance](https://telegram.org/faq#q-how-does-2-step-verification-work), [app passcode and auto-lock](https://telegram.org/blog/photo-editor-and-passcodes), and [stolen-device/session guidance](https://telegram.org/faq#q-my-phone-was-stolen-what-do-i-do). Settings names vary by client. These recommendations reduce account risk; they are not a guarantee against a compromised or already unlocked device.
+
+Setup displays this trust model without adding an acknowledgement gate. This guidance does not weaken existing owner checks or native approvals, and the relay does not change Telegram account security settings on your behalf.
+
+## Relay safeguards
+
 - Only one numeric owner ID in its matching private chat is accepted. Groups and other senders are rejected before journaling or creating per-sender work.
 - Session scope is chosen locally. Selected-project mode is the default for setup and legacy configurations; paths are resolved before containment checks. Explicit `sessions scope all` or `setup --scope all` opts into all eligible loaded interactive sessions, including future projects and older sessions retained by the daemon. Ignored sessions, subagents and ephemeral contexts stay excluded. Scope cannot be changed through Telegram.
 - The relay supplies no sandbox, network, approval-policy, model, instruction or working-directory overrides to native resume/start/steer calls.
