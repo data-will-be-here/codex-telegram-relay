@@ -99,6 +99,12 @@ codex-telegram-relay setup
 codex-telegram-relay start
 ```
 
+### Upgrade an existing installation
+
+Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.
+
+Use one relay process per private state directory. Version 0.1.13 adds durable rich-message delivery progress; older versions do not understand that progress. Do not downgrade while rich deliveries are pending or unresolved.
+
 ### Agent-assisted installation
 
 When the user asks you to install this repository, follow this workflow. The session-scope choice belongs to the user; a repository link alone does not authorize connecting every project.
