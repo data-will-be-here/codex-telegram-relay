@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ```text
 Install Codex Telegram Relay on my computer: https://github.com/data-will-be-here/codex-telegram-relay/tree/main
-Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
+Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. If the installed release supports file exports, offer to help add artifact-delivery instructions to my AGENTS.md. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
 [Русский README](README.ru.md)
@@ -136,6 +136,16 @@ When installing this repository for a user, follow this workflow whether they su
 6. Start one foreground relay with `npm start -- start`, or ask the user to restart their already running relay. Keep the process running; do not create an unattended service without a separate request. Confirm the startup discovery mode, matching `/status`, and a topic for an eligible session. In automatic mode, ask the user to open a session in a new project, send its first prompt and check its topic appears. If a real bot check is pending, report it as pending rather than claiming success.
 
 For versions with outgoing files, explain that export is disabled by default and ask whether to enable it once locally with `files enable`. A person controlling the paired account can request files within Codex's effective permissions. Once enabled, individual files need no extra relay confirmation. Follow [Sending files back](#sending-files-back-development-version) when the user requests an artifact; `sent` is the success criterion.
+
+7. **Offer to help update the user's `AGENTS.md`.** For an installed version with `send-file`, explain that this makes future agents deliver images, sketches, mockups, screenshots, videos and other review artifacts to the current session's Telegram topic. Offer a global user rule or a project-only rule, and show the proposed text with the actual local CLI path. Write it after the user chooses the scope or has already explicitly requested it; preserve existing instructions. A repository URL alone does not authorize changing global agent instructions. This documentation step does not enable file exports; respect the separate local opt-in. For older releases, explain the feature's availability rather than installing `dev` automatically.
+
+Suggested rule, with placeholders resolved for that installation:
+
+```text
+When presenting a generated image, sketch, mockup, screenshot, animation, video or other review artifact in a relay-connected Codex session, send the actual file through Codex Telegram Relay's standard send-file command as part of presenting the result. Keep generated previews in an ignored artifact directory inside the current project. Use the installed CLI's absolute path:
+node "<ABSOLUTE_RELAY_CLI_PATH>" send-file "<ABSOLUTE_PROJECT_ARTIFACT_PATH>" --session "<CURRENT_NATIVE_SESSION_ID>"
+Route to the current interactive session. The CLI can use CODEX_THREAD_ID or a unique working-directory binding when --session is omitted; resolve ambiguity instead of guessing a topic. A local path or preview link can accompany the upload. Confirm delivery only when the receipt says sent; use files status REQUEST_ID for pending or uncertain results and inspect Telegram before any deliberate resend. Use existing export consent and native permissions; report disabled/unavailable export clearly. Keep the bot credential inside the relay and use this command rather than ad hoc Bot API scripts.
+```
 
 ### Sending files back (development version)
 
