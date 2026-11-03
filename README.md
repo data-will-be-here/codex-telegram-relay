@@ -51,7 +51,9 @@ Your Telegram bot / private project topics
 - `/mode all` delivers all assistant commentary and final answers; `/mode compact` delivers the first reply to Telegram input and final answer. This owner-only preference applies to all sessions, persists and changes immediately for future messages.
 - Assistant messages render Markdown emphasis, links and code; long answers preserve formatting across messages. Local file and preview links show their targets as text. A definite Telegram entity rejection falls back to plain text without repeating accepted parts.
 - Answers containing headings or tables use native Telegram rich messages. Long tables split between rows with repeated headers; wide tables and oversized cells use labelled paragraphs. A definite format rejection falls back to readable row cards. Short replies, questions and approval controls retain ordinary messages. This is independent of `/mode all|compact`.
+  Oversized formatted blocks may simplify inline styling to preserve their complete text within Telegram's limits.
 - Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
+  Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
 - Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.

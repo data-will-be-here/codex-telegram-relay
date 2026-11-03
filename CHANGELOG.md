@@ -8,6 +8,7 @@
 
 - Replace raw command-approval JSON with reason, working directory and a literal command block. Omit transport IDs and duplicate parsed actions while retaining additional permission/security context.
 - Render approval cards with escaped dynamic text and command/diff code blocks, preserving exact command characters and placing buttons after the final message part. Approval validation, one-shot owner callbacks and oversized-request terminal fallback remain unchanged.
+- Display commands containing carriage returns or invisible C0/DEL controls as labelled JSON strings, avoiding Markdown newline normalization while preserving the native request unchanged.
 - Publish the English landscape demonstration and feature highlights in both READMEs, with reproducible installation pinned to v0.1.13.
 
 ## 0.1.12

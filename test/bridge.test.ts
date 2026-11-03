@@ -384,6 +384,30 @@ test('approval formatting cannot hide literal Markdown in a command or justifica
   } finally { f.close(); }
 });
 
+test('approval control characters remain visible and round-trip without Markdown newline normalization', async () => {
+  const commands = [
+    'Write-Output "a\r\nb"\r\nGet-ChildItem',
+    'printf "a\rb"',
+    'echo "\\r literal"; printf "\u0000\u001b\u007f"\n\t',
+  ];
+  for (const [index, command] of commands.entries()) {
+    const f = await fixture();
+    try {
+      await f.bridge.request({ id: `controls-${index}`, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, cwd: f.projectA } });
+      await f.drain();
+      const sent = f.telegram.sent()[0]!;
+      const expected = JSON.stringify(command).replace(/\x7f/gu, '\\u007f');
+      const blocks = array(sent.entities).map(object).filter(e => e.type === 'pre')
+        .map(e => string(sent.text).slice(Number(e.offset), Number(e.offset) + Number(e.length)));
+      assert.ok(blocks.includes(expected), 'The command must have an unambiguous JSON-escaped display.');
+      assert.equal(JSON.parse(blocks.find(block => block === expected)!), command);
+      assert.ok(messageBody(sent).includes('Control characters are shown as JSON escapes'));
+      assert.ok(sent.reply_markup);
+      assert.equal(f.codex.writes.length, 0);
+    } finally { f.close(); }
+  }
+});
+
 test('a multipart approval retains its entire command and offers buttons only after the last part', async () => {
   const f = await fixture();
   try {

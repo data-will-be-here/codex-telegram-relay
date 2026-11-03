@@ -6,10 +6,15 @@ function literal(text: string): string {
 }
 
 function code(text: string): string {
+  // CommonMark normalizes carriage returns, and Telegram may discard invisible controls.
+  // A labelled JSON string preserves their exact meaning without changing native input.
+  const escaped = /[\x00-\x08\x0b-\x1f\x7f]/u.test(text);
+  const shown = escaped ? JSON.stringify(text).replace(/\x7f/gu, '\\u007f') : text;
   let longest = 2;
-  for (const run of text.matchAll(/`+/gu)) longest = Math.max(longest, run[0].length);
+  for (const run of shown.matchAll(/`+/gu)) longest = Math.max(longest, run[0].length);
   const fence = '`'.repeat(longest + 1);
-  return `${fence}\n${text}\n${fence}`;
+  const note = escaped ? 'Control characters are shown as JSON escapes; the block is a JSON string.\n\n' : '';
+  return `${note}${fence}\n${shown}\n${fence}`;
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */
