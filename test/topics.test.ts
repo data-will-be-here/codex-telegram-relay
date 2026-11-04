@@ -28,7 +28,7 @@ test('a definite creation rejection waits for explicit retry and never stops oth
     assert.ok(await f.topics.ensure({ id: 'thread-b', cwd: f.temp.dir }));
     assert.ok(await f.topics.retry('thread-a'));
     assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 3);
-    await assert.rejects(f.topics.retry('thread-a'), /healthy topic/u);
+    await assert.rejects(f.topics.retry('thread-a'), /saved binding to topic #/u);
     assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 3);
   } finally { f.close(); }
 });
@@ -45,6 +45,17 @@ test('rate-limited topic creation waits until retry_after rather than retrying e
     assert.equal(attempts, 0);
     assert.ok(await f.topics.retry('thread-a'));
     assert.equal(attempts, 1);
+  } finally { f.close(); }
+});
+
+test('binding the saved topic is idempotent but another healthy binding cannot be moved', async () => {
+  const f = setup();
+  try {
+    f.state.bind('thread-a', 101, f.temp.dir, 'A');
+    assert.equal(f.topics.bind('thread-a', 101).topicId, 101);
+    assert.throws(() => f.topics.bind('thread-a', 103), /already bound to topic #101/u);
+    assert.equal(f.state.binding('thread-a')?.topicId, 101);
+    assert.equal(f.telegram.calls.length, 0);
   } finally { f.close(); }
 });
 

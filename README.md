@@ -213,7 +213,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/status` | Show connection and uncertain-delivery counts |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
 | `/stream`, `/stream on`, `/stream off` | Show or change live answer previews for all sessions; no restart required |
-| `/bind SESSION_ID` | Bind an already created topic after uncertain creation; send inside that topic |
+| `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |
 | `/help` | Show help |
@@ -237,6 +237,8 @@ A singleton lock prevents two relay instances using the same state directory. A 
 One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Transport failures still reconnect.
 
 Topic creation is journaled before calling Telegram. If the response is lost, creation pauses to avoid duplicate topics, including after restarting the relay. The bot sends recovery instructions: use `/bind SESSION_ID` inside the topic if it appeared, or `/repair SESSION_ID` to explicitly retry if it did not. These commands require the paired owner and never submit an instruction to Codex.
+
+A saved topic binding does not mean the native session is running. `/sessions` shows the saved topic number and relay attachment state. In that topic, `/bind SESSION_ID` or `/repair SESSION_ID` retries discovery and attachment of an eligible loaded session. If the session is unloaded, resume that exact conversation locally with `codex resume SESSION_ID` or reopen it in the IDE; the relay will reconnect automatically. A command in another topic identifies the saved destination without moving the binding. Creating another topic does not reload a native session.
 
 If Telegram explicitly reports that a saved topic no longer exists, the relay recreates it for the loaded session and transfers queued undelivered answers. Existing sent history is not imported, and stale approval buttons are cancelled; pending native prompts are reattached with fresh controls. If you want to permanently remove a session's topic, ignore the session locally before deleting the topic.
 

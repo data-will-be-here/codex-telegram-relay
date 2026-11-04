@@ -70,7 +70,7 @@ export class Topics {
   async retry(prefix: string): Promise<Binding | undefined> {
     const session = this.resolve(prefix);
     const operation = this.state.topicOperation(session.id);
-    if (!operation) throw new Error('This session already has a healthy topic; no replacement was created.');
+    if (!operation) throw new Error(`This session has a saved binding to topic #${this.state.binding(session.id)!.topicId}; no topic creation is awaiting recovery. No replacement was created.`);
     if (operation.status === 'creating') throw new Error('Topic creation is still in progress. Wait for its result.');
     this.state.retryTopic(session.id);
     return this.ensure(session);
@@ -82,12 +82,15 @@ export class Topics {
     const existing = this.state.binding(session.id);
     const occupant = this.state.topic(topicId);
     if (occupant && occupant.threadId !== session.id) throw new Error('This topic is already bound to another session.');
-    if (!operation) throw new Error('This session already has a healthy topic; its binding was not changed.');
+    if (!operation) {
+      if (existing?.topicId === topicId) return existing;
+      throw new Error(`This session is already bound to topic #${existing!.topicId}. Open that topic and send /bind ${session.id}. Its binding was not changed.`);
+    }
     if (operation?.status === 'creating') throw new Error('Topic creation is still in progress. Wait for its result.');
     return this.state.installTopic(session.id, topicId, session.cwd, operation?.title ?? existing!.title);
   }
 
-  private resolve(prefix: string): TopicSession {
+  resolve(prefix: string): TopicSession {
     if (!/^[a-zA-Z0-9-]{6,128}$/u.test(prefix)) throw new Error('Use a session ID or unique prefix of at least six characters.');
     const sessions = new Map([...this.state.bindings(), ...this.state.topicOperations()].map(s => [s.threadId, { id: s.threadId, cwd: s.cwd }]));
     const matches = [...sessions.values()].filter(s => s.id.startsWith(prefix));

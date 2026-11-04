@@ -281,7 +281,7 @@ export class Bridge {
       this.notice(topicId, commandHelp()); return;
     }
     if (text === '/sessions') {
-      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? '' : ' (not attached)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
+      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
     if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
@@ -294,6 +294,17 @@ export class Bridge {
       const [command, prefix, extra] = text.split(/\s+/u);
       if (!prefix || extra || (command === '/bind' && topicId === null)) { this.notice(topicId, 'Use /bind SESSION_ID inside the existing topic, or /repair SESSION_ID to explicitly retry creation.'); return; }
       try {
+        const session = this.topics.resolve(prefix);
+        const saved = this.state.binding(session.id);
+        if (saved && !this.state.topicOperation(session.id)) {
+          if (topicId !== saved.topicId) {
+            this.notice(topicId, `Session ${session.id.slice(0, 8)} has a saved binding to topic #${saved.topicId}.\n${await this.connectionStatus(saved)}\nOpen that topic and send /bind ${session.id}. No replacement was created and its binding was not changed.`);
+            return;
+          }
+          await this.discover();
+          this.notice(topicId, `Saved topic #${saved.topicId} for session ${session.id.slice(0, 8)}.\n${await this.connectionStatus(saved)}\nNo replacement was created; no Codex instruction was sent.`);
+          return;
+        }
         const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
         if (binding) {
           this.attached.delete(binding.threadId);
@@ -317,7 +328,8 @@ export class Bridge {
     }
     if (text === '/say') { this.notice(topicId, 'Use /say TEXT in a project topic to send an instruction while a question is pending.'); return; }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
-    if (!binding || !this.attached.has(binding.threadId)) { this.notice(topicId, 'Use an attached project topic. Open Codex in a configured project if it is missing.'); return; }
+    if (!binding) { this.notice(topicId, 'This topic has no saved session binding. Use /sessions to find the session and its saved topic; /bind SESSION_ID only recovers a topic awaiting recovery.'); return; }
+    if (!this.attached.has(binding.threadId)) { this.notice(topicId, `Saved topic #${binding.topicId} for session ${binding.threadId.slice(0, 8)}.\n${await this.connectionStatus(binding)}\nNo instruction was sent.`); return; }
     if (!allowedSessionDirectory(binding.cwd, this.config)) throw new Error('Project is outside configured roots.');
     const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.pending(p));
     if (!text.startsWith('/say ') && !text.startsWith('/') && question.length) {
@@ -330,6 +342,19 @@ export class Bridge {
     const prompt = text.startsWith('/say ') ? text.slice(5).trim() : text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
     await this.sendInput(binding, inputId, prompt);
+  }
+
+  private async connectionStatus(binding: Binding): Promise<string> {
+    if (this.config.ignoredThreadIds?.includes(binding.threadId)) return 'This session is ignored. Re-enable it locally before reconnecting.';
+    if (!allowedSessionDirectory(binding.cwd, this.config)) return 'This session is outside your selected projects. Select its project locally before reconnecting.';
+    if (this.attached.has(binding.threadId)) return 'The native session is connected. Send instructions in its saved topic.';
+    try {
+      const sessions = await this.codex.list(session => session.id === binding.threadId);
+      if (!sessions.length) return `The session is not loaded as an eligible interactive session in Codex. Resume this exact session locally (codex resume ${binding.threadId}, or reopen the same conversation in the IDE). The relay will reconnect automatically; /bind ${binding.threadId} in the saved topic retries the connection.`;
+    } catch {
+      return 'The native connection could not be checked. The saved binding does not confirm that the session is running. Check Codex locally and retry /bind in the saved topic.';
+    }
+    return `The native session is loaded but relay attachment has not succeeded. Check Codex locally and retry /bind ${binding.threadId} in the saved topic. Creating another Telegram topic will not reconnect it.`;
   }
 
   private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {

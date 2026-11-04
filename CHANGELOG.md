@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Distinguish a saved Telegram binding from a connected native session. Show saved topic IDs in `/sessions`, explain unloaded/failed attachments, and let `/bind` or `/repair` in the saved topic retry attachment without creating a replacement or submitting an instruction.
 - Preserve completed answers in a durable deferred state before active-queue admission, so overload and later turns cannot skip an already observed final. Expose pending finals in `/status`; retain uncertainty and deduplication across restart.
 - Recheck the configured project scope and ignored sessions before queued delivery and each multipart/rate-limit attempt. Cancel excluded pending, blocked and deferred output, including project notices and controls.
 - Filter eligible native sessions before the 64-session cap, read metadata in batches of eight, warn on real overflow, and run periodic discovery independently of Telegram input polling.
