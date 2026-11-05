@@ -59,7 +59,7 @@ Your Telegram bot / private project topics
 - Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
   Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
-- Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
+- Native sandbox, network, approval and instruction settings are inherited. On `dev`, `/model` explicitly changes the current session's model, reasoning effort and speed for following requests.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 Previews share roughly one update per second across the private chat; simultaneous sessions and network delays can slow individual topics. Incomplete formatting may change layout while text arrives. Very long previews show their latest part, while permanent answers retain all parts within the existing 40,000 UTF-16-unit source limit. Drafts are temporary; permanent sends retain the existing uncertainty/recovery rules. [Streaming details](docs/architecture.md#live-answer-previews).
@@ -218,10 +218,13 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |
+| `/model` | Choose this session's model, reasoning effort and speed |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
 The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, new-session creation, or automatic history imports. Instructions sent to your session follow its existing Codex permissions.
+
+On `dev`, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
 
 ## State and recovery
 

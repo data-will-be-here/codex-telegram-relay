@@ -10,12 +10,17 @@ const waitingThreads = new Set(['empty']);
 const histories = new Map();
 const historyErrors = new Map();
 const pendingRequests = new Map();
+let modelPages = [{ cursor: null, response: { data: [], nextCursor: null } }];
+const modelSettings = new Map();
 wss.on('connection', ws => ws.on('message', bytes => {
   const message = JSON.parse(bytes.toString());
   if (!message.method) { records.push(message); pendingRequests.delete(message.id); return; }
   if (message.id === undefined) return;
   records.push(message);
   let result = {};
+  if (message.method === 'test/models') modelPages = message.params.pages;
+  if (message.method === 'model/list') result = modelPages.find(p => p.cursor === (message.params.cursor ?? null))?.response ?? { data: [], nextCursor: null };
+  if (message.method === 'thread/settings/update') modelSettings.set(message.params.threadId, message.params);
   if (message.method === 'test/discovery') discoveryThreads = message.params.threads;
   if (message.method === 'test/waiting') waitingThreads.add(message.params.threadId);
   if (message.method === 'test/historyError') historyErrors.set(message.params.threadId, message.params.message);
@@ -27,6 +32,10 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.method === 'thread/loaded/list' && discoveryThreads) result = { data: discoveryThreads.map(thread => thread.id) };
   if (message.method === 'thread/read') result = { thread: { id: message.params.threadId, source: message.params.threadId === 'worker' ? { subAgent: {} } : message.params.threadId === 'a' ? 'cli' : 'vscode', cwd: process.cwd(), status: { type: 'idle' }, path: message.params.threadId === 'empty' ? null : '/synthetic/history', ephemeral: message.params.threadId === 'ephemeral' } };
   if (message.method === 'thread/read' && discoveryThreads) result = { thread: discoveryThreads.find(thread => thread.id === message.params.threadId) };
+  if (message.method === 'thread/read' && result.thread && modelSettings.has(message.params.threadId)) {
+    const settings = modelSettings.get(message.params.threadId);
+    result.thread = { ...result.thread, model: settings.model, reasoningEffort: settings.effort };
+  }
   if (message.method === 'thread/resume') result = { thread: { id: message.params.threadId } };
   if (message.method === 'thread/turns/list') result = { data: [] };
   if (message.method === 'thread/turns/list' && histories.has(message.params.threadId)) result = { data: histories.get(message.params.threadId) };

@@ -9,6 +9,7 @@ import { Topics } from './topics.js';
 import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
+import { ModelPicker } from './model-picker.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
@@ -46,9 +47,22 @@ export class Bridge {
   private approvalRefreshAt = 0;
   private startedAt = Date.now();
   private topics: Topics;
+  private models: ModelPicker;
 
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
-    private readonly drafts = new Drafts(telegram, config.ownerId)) { this.topics = new Topics(config, state, telegram); }
+    private readonly drafts = new Drafts(telegram, config.ownerId)) {
+    this.topics = new Topics(config, state, telegram);
+    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.modelThread(binding));
+  }
+
+  private async modelThread(binding: Binding): Promise<Json | undefined> {
+    const eligible = (): boolean => this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
+    if (!eligible()) return;
+    const thread = await this.codex.read(binding.threadId, 1000);
+    if (eligible() && string(thread.cwd) === binding.cwd && allowedSessionDirectory(binding.cwd, this.config) &&
+        ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
+  }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
   streamEvent(method: string, params: Json): void {
@@ -401,6 +415,9 @@ export class Bridge {
     const topic = integer(message.message_thread_id) ?? null;
     if (!this.state.admit(id, topic)) { this.state.advance(id); return; }
     try {
+      if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
+        this.state.finish(id, await this.models.callback(callback, message, topic)); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -469,6 +486,12 @@ export class Bridge {
       if (!prompts.length) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
     }
+    if (/^\/model(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (!binding) { this.notice(topicId, 'Откройте топик подключённой сессии и отправьте /model.'); return; }
+      if (text !== '/model') { this.notice(topicId, 'Используйте /model и выберите модель кнопками.'); return; }
+      await this.models.open(binding); return;
+    }
     if (text === '/say') { this.notice(topicId, 'Use /say TEXT in a project topic to send an instruction while a question is pending.'); return; }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding) { this.notice(topicId, 'This topic has no saved session binding. Use /sessions to find the session and its saved topic; /bind SESSION_ID only recovers a topic awaiting recovery.'); return; }
@@ -481,7 +504,7 @@ export class Bridge {
       if (!target) { this.notice(topicId, 'Several questions are pending. Choose “Type an answer” on the question you want to answer.'); return; }
       await this.answer(target, text, inputId); return;
     }
-    if (text.startsWith('/') && !text.startsWith('/say ')) { this.notice(topicId, 'Unknown command. Use /help. Codex settings cannot be changed through this bot.'); return; }
+    if (text.startsWith('/') && !text.startsWith('/say ')) { this.notice(topicId, 'Unknown command. Use /help; /model changes this session’s model settings.'); return; }
     const prompt = text.startsWith('/say ') ? text.slice(5).trim() : text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
     await this.sendInput(binding, inputId, prompt);

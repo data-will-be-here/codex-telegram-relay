@@ -28,6 +28,31 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
   } finally { c.close(); }
 });
 
+test('native model catalog pagination and settings updates use exact fields without turns or permission overrides', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.call('test/models', { pages: [
+      { cursor: null, response: { data: [{ model: 'model-one' }], nextCursor: 'second-page' } },
+      { cursor: 'second-page', response: { data: [{ model: 'model-two' }], nextCursor: null } },
+    ] });
+    assert.deepEqual((await c.models()).map(m => m.model), ['model-one', 'model-two']);
+    await c.updateSettings('a', { model: 'model-two', effort: 'future-depth', serviceTier: 'future-speed' });
+    assert.equal((await c.read('a')).model, 'model-two');
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.filter(r => r.method === 'model/list').map(r => r.params), [
+      { limit: 100, includeHidden: false }, { limit: 100, includeHidden: false, cursor: 'second-page' },
+    ]);
+    assert.deepEqual(records.filter(r => r.method === 'thread/settings/update').map(r => r.params), [
+      { threadId: 'a', model: 'model-two', effort: 'future-depth', serviceTier: 'future-speed' },
+    ]);
+    assert.ok(!records.some(r => ['turn/start', 'turn/steer', 'thread/start', 'thread/resume', 'config/value/write'].includes(r.method)));
+    await c.call('test/models', { pages: [{ cursor: null, response: { data: [], nextCursor: 'loop' } },
+      { cursor: 'loop', response: { data: [], nextCursor: 'loop' } }] });
+    await assert.rejects(c.models(), /invalid model catalog cursor/u);
+  } finally { c.close(); }
+});
+
 test('unmaterialized history remains distinct from a readable empty history even with a reserved path', async () => {
   const client = new CodexClient();
   try {

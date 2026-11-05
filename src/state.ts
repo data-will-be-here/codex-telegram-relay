@@ -284,8 +284,12 @@ export class State {
   cancelDelivery(id: number): void { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE id=? AND status IN ('pending','blocked','deferred','sending')").run(id); }
   pendingFinalCount(): number { return Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE key LIKE 'final/%' AND status IN ('pending','blocked','deferred')").get()?.n ?? 0); }
   cancelPrompt(key: string): number | undefined {
-    const id = this.db.prepare('SELECT messageId FROM outbox WHERE key=?').get(key)?.messageId;
+    const id = this.promptMessage(key);
     this.db.prepare("UPDATE outbox SET status=CASE WHEN key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') THEN 'held' ELSE 'cancelled' END WHERE key=? AND status IN ('pending','held')").run(key);
+    return typeof id === 'number' ? id : undefined;
+  }
+  promptMessage(key: string): number | undefined {
+    const id = this.db.prepare('SELECT messageId FROM outbox WHERE key=?').get(key)?.messageId;
     return typeof id === 'number' ? id : undefined;
   }
   uncertainCount(): number {

@@ -8,4 +8,6 @@ Run `npm ci`, `npm run typecheck`, `npm test`, `npm audit --omit=dev`, and `npm 
 
 Do not introduce policy overrides, shell fallbacks, automatic replay of uncertain instructions or automatic approval. New native protocol fields must be checked against official documentation and the local generated schema. Live model and Telegram tests are explicit local acceptance checks, not part of normal CI.
 
+The explicitly owner-selected `/model` flow is permitted to update only `model`, `effort` and `serviceTier` through `thread/settings/update` for its attached session. Resume/start/steer retain inherited settings; the picker must not change approval/sandbox policies, global configuration or create a turn to apply a selection. Catalog values and callback authority must remain separate, and uncertain settings writes must not be automatically replayed.
+
 Changes should preserve one owner/private chat and one topic per native session. Product changes to tenancy, automatic history imports, attachments, remote permissions or distribution require discussion before implementation.

@@ -7,7 +7,7 @@ import { lstat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
-import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput } from './types.js';
+import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings } from './types.js';
 
 const MAX_DISCOVERED_SESSIONS = 64;
 const METADATA_READ_CONCURRENCY = 8;
@@ -143,6 +143,26 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
+  async models(): Promise<Json[]> {
+    const models: Json[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const result = object(await this.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }));
+      if (!Array.isArray(result.data)) throw new RpcError('Codex returned an invalid model catalog.', false);
+      models.push(...result.data.map(object));
+      if (models.length > 512) throw new RpcError('The model catalog exceeds the relay limit of 512 entries.', false);
+      if (result.nextCursor == null) return models;
+      cursor = string(result.nextCursor);
+      if (!cursor || seen.has(cursor)) throw new RpcError('Codex returned an invalid model catalog cursor.', false);
+      seen.add(cursor);
+    }
+    throw new RpcError('The model catalog exceeded the pagination limit.', false);
+  }
+  async updateSettings(threadId: string, settings: ModelSettings): Promise<void> {
+    await this.call('thread/settings/update', { threadId, model: settings.model,
+      ...(settings.effort === undefined ? {} : { effort: settings.effort }), serviceTier: settings.serviceTier });
+  }
   async asyncQuestions(threadId: string, historySinceMs?: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
     const thread = await this.read(threadId);
     const path = string(thread.path);

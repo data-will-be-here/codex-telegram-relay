@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput } from '../src/types.js';
+import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings } from '../src/types.js';
 
 export function messageBody(message: Json): string {
   const text = string(message.text);
@@ -27,6 +27,10 @@ export class FakeCodex implements Codex {
   writes: { method: string; params: Json }[] = [];
   pending = new Set<string | number>();
   failSteer = false;
+  modelCatalog: Json[] = [];
+  modelReads = 0;
+  async models(): Promise<Json[]> { this.modelReads++; return this.modelCatalog; }
+  async updateSettings(threadId: string, settings: ModelSettings): Promise<void> { this.writes.push({ method: 'settings', params: { threadId, ...settings } }); }
   async list(eligible?: (session: Session) => boolean): Promise<Session[]> { return eligible ? this.sessions.filter(eligible) : this.sessions; }
   async attach(threadId: string): Promise<Json> { return this.read(threadId); }
   async read(threadId: string): Promise<Json> {
