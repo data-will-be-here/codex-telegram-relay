@@ -1,8 +1,18 @@
 # Verification record
 
+## Development: repeated pending approval cards (2026-11-05)
+
+The original reproduction submitted the same pending approval three times across three Bridge generations, including after a lost Telegram acknowledgement. It now submits once: confirmed cards receive fresh buttons and uncertain sends remain a single uncertain delivery. The implementation persists native request identity separately from destination/card receipts and callback authority. Distinct requests or changed permissions are not merged by visible text, and a consumed decision cannot be submitted again after reconnect, SQLite reopen or topic recovery.
+
+Sixteen approval-replay regressions cover those cases, multipart text/final-button receipts, held-card admission, retention beyond seven days, resolution before replay, wrong owner/topic and stale controls. Delayed HTTP regressions first reproduced stale keyboard writes and recovery triggered by an obsolete missing-topic error; they pass after ownership and binding checks. The subagent integration reconnect now replays the same native RPC ID, matching Codex 0.166.0 source, and expects one card with refreshed controls. Three CLI integration tests use real subprocess/stdin/WebSocket plumbing and intercepted Telegram calls: transient polling errors no longer restart the native client, while 401 and 409 remain fatal. No real bot, model turn or approval response is used by these tests.
+
+Final Windows validation: **201 tests, 199 passed, two platform skips, zero failures**. Type checking, build, `git diff --check` and the package allowlist passed. Two independent reviews verified the corrected races. The running foreground relay has not been restarted by this work, so live acceptance of the built fix remains pending. Legacy cards lack the required native identity; the first replay after upgrading may create one new card before durable reuse begins. [Diagnosis, primary sources and implementation](research/repeated-approval-cards-2026-11-05.md).
+
 ## Development: subagent approvals (2026-11-05)
 
 Read-only native metadata and Codex 0.166.0 source confirmed that child approvals retain the child's thread ID, while parent resume replays only the parent's requests. The original routing regression delivered zero child cards to an authorized parent topic. Seven integration scenarios now exercise verified ancestry, origin-labelled parent-topic delivery, a single response to the original RPC, owner/topic/scope rejection, independent parent/child lifecycle, complete child file diffs, actual client/transport replacement with a new pending RPC ID, and replay after parent-topic recovery. The last scenario first failed during review and passes after descendant subscription invalidation. These tests use synthetic native/Telegram peers and temporary databases, not real approval decisions.
+
+The initial reconnect fixture used a new ID; the repeated-card correction above subsequently aligned replay with the same live-daemon RPC ID and verifies reuse of the existing card.
 
 Final Windows validation: **182 tests, 180 passed, two platform skips, zero failures**. `npm run typecheck`, build, `git diff --check` and `npm run check:package` passed; the package check admitted 24 files and excluded local state, tests and audit copies. The first-message reproduction remains green. Two independent reviews checked requirements and project standards; the replay finding was corrected and re-reviewed. The correction is built locally; live acceptance requires a relay restart and an actual pending child request. [Investigation and implementation](research/subagent-approvals-2026-11-05.md).
 

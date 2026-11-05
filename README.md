@@ -236,7 +236,9 @@ The optional `CODEX_TELEGRAM_RELAY_HOME` environment variable changes this direc
 
 A singleton lock prevents two relay instances using the same state directory. A Telegram polling conflict stops the relay rather than replacing another consumer. An existing webhook is never deleted automatically.
 
-One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Transport failures still reconnect.
+One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Native transport failures still reconnect. On `dev`, transient Telegram polling errors retry without restarting a healthy Codex connection; invalid credentials and competing pollers still stop the relay.
+
+On `dev`, replaying the same pending approval after reconnect or relay restart refreshes the existing card's buttons instead of posting another card. Distinct native requests and changed proposals remain separate. If the original send has no confirmed receipt, another copy is not sent automatically; answer that request in Codex. Existing cards from an older version lack the required identity, so the first replay after upgrading may create one new card. [Investigation and checks](docs/research/repeated-approval-cards-2026-11-05.md).
 
 Topic creation is journaled before calling Telegram. If the response is lost, creation pauses to avoid duplicate topics, including after restarting the relay. The bot sends recovery instructions: use `/bind SESSION_ID` inside the topic if it appeared, or `/repair SESSION_ID` to explicitly retry if it did not. These commands require the paired owner and never submit an instruction to Codex.
 

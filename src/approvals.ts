@@ -1,4 +1,20 @@
-import { string, type AgentOrigin, type Json } from './types.js';
+import { createHash } from 'node:crypto';
+import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
+  return value;
+}
+
+/** A replay of one daemon request keeps its ID. Different requests or review context must not merge. */
+export function approvalIdentity(request: RpcRequest): string {
+  return createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex');
+}
+
+export function approvalCardIdentity(identity: string, binding: Binding, card: string): string {
+  return createHash('sha256').update(JSON.stringify([identity, binding.threadId, binding.topicId, binding.cwd, card])).digest('hex');
+}
 
 function literal(text: string): string {
   // Escaping URL/email markers also prevents GFM autolinks consuming later escapes.

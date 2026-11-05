@@ -56,7 +56,7 @@ Simply replacing `request.params.threadId` with the parent ID would be incorrect
 - Complete child file-change details are preserved, and unavailable details remain terminal-only.
 - No new sessions or child topics are created and no direct model input is sent to child agents.
 
-The tracked integration suite uses the real CodexClient WebSocket transport, Bridge, SQLite state and synthetic native/Telegram peers. The reconnect check closes the old client and proxy, opens a new transport, reconstructs the fake daemon's pending work with a new RPC ID, and verifies stale controls cannot answer it. This is not a real daemon reconnect acceptance test.
+The tracked integration suite uses the real CodexClient WebSocket transport, Bridge, SQLite state and synthetic native/Telegram peers. The reconnect check closes the old client and proxy, opens a new transport, and verifies stale controls cannot answer pending work. Its initial fixture used a new RPC ID. The subsequent [repeated-card correction](repeated-approval-cards-2026-11-05.md) aligns the fixture with the reviewed daemon's replay of the same RPC ID and verifies one existing card with fresh controls. This is not a real daemon reconnect acceptance test.
 
 Review found an additional replay gap when Telegram reports a missing parent topic. Recovery retired the old child controls but retained the child's subscription cache, so only root requests were replayed. A failing regression observed one card instead of the expected replacement card. Topic retirement now invalidates descendant subscriptions before discovery; the regression verifies the new destination and a single response to the original child RPC.
 

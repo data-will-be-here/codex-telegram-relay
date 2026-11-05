@@ -154,6 +154,8 @@ async function start(args: string[]): Promise<void> {
   let stopping = false;
   let current: CodexClient | undefined;
   let saveRecoveredBinary = binaryChanged;
+  let pollFailures = 0;
+  let nextPollAt = 0;
   const stop = (): void => { stopping = true; uploadStop.abort(); current?.close(); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   const output = async (): Promise<void> => {
@@ -162,6 +164,7 @@ async function start(args: string[]): Promise<void> {
         // Order settled preview calls before permanent answers; remote timeout outcomes remain uncertain.
         // Saved answers and controls always take priority over ephemeral previews.
         if (await outbox.flushOne()) continue;
+        if (await liveBridge?.flushApproval()) continue;
         if (await liveBridge?.flushDraft()) continue;
         await delay(100);
       }
@@ -234,7 +237,20 @@ async function start(args: string[]): Promise<void> {
               connected = false; codex.close();
             }).finally(() => { discovering = false; });
           }
-          const updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
+          if (Date.now() < nextPollAt) { await delay(250); continue; }
+          let updates: unknown[];
+          try {
+            updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
+            if (pollFailures) console.log('Telegram polling recovered.');
+            pollFailures = 0;
+          } catch (error) {
+            if (!(error instanceof TelegramError) || !(error.status === 0 || error.status === 429 || error.status >= 500)) throw error;
+            pollFailures = Math.min(pollFailures + 1, 6);
+            const seconds = error.status === 429 ? Math.max(error.retryAfter ?? 2, 1) : Math.min(2 ** (pollFailures - 1), 30);
+            nextPollAt = Date.now() + seconds * 1000;
+            if (pollFailures === 1) console.error(`Telegram polling unavailable (${error.status || 'connection'}); retrying without restarting Codex.`);
+            continue;
+          }
           for (const raw of updates) {
             if (stopping || !connected) break;
             try { await bridge.update(object(raw)); }
@@ -243,6 +259,7 @@ async function start(args: string[]): Promise<void> {
         }
       } catch (error) {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
+        if (error instanceof TelegramError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
         console.error(string(object(error).message) || 'Relay connection failed.');
       } finally { liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }

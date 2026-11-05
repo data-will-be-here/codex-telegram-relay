@@ -1,16 +1,22 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { approvalMessage } from './approvals.js';
+import { approvalCardIdentity, approvalIdentity, approvalMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { FirstMessageRequiredError, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
 import { commandHelp } from './commands.js';
-import { State } from './state.js';
+import { State, type ApprovalCard } from './state.js';
 import { Topics } from './topics.js';
 import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
+import { isMissingTopic, TelegramError } from './telegram.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
+  approval?: ApprovalCard;
+  approvalMarkup?: Json;
+  refreshAfter?: number;
+  refreshAttempts?: number;
+  refreshing?: boolean;
   asyncCallId?: string;
   token: string;
   request: RpcRequest;
@@ -37,6 +43,7 @@ export class Bridge {
   private fileChanges = new Map<string, unknown[]>();
   private generation = randomUUID();
   private discovering = false;
+  private approvalRefreshAt = 0;
   private startedAt = Date.now();
   private topics: Topics;
 
@@ -131,6 +138,7 @@ export class Bridge {
         }
       }
       await this.discoverAgents();
+      await this.flushApproval();
     } finally { this.discovering = false; }
   }
 
@@ -183,6 +191,7 @@ export class Bridge {
     this.streamEvent(method, params);
     const threadId = string(params.threadId) || string(object(params.thread).id);
     if (method === 'serverRequest/resolved') {
+      if (typeof params.requestId === 'string' || typeof params.requestId === 'number') this.state.resolveApproval(threadId, params.requestId);
       for (const prompt of [...this.prompts.values()]) {
         if ((string(prompt.request.params.threadId) || prompt.binding.threadId) === threadId && prompt.request.id === params.requestId) await this.clearPrompt(prompt);
       }
@@ -249,7 +258,11 @@ export class Bridge {
     const route = await this.requestRoute(string(request.params.threadId));
     if (!route) return;
     const { binding, agent } = route;
-    if ([...this.prompts.values()].some(p => p.request.id === request.id)) return;
+    const existing = [...this.prompts.values()].find(p => p.request.id === request.id);
+    if (existing) {
+      if (approvalIdentity(existing.request) === approvalIdentity(request)) return;
+      await this.clearPrompt(existing);
+    }
     if (agent && !request.method.endsWith('/requestApproval')) {
       this.attention(binding, request, `A subagent needs input in Codex. Check agent ${agent.threadId} in the terminal.`); return;
     }
@@ -296,9 +309,82 @@ export class Bridge {
       if (advertised && decisions.includes('cancel')) prompt.options.set('c', { decision: 'cancel' });
     }
     if (!prompt.options.size) { this.attention(binding, request, 'Approval choices are unsupported. Use the terminal.'); return; }
-    this.prompts.set(prompt.token, prompt);
     const keyboard: Keyboard = { inline_keyboard: [[...prompt.options.keys()].map(code => ({ text: code === 'a' ? 'Allow once' : code === 'c' ? 'Cancel turn' : 'Decline', callback_data: `r:${prompt.token}:${code}` }))] };
-    this.state.enqueue(this.promptKey(prompt), binding.topicId, card, keyboard as unknown as Json);
+    const identity = approvalIdentity(request);
+    prompt.approval = this.state.approvalCard(approvalCardIdentity(identity, binding, card), identity, string(request.params.threadId), string(request.params.turnId), request.id, prompt.token);
+    if (prompt.approval.status !== 'pending') {
+      if (prompt.approval.status === 'consumed') this.attention(binding, request, 'A decision was already submitted for this approval. Check its outcome in Codex; it will not be submitted again.');
+      return;
+    }
+    this.prompts.set(prompt.token, prompt);
+    const key = this.promptKey(prompt);
+    const markup = keyboard as unknown as Json;
+    prompt.approvalMarkup = markup;
+    const receipt = this.state.approvalReceipt(key);
+    if (!receipt) this.state.enqueue(key, binding.topicId, card, markup);
+    else if (receipt.status === 'pending' || receipt.status === 'held') this.state.approvalMarkup(key, markup, prompt.token);
+    else await this.refreshApproval(prompt);
+  }
+
+  /** Refresh known card controls; edits never manufacture another message after a lost acknowledgement. */
+  async flushApproval(): Promise<boolean> {
+    for (const prompt of this.prompts.values()) if (await this.refreshApproval(prompt)) return true;
+    return false;
+  }
+
+  private async refreshApproval(prompt: Prompt): Promise<boolean> {
+    if (!prompt.approval || !prompt.approvalMarkup || prompt.refreshing ||
+        Date.now() < Math.max(this.approvalRefreshAt, prompt.refreshAfter ?? 0) || !this.pending(prompt)) return false;
+    const key = this.promptKey(prompt);
+    const receipt = this.state.approvalReceipt(key);
+    if (!receipt || ['pending', 'sending'].includes(receipt.status)) return false;
+    if (receipt.status !== 'held' && (receipt.status !== 'sent' || receipt.messageId === null)) {
+      this.attention(prompt.binding, prompt.request, 'This approval card could not be confirmed in Telegram. Check the existing messages and answer in Codex; another copy will not be sent automatically.');
+      prompt.refreshAfter = Infinity; return true;
+    }
+    if (receipt.status === 'sent' && JSON.stringify(receipt.markup) === JSON.stringify(prompt.approvalMarkup)) return false;
+    prompt.refreshing = true;
+    this.approvalRefreshAt = Date.now() + 1000;
+    let editing = false;
+    try {
+      if (!await this.promptAllowed(prompt)) { await this.clearPrompt(prompt); return true; }
+      if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) return false;
+      if (receipt.status === 'held') return this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
+      try {
+        editing = true;
+        await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: receipt.messageId, reply_markup: prompt.approvalMarkup });
+      } catch (error) {
+        if (!(error instanceof TelegramError) || error.status !== 400 || !/message is not modified|MESSAGE_NOT_MODIFIED/iu.test(error.message)) throw error;
+      }
+      if (!this.state.ownsApprovalCard(key, prompt.token)) return true;
+      if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) {
+        await this.clearPrompt(prompt); return true;
+      }
+      this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
+      prompt.refreshAttempts = 0;
+    } catch (error) {
+      const binding = this.state.binding(prompt.binding.threadId);
+      if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt) ||
+          binding?.topicId !== prompt.binding.topicId || binding.cwd !== prompt.binding.cwd) return true;
+      if (isMissingTopic(error)) { this.state.missingTopic(prompt.binding); prompt.refreshAfter = Infinity; }
+      else if (error instanceof TelegramError && [400, 403, 404].includes(error.status)) {
+        this.attention(prompt.binding, prompt.request, 'The existing approval card cannot be updated. Review and answer this request in Codex.');
+        prompt.refreshAfter = Infinity;
+      } else {
+        prompt.refreshAttempts = Math.min((prompt.refreshAttempts ?? 0) + 1, 5);
+        const seconds = error instanceof TelegramError && error.status === 429 ? Math.min(Math.max(error.retryAfter ?? 2, 1), 60) : Math.min(2 ** prompt.refreshAttempts, 30);
+        prompt.refreshAfter = Date.now() + seconds * 1000;
+        this.approvalRefreshAt = prompt.refreshAfter;
+      }
+    } finally {
+      prompt.refreshing = false;
+      // An old HTTP edit may arrive after the new owner wrote its controls. Reconcile that known message again.
+      if (editing && !this.state.ownsApprovalCard(key, prompt.token)) {
+        this.state.invalidateApprovalMarkup(key);
+        if (!this.state.approvalPending(prompt.approval.identity)) await this.clearPrompt(prompt);
+      }
+    }
+    return true;
   }
 
   async update(update: Json): Promise<void> {
@@ -465,6 +551,7 @@ export class Bridge {
     const result = prompt.options.get(code);
     if (!result) return;
     // Consume before writing the response; a duplicated click cannot repeat a decision.
+    if (prompt.approval && !this.state.consumeApproval(prompt.approval.identity)) { await this.clearPrompt(prompt); return; }
     await this.clearPrompt(prompt);
     if (string(prompt.request.params.threadId) !== prompt.binding.threadId) await this.codex.respond(prompt.request.id, result);
     else await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
@@ -523,7 +610,10 @@ export class Bridge {
       }
     }
   }
-  private pending(prompt: Prompt): boolean { return prompt.asyncCallId ? !this.state.asyncAnswered(prompt.binding.threadId, prompt.asyncCallId) : this.codex.hasRequest(prompt.request.id); }
+  private pending(prompt: Prompt): boolean {
+    return prompt.asyncCallId ? !this.state.asyncAnswered(prompt.binding.threadId, prompt.asyncCallId) :
+      (!prompt.approval || this.state.approvalPending(prompt.approval.identity) && this.state.ownsApprovalCard(prompt.approval.deliveryKey, prompt.token)) && this.codex.hasRequest(prompt.request.id);
+  }
   private async asyncStillPending(prompt: Prompt): Promise<boolean> {
     if (!prompt.asyncCallId) return true;
     try {
@@ -605,13 +695,19 @@ export class Bridge {
       if (acceptedTurn) this.state.replyTurn(threadId, inputId, acceptedTurn);
     } catch (error) { this.state.clearReply(threadId, inputId); throw error; }
   }
-  private promptKey(prompt: Prompt): string { return `prompt/${prompt.request.method.endsWith('/requestApproval') ? 'approval/' : ''}${this.generation}/${prompt.token}/${prompt.index}`; }
+  private promptKey(prompt: Prompt): string { return prompt.approval?.deliveryKey ?? `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }
   private async clearPrompt(prompt: Prompt): Promise<void> {
     this.prompts.delete(prompt.token);
-    const messageId = this.state.cancelPrompt(this.promptKey(prompt));
+    const key = this.promptKey(prompt);
+    if (prompt.approval && this.state.approvalPending(prompt.approval.identity) && !this.state.ownsApprovalCard(key, prompt.token)) return;
+    const messageId = this.state.cancelPrompt(key);
     if (messageId) {
-      try { await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); }
+      try {
+        await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        if (prompt.approval) this.state.approvalMarkup(key, { inline_keyboard: [] }, prompt.token);
+      }
       catch { /* A stale keyboard cannot pass hasRequest/token checks. */ }
+      finally { if (prompt.approval && !this.state.ownsApprovalCard(key, prompt.token)) this.state.invalidateApprovalMarkup(key); }
     }
   }
   private async retireTopicPrompts(threadId: string): Promise<void> {
@@ -622,6 +718,7 @@ export class Bridge {
 
   private async clearTurnPrompts(threadId: string, turnId: string): Promise<void> {
     if (!threadId || !turnId) return;
+    this.state.resolveApprovalTurn(threadId, turnId);
     for (const prompt of [...this.prompts.values()]) {
       if (!prompt.asyncCallId && (string(prompt.request.params.threadId) || prompt.binding.threadId) === threadId &&
           (!prompt.request.params.turnId || prompt.request.params.turnId === turnId)) await this.clearPrompt(prompt);
@@ -629,7 +726,7 @@ export class Bridge {
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/${randomUUID()}`, topicId, text); }
   private attention(binding: Binding, request: RpcRequest, text: string): void {
-    // JSON-RPC IDs change with each connection; native turn/item identity survives a reconnect.
+    // Terminal-only notices use native item/context identity independently of the connection.
     const identity = JSON.stringify([string(request.params.threadId) || binding.threadId, request.method, request.params.turnId,
       request.params.itemId ?? request.params.elicitationId ?? request.params]);
     const key = 'attention/' + createHash('sha256').update(identity).digest('hex');

@@ -20,6 +20,7 @@ export interface TopicOperation {
   threadId: string; cwd: string; title: string; attempt: string;
   status: 'missing' | 'creating' | 'uncertain' | 'failed' | 'retry'; retryAt: number;
 }
+export interface ApprovalCard { identity: string; deliveryKey: string; status: string; }
 
 export class State {
   private db: DatabaseSync;
@@ -57,10 +58,13 @@ export class State {
         CREATE TABLE IF NOT EXISTS question_progress(key TEXT PRIMARY KEY,signature TEXT NOT NULL,answers TEXT NOT NULL,at INTEGER NOT NULL);
         DELETE FROM settings WHERE key='topicTitleMode';
         CREATE TABLE IF NOT EXISTS replies(threadId TEXT PRIMARY KEY, inputId INTEGER NOT NULL, turnId TEXT);
+        CREATE TABLE IF NOT EXISTS approval_requests(identity TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, requestId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS approval_cards(identity TEXT PRIMARY KEY, deliveryKey TEXT NOT NULL UNIQUE, requestIdentity TEXT NOT NULL, ownerToken TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         UPDATE topic_operations SET status='uncertain' WHERE status='creating';
         UPDATE incoming SET status='uncertain' WHERE status='dispatching';
         UPDATE outbox SET status='uncertain' WHERE status='sending';
+        UPDATE outbox SET status='held' WHERE status='pending' AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending');
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
@@ -117,7 +121,7 @@ export class State {
       const previous = this.binding(threadId);
       this.db.prepare('INSERT INTO bindings(threadId,topicId,cwd,title) VALUES(?,?,?,?) ON CONFLICT(threadId) DO UPDATE SET topicId=excluded.topicId,cwd=excluded.cwd,title=excluded.title').run(threadId, topicId, cwd, title);
       if (previous && previous.topicId !== topicId) {
-        this.db.prepare("UPDATE outbox SET status='cancelled' WHERE topicId=? AND key LIKE 'prompt/%' AND status IN ('pending','blocked')").run(previous.topicId);
+        this.db.prepare("UPDATE outbox SET status='cancelled' WHERE topicId=? AND key LIKE 'prompt/%' AND status IN ('pending','blocked','held')").run(previous.topicId);
         this.db.prepare("UPDATE outbox SET topicId=?,status=CASE WHEN key LIKE 'final/%' THEN 'deferred' ELSE 'pending' END WHERE topicId=? AND status IN ('pending','blocked','deferred')").run(topicId, previous.topicId);
       }
       this.db.prepare('DELETE FROM topic_operations WHERE threadId=?').run(threadId);
@@ -207,6 +211,44 @@ export class State {
     const status = blocked ? key.startsWith('prompt/') ? 'cancelled' : 'blocked' : durable ? 'deferred' : 'pending';
     this.db.prepare('INSERT OR IGNORE INTO outbox(key,topicId,text,markup,at,status,projectCwd,sourceThreadId) VALUES(?,?,?,?,?,?,?,?)').run(key, topicId, text, markup === null ? null : JSON.stringify(markup), Date.now(), status, projectCwd ?? binding?.cwd ?? null, sourceThreadId ?? binding?.threadId ?? null);
   }
+  approvalCard(cardIdentity: string, identity: string, threadId: string, turnId: string, requestId: string | number, ownerToken: string): ApprovalCard {
+    this.db.prepare("INSERT OR IGNORE INTO approval_requests VALUES(?,?,?,?,'pending',?)")
+      .run(identity, threadId, turnId, JSON.stringify(requestId), Date.now());
+    this.db.prepare('UPDATE approval_requests SET at=? WHERE identity=?').run(Date.now(), identity);
+    this.db.prepare('INSERT OR IGNORE INTO approval_cards VALUES(?,?,?,?,?)').run(cardIdentity, `prompt/approval/card/${randomUUID()}`, identity, ownerToken, Date.now());
+    this.db.prepare('UPDATE approval_cards SET ownerToken=?,at=? WHERE identity=?').run(ownerToken, Date.now(), cardIdentity);
+    return this.db.prepare('SELECT r.identity,c.deliveryKey,r.status FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE c.identity=?').get(cardIdentity) as unknown as ApprovalCard;
+  }
+  approvalReceipt(key: string): { status: string; messageId: number | null; markup: Json | null } | undefined {
+    const row = this.db.prepare('SELECT status,messageId,markup FROM outbox WHERE key=?').get(key);
+    return row ? { status: string(row.status), messageId: typeof row.messageId === 'number' ? row.messageId : null,
+      markup: typeof row.markup === 'string' ? object(JSON.parse(row.markup)) : null } : undefined;
+  }
+  approvalPending(identity: string): boolean { return this.db.prepare("SELECT status FROM approval_requests WHERE identity=?").get(identity)?.status === 'pending'; }
+  ownsApprovalCard(key: string, ownerToken: string): boolean {
+    return this.db.prepare('SELECT ownerToken FROM approval_cards WHERE deliveryKey=?').get(key)?.ownerToken === ownerToken;
+  }
+  invalidateApprovalMarkup(key: string): void { this.db.prepare("UPDATE outbox SET markup=NULL WHERE key=? AND status='sent'").run(key); }
+  consumeApproval(identity: string): boolean {
+    return Number(this.db.prepare("UPDATE approval_requests SET status='consumed',at=? WHERE identity=? AND status='pending'").run(Date.now(), identity).changes) === 1;
+  }
+  resolveApproval(threadId: string, requestId: string | number): void {
+    this.db.prepare("UPDATE approval_requests SET status='resolved',at=? WHERE threadId=? AND requestId=?").run(Date.now(), threadId, JSON.stringify(requestId));
+    this.cancelResolvedApprovalCards();
+  }
+  resolveApprovalTurn(threadId: string, turnId: string): void {
+    this.db.prepare("UPDATE approval_requests SET status='resolved',at=? WHERE threadId=? AND (turnId=? OR turnId='')").run(Date.now(), threadId, turnId);
+    this.cancelResolvedApprovalCards();
+  }
+  private cancelResolvedApprovalCards(): void {
+    this.db.exec("UPDATE outbox SET status='cancelled' WHERE status IN ('pending','held') AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='resolved')");
+  }
+  approvalMarkup(key: string, markup: Json, ownerToken: string): boolean {
+    return Number(this.db.prepare(`UPDATE outbox SET markup=?,status=CASE WHEN status='held' THEN 'pending' ELSE status END
+      WHERE key=? AND key IN (SELECT deliveryKey FROM approval_cards WHERE ownerToken=?) AND status IN ('pending','held','sent')
+      AND (status!='held' OR (SELECT count(*) FROM outbox WHERE status IN ('pending','blocked'))<${MAX_ACTIVE_DELIVERIES})`)
+      .run(JSON.stringify(markup), key, ownerToken).changes) > 0;
+  }
   next(): Delivery | undefined {
     this.db.exec(`UPDATE outbox SET status='pending' WHERE id IN (
       SELECT id FROM outbox WHERE status='deferred' ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id
@@ -233,17 +275,17 @@ export class State {
   delivered(id: number, messageId: number | null): void { this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id); }
   uncertain(id: number): void { this.db.prepare("UPDATE outbox SET status='uncertain' WHERE id=?").run(id); }
   deliveryContexts(): DeliveryContext[] {
-    return this.db.prepare(`SELECT DISTINCT topicId,projectCwd,sourceThreadId,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status IN ('pending','blocked','deferred')`).all()
+    return this.db.prepare(`SELECT DISTINCT topicId,projectCwd,sourceThreadId,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status IN ('pending','blocked','deferred','held')`).all()
       .map(row => ({ topicId: row.topicId, projectCwd: row.projectCwd, sourceThreadId: row.sourceThreadId, ownerNotice: row.ownerNotice === 1 })) as DeliveryContext[];
   }
   cancelContext(context: DeliveryContext): void {
-    this.db.prepare(`UPDATE outbox SET status='cancelled' WHERE topicId IS ? AND projectCwd IS ? AND sourceThreadId IS ? AND ${OWNER_NOTICE_SQL}=? AND status IN ('pending','blocked','deferred')`).run(context.topicId, context.projectCwd, context.sourceThreadId, context.ownerNotice ? 1 : 0);
+    this.db.prepare(`UPDATE outbox SET status='cancelled' WHERE topicId IS ? AND projectCwd IS ? AND sourceThreadId IS ? AND ${OWNER_NOTICE_SQL}=? AND status IN ('pending','blocked','deferred','held')`).run(context.topicId, context.projectCwd, context.sourceThreadId, context.ownerNotice ? 1 : 0);
   }
   cancelDelivery(id: number): void { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE id=? AND status IN ('pending','blocked','deferred','sending')").run(id); }
   pendingFinalCount(): number { return Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE key LIKE 'final/%' AND status IN ('pending','blocked','deferred')").get()?.n ?? 0); }
   cancelPrompt(key: string): number | undefined {
     const id = this.db.prepare('SELECT messageId FROM outbox WHERE key=?').get(key)?.messageId;
-    this.db.prepare("UPDATE outbox SET status='cancelled' WHERE key=? AND status='pending'").run(key);
+    this.db.prepare("UPDATE outbox SET status=CASE WHEN key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') THEN 'held' ELSE 'cancelled' END WHERE key=? AND status IN ('pending','held')").run(key);
     return typeof id === 'number' ? id : undefined;
   }
   uncertainCount(): number {
@@ -254,7 +296,9 @@ export class State {
   prune(): void {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
-    this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled')").run(cutoff);
+    this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled') AND key NOT IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status IN ('pending','consumed'))").run(cutoff);
+    this.db.prepare("DELETE FROM approval_cards WHERE at<? AND requestIdentity IN (SELECT identity FROM approval_requests WHERE status='resolved') AND deliveryKey NOT IN (SELECT key FROM outbox WHERE status='uncertain')").run(cutoff);
+    this.db.prepare("DELETE FROM approval_requests WHERE status='resolved' AND at<? AND identity NOT IN (SELECT requestIdentity FROM approval_cards)").run(cutoff);
     this.db.prepare('DELETE FROM async_answers WHERE at<? AND threadId NOT IN (SELECT threadId FROM host_watch)').run(cutoff);
     this.db.prepare('DELETE FROM question_progress WHERE at<?').run(cutoff);
   }
