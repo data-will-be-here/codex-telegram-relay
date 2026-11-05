@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: Telegram startup retries (2026-11-06)
+
+A CLI integration regression first reproduced the exact `Telegram getMe connection failed. Delivery may be uncertain.` error and immediate exit before any native connection. Startup now retries temporary bot identity/webhook check failures after three seconds. The test observes actual timestamps across a network failure, a 503 response and eventual recovery, then verifies one native client starts successfully. Additional cases cover webhook-check recovery, a longer 429 interval and fatal 401 without starting Codex. The existing polling recovery and competing-consumer checks remain green. All calls use synthetic Telegram responses and disposable state, with no real bot credentials or model turns.
+
+Windows validation: **205 tests, 203 passed, two platform skips, zero failures**. Type checking, build, package allowlist and `git diff --check` passed. The built correction takes effect on the next relay start; no running foreground process was replaced during these checks.
+
 ## Development: repeated pending approval cards (2026-11-05)
 
 The original reproduction submitted the same pending approval three times across three Bridge generations, including after a lost Telegram acknowledgement. It now submits once: confirmed cards receive fresh buttons and uncertain sends remain a single uncertain delivery. The implementation persists native request identity separately from destination/card receipts and callback authority. Distinct requests or changed permissions are not merged by visible text, and a consumed decision cannot be submitted again after reconnect, SQLite reopen or topic recovery.

@@ -142,7 +142,15 @@ async function start(args: string[]): Promise<void> {
   const override = binaryFlag(args);
   const { config, token, binaryChanged } = loadConfig(home, { recoverBinary: true, ...(override ? { codexBinary: override } : {}) });
   const telegram = new TelegramClient(token);
-  await verifyBot(telegram);
+  for (;;) {
+    try { await verifyBot(telegram); break; }
+    catch (error) {
+      if (!(error instanceof TelegramError) || !(error.status === 0 || error.status === 429 || error.status >= 500)) throw error;
+      const seconds = error.status === 429 ? Math.max(3, error.retryAfter ?? 0) : 3;
+      console.error(`Telegram startup check unavailable (${error.status || 'connection'}); retrying in ${seconds} seconds. Ctrl+C stops the relay.`);
+      await delay(seconds * 1000);
+    }
+  }
   const { State } = await import('./state.js');
   const state = new State(home);
   const outbox = new Outbox(state, telegram, config, 1100);
