@@ -110,8 +110,12 @@ export class CodexClient extends EventEmitter implements Codex {
     });
   }
 
+  async loaded(): Promise<string[]> {
+    return [...new Set(array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string'))];
+  }
+
   async list(eligible: (session: Session) => boolean = () => true): Promise<Session[]> {
-    const loaded = [...new Set(array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string'))];
+    const loaded = await this.loaded();
     const loadedSet = new Set(loaded);
     for (const id of this.questionReaders.keys()) if (!loadedSet.has(id)) this.questionReaders.delete(id);
     const result: Session[] = [];

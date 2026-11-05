@@ -1,5 +1,13 @@
 # Verification record
 
+## Development: subagent approvals (2026-11-05)
+
+Read-only native metadata and Codex 0.166.0 source confirmed that child approvals retain the child's thread ID, while parent resume replays only the parent's requests. The original routing regression delivered zero child cards to an authorized parent topic. Seven integration scenarios now exercise verified ancestry, origin-labelled parent-topic delivery, a single response to the original RPC, owner/topic/scope rejection, independent parent/child lifecycle, complete child file diffs, actual client/transport replacement with a new pending RPC ID, and replay after parent-topic recovery. The last scenario first failed during review and passes after descendant subscription invalidation. These tests use synthetic native/Telegram peers and temporary databases, not real approval decisions.
+
+Final Windows validation: **182 tests, 180 passed, two platform skips, zero failures**. `npm run typecheck`, build, `git diff --check` and `npm run check:package` passed; the package check admitted 24 files and excluded local state, tests and audit copies. The first-message reproduction remains green. Two independent reviews checked requirements and project standards; the replay finding was corrected and re-reviewed. The correction is built locally; live acceptance requires a relay restart and an actual pending child request. [Investigation and implementation](research/subagent-approvals-2026-11-05.md).
+
+A read-only probe of the affected child's actual native metadata also resolved the expected existing root topic through the new ancestry resolver. It checked the loaded root's saved binding without sending a model input, approval response or topic operation. This does not claim end-to-end event delivery by the running relay.
+
 ## Development: first-message attachment (2026-11-05)
 
 Live native probes identified a loaded interactive session with a reserved rollout path, a specific pre-first-message history rejection, and a resume rejection. Regression tests reproduced the lost readiness distinction, premature topic creation, misleading saved-topic replies, manual-recovery bypass, and loss of a fast first answer. The fix is exercised through the actual WebSocket proxy client, Bridge and SQLite state with synthetic native/Telegram peers, including reconnection, healthy neighboring sessions, successful empty history, unrelated native errors, media rejection before download, and no replay of rejected input.

@@ -1,4 +1,4 @@
-import { string, type Json } from './types.js';
+import { string, type AgentOrigin, type Json } from './types.js';
 
 function literal(text: string): string {
   // Escaping URL/email markers also prevents GFM autolinks consuming later escapes.
@@ -18,9 +18,10 @@ function code(text: string): string {
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */
-export function approvalMessage(method: string, params: Json): string {
+export function approvalMessage(method: string, params: Json, agent?: AgentOrigin): string {
+  const origin = agent ? '**Agent**\n' + code(`${agent.name}\n${agent.threadId}`) + '\n\n' : '';
   if (method !== 'item/commandExecution/requestApproval' || !string(params.command)) {
-    return '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
+    return origin + '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
   }
   const sections = ['🔐 Command approval'];
   if (string(params.reason)) sections.push('**Reason**\n' + literal(string(params.reason)));
@@ -39,5 +40,5 @@ export function approvalMessage(method: string, params: Json): string {
   if (Object.keys(extra).length) sections.push('**Additional context**\n' + code(JSON.stringify(extra, null, 2)));
   // Keep a prose tail so the Markdown renderer cannot trim whitespace belonging to the command block.
   sections.push('Choose a decision below.');
-  return sections.join('\n\n');
+  return origin + sections.join('\n\n');
 }

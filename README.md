@@ -46,7 +46,7 @@ Your Telegram bot / private project topics
 ```
 
 - No VPS, webhook, public port or cloud relay to install.
-- Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
+- Each interactive terminal or IDE session gets its own topic; ephemeral contexts are excluded. On `dev`, approvals from verified spawned subagents appear in their root session's topic with the agent name and full ID, without creating child topics.
 - Topics use the project plus a short session ID. Session routing uses saved IDs, independently of display names.
 - Every message part starts with an italic `» project-name` signature, including project notices outside topics. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
@@ -129,7 +129,7 @@ When installing this repository for a user, follow this workflow whether they su
 
 1. Check the OS, Git, Node.js 22.13+ and the existing authenticated Codex installation. Use its native executable, following the platform instructions below. Ask the user to start a normal session and send its first prompt if no eligible session is loaded. No server, webhook or MCP registration is needed.
 2. Explain these two session-discovery modes and ask the user to choose, unless they already made that choice:
-   - **Automatic (`all`)**: connects all eligible loaded interactive terminal/IDE sessions, including future projects, approximately every five seconds. Older interactive sessions retained by the daemon can also appear. Ignored sessions and subagents remain excluded.
+   - **Automatic (`all`)**: connects all eligible loaded interactive terminal/IDE sessions, including future projects, approximately every five seconds. Older interactive sessions retained by the daemon can also appear. Ignored sessions remain excluded. Subagents get no separate topics; on `dev`, their supported approvals can reach the attached root's topic.
    - **Selected projects (`selected`)**: connects sessions only inside locally chosen project directories; adding another project requires `projects add PATH` and a relay restart. Recommend automatic when the user wants every new project to appear; selected when they want a limited scope.
    Wait for their answer before pairing or changing session scope. This choice is separate from `/mode all|compact`, which controls how many assistant messages are delivered.
 3. Read the release version in this README and install its version tag into a new local directory, using the clone command above. Run `npm ci` followed by `npm start -- doctor`. Report the installed version and commit. `main` contains release documentation; `dev` is for development and is not the installation source. Preserve any existing checkout changes and private relay state; do not reinstall by deleting configuration.
@@ -191,7 +191,7 @@ Explicitly enable automatic discovery locally:
 npm start -- sessions scope all
 ```
 
-Restart the relay once. Every eligible loaded interactive session is then connected, including sessions in future projects, without another setup or restart. Discovery runs about every five seconds; a new session needs its first prompt before it has resumable history. This also includes IDE sessions and older interactive threads still loaded in the daemon. Explicitly ignored sessions, subagents and ephemeral contexts remain excluded.
+Restart the relay once. Every eligible loaded interactive session is then connected, including sessions in future projects, without another setup or restart. Discovery runs about every five seconds; a new session needs its first prompt before it has resumable history. This also includes IDE sessions and older interactive threads still loaded in the daemon. Explicitly ignored sessions and ephemeral contexts remain excluded. Subagents get no separate topics; on `dev`, their supported approvals can reach the attached root's topic.
 
 For a fresh installation, `npm start -- setup --scope all` opts into the same mode. Plain `setup` and existing configurations retain selected-project discovery. `npm start -- sessions scope` shows the configured mode; `/status` shows the running mode. `npm start -- sessions scope selected` restores project restrictions after restarting. These settings can only be changed locally, not through Telegram.
 
@@ -272,6 +272,8 @@ JPEG, PNG and WebP are passed as native localImage input; other files are suppli
 Audio/video files are received, but this version does not transcribe speech or extract video frames. That needs a separate local processor or an explicitly approved external service. File access and inspection still follow native Codex permissions; the relay does not widen them.
 
 Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only eligible question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. First attachment recovers the latest turn within seven days. Known unanswered questions extend that range across subsequent turns and reconnects, without importing unrelated earlier history. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
+
+On `dev` (after v0.1.16), supported command, file-change and permission approvals from loaded spawned subagents are delivered to the attached root session's topic. Cards identify the agent by name and full ID. Pending requests are recovered by subscribing to each eligible child after reconnect or topic recovery; decisions answer the original child request once. Every ancestor must remain eligible. Child commentary, final answers and questions are not mirrored; direct Telegram instructions still address the interactive root. See [implementation and checks](docs/research/subagent-approvals-2026-11-05.md).
 
 ## Updating Codex and recovering its executable
 

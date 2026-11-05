@@ -9,9 +9,10 @@ let discoveryThreads;
 const waitingThreads = new Set(['empty']);
 const histories = new Map();
 const historyErrors = new Map();
+const pendingRequests = new Map();
 wss.on('connection', ws => ws.on('message', bytes => {
   const message = JSON.parse(bytes.toString());
-  if (!message.method) { records.push(message); return; }
+  if (!message.method) { records.push(message); pendingRequests.delete(message.id); return; }
   if (message.id === undefined) return;
   records.push(message);
   let result = {};
@@ -42,8 +43,22 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.method === 'test/records') result = records;
   if (message.method === 'test/timeout') return;
   if (message.method === 'test/oversized') result = { output: 'x'.repeat(17 * 1024 * 1024) };
-  if (message.method === 'test/request') ws.send(JSON.stringify({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'a', command: 'echo safe' } }));
-  if (message.method === 'test/resolved') ws.send(JSON.stringify({ method: 'serverRequest/resolved', params: { threadId: 'a', requestId: 'approval-1' } }));
+  if (message.method === 'test/request') {
+    const request = message.params.request ?? { id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'a', command: 'echo safe' } };
+    pendingRequests.set(request.id, request);
+    if (message.params.emit !== false) ws.send(JSON.stringify(request));
+  }
+  if (message.method === 'test/resolved') {
+    pendingRequests.delete('approval-1');
+    ws.send(JSON.stringify({ method: 'serverRequest/resolved', params: { threadId: 'a', requestId: 'approval-1' } }));
+  }
+  if (message.method === 'test/notification') {
+    if (message.params.method === 'serverRequest/resolved') pendingRequests.delete(message.params.params.requestId);
+    if (message.params.method === 'turn/completed') {
+      for (const [id, request] of pendingRequests) if (request.params.threadId === message.params.params.threadId && request.params.turnId === message.params.params.turn.id) pendingRequests.delete(id);
+    }
+    ws.send(JSON.stringify({ method: message.params.method, params: message.params.params }));
+  }
   if (message.method === 'test/stream') {
     const params = { threadId: 'a', turnId: 'turn-1' };
     ws.send(JSON.stringify({ method: 'item/started', params: { ...params, item: { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: '' } } }));
@@ -51,6 +66,9 @@ wss.on('connection', ws => ws.on('message', bytes => {
     ws.send(JSON.stringify({ method: 'item/completed', params: { ...params, item: { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: 'Streamed answer' } } }));
   }
   ws.send(JSON.stringify({ id: message.id, result }));
+  if (message.method === 'thread/resume') {
+    for (const request of pendingRequests.values()) if (request.params.threadId === message.params.threadId) ws.send(JSON.stringify(request));
+  }
 }));
 server.listen(0, '127.0.0.1', () => {
   const socket = net.connect(server.address().port, '127.0.0.1');

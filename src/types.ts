@@ -31,7 +31,10 @@ export interface RpcRequest {
   params: Json;
 }
 
+export interface AgentOrigin { threadId: string; name: string; }
+
 export interface Codex {
+  loaded?(): Promise<string[]>;
   asyncQuestions?(threadId: string, historySinceMs?: number, answeredCallIds?: readonly string[]): Promise<import('./async-questions.js').AsyncQuestion[]>;
   list(eligible?: (session: Session) => boolean): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;

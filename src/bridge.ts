@@ -7,7 +7,8 @@ import { commandHelp } from './commands.js';
 import { State } from './state.js';
 import { Topics } from './topics.js';
 import { Attachments, AttachmentError } from './attachments.js';
-import { array, integer, object, string, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
+import { agentRoute } from './subagents.js';
+import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
   asyncCallId?: string;
@@ -29,6 +30,7 @@ export function finalAnswer(turn: Json): string {
 
 export class Bridge {
   private attached = new Set<string>();
+  private agentSubscriptions = new Map<string, string>();
   private observedUnmaterialized = new Set<string>();
   private prompts = new Map<string, Prompt>();
   private finals = new Map<string, string>();
@@ -106,7 +108,7 @@ export class Bridge {
           if (!binding) { this.attached.delete(session.id); continue; }
           if (this.attached.has(session.id) && previous?.topicId === binding.topicId) { await this.syncAsyncQuestions(binding); continue; }
           if (previous && previous.topicId !== binding.topicId) {
-            for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === session.id) await this.clearPrompt(prompt);
+            await this.retireTopicPrompts(session.id);
           }
           if (binding.lastTurn === null) {
             const completed = (history ?? await this.codex.turns(session.id)).find(t => t.status !== 'inProgress');
@@ -128,7 +130,42 @@ export class Bridge {
             `Codex session ${session.id.slice(0, 8)} is temporarily unavailable. Other sessions remain connected; this session will be retried automatically.`, null, session.cwd, session.id);
         }
       }
+      await this.discoverAgents();
     } finally { this.discovering = false; }
+  }
+
+  private async discoverAgents(): Promise<void> {
+    if (!this.codex.loaded) return;
+    const loaded = await this.codex.loaded();
+    const eligible = new Set<string>();
+    for (const id of loaded) {
+      if (this.attached.has(id)) continue;
+      let route;
+      try {
+        route = await agentRoute(id, this.codex, this.config, root => this.attached.has(root) ? this.state.binding(root) : undefined);
+        if (!route) continue;
+        if (eligible.size >= 128) {
+          this.state.enqueue(`notice/subagent-limit/${this.generation}`, null, 'The relay reached its limit of 128 loaded subagents. Check Codex locally for additional approvals.');
+          continue;
+        }
+        eligible.add(id);
+        if (this.agentSubscriptions.get(id) === route.binding.threadId) continue;
+        await this.codex.turns(id);
+        this.agentSubscriptions.set(id, route.binding.threadId);
+        await this.codex.attach(id); // Pending requests replay for this exact origin, not its root.
+      } catch (error) {
+        eligible.delete(id);
+        if (error instanceof RpcError && error.uncertain) throw error;
+        if (route && !(error instanceof FirstMessageRequiredError)) {
+          this.state.enqueue(`attention/subagent-unavailable/${this.generation}/${id}`, route.binding.topicId,
+            `Subagent ${id} could not be connected. Check its approvals in Codex; the relay will retry automatically.`);
+        }
+      }
+    }
+    for (const id of this.agentSubscriptions.keys()) if (!eligible.has(id)) {
+      this.agentSubscriptions.delete(id);
+      for (const prompt of [...this.prompts.values()]) if (prompt.request.params.threadId === id) await this.clearPrompt(prompt);
+    }
   }
 
   async catchUp(binding: Binding): Promise<void> {
@@ -145,16 +182,28 @@ export class Bridge {
   async notification(method: string, params: Json): Promise<void> {
     this.streamEvent(method, params);
     const threadId = string(params.threadId) || string(object(params.thread).id);
-    const binding = this.state.binding(threadId);
-    if (!binding || !this.attached.has(threadId)) return;
+    if (method === 'serverRequest/resolved') {
+      for (const prompt of [...this.prompts.values()]) {
+        if ((string(prompt.request.params.threadId) || prompt.binding.threadId) === threadId && prompt.request.id === params.requestId) await this.clearPrompt(prompt);
+      }
+      return;
+    }
     if (method === 'item/started' && object(params.item).type === 'fileChange') {
+      if (!await this.requestRoute(threadId)) return;
       const item = object(params.item);
       const changes = array(item.changes);
       if (changes.length && JSON.stringify(changes).length <= 18_000) {
         if (this.fileChanges.size >= 128) this.fileChanges.delete(this.fileChanges.keys().next().value!);
         this.fileChanges.set(`${threadId}/${string(item.id)}`, changes);
       }
-    } else if (method === 'item/completed') {
+      return;
+    }
+    const binding = this.state.binding(threadId);
+    if (!binding || !this.attached.has(threadId)) {
+      if (method === 'turn/completed') await this.clearTurnPrompts(threadId, string(object(params.turn).id));
+      return;
+    }
+    if (method === 'item/completed') {
       const item = object(params.item);
       if (item.type === 'agentMessage' && ['commentary', 'partial_answer'].includes(string(item.phase)) && string(item.text).trim()) {
         const reply = this.state.reply(threadId);
@@ -172,8 +221,6 @@ export class Bridge {
       }
     } else if (method === 'turn/completed') {
       await this.complete(binding, object(params.turn));
-    } else if (method === 'serverRequest/resolved') {
-      for (const prompt of [...this.prompts.values()]) if (prompt.request.id === params.requestId) await this.clearPrompt(prompt);
     }
   }
 
@@ -195,14 +242,17 @@ export class Bridge {
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
     this.finals.delete(`${binding.threadId}/${turnId}`);
-    for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId && !prompt.asyncCallId) await this.clearPrompt(prompt);
+    await this.clearTurnPrompts(binding.threadId, turnId);
   }
 
   async request(request: RpcRequest): Promise<void> {
-    const binding = this.state.binding(string(request.params.threadId));
-    if (!binding || !this.attached.has(binding.threadId)) return;
-    if (!await this.stillAllowed(binding)) return;
+    const route = await this.requestRoute(string(request.params.threadId));
+    if (!route) return;
+    const { binding, agent } = route;
     if ([...this.prompts.values()].some(p => p.request.id === request.id)) return;
+    if (agent && !request.method.endsWith('/requestApproval')) {
+      this.attention(binding, request, `A subagent needs input in Codex. Check agent ${agent.threadId} in the terminal.`); return;
+    }
     const prompt: Prompt = {
       token: randomBytes(16).toString('hex'), request, binding, options: new Map(), questions: [], answers: Object.create(null) as Record<string, { answers: string[] }>, index: 0, freeText: false,
     };
@@ -226,12 +276,12 @@ export class Bridge {
     }
     const detailsParams = { ...request.params };
     if (request.method === 'item/fileChange/requestApproval') {
-      const changes = array(request.params.changes).length ? array(request.params.changes) : this.fileChanges.get(`${binding.threadId}/${string(request.params.itemId)}`);
+      const changes = array(request.params.changes).length ? array(request.params.changes) : this.fileChanges.get(`${string(request.params.threadId)}/${string(request.params.itemId)}`);
       if (!changes?.length) { this.attention(binding, request, 'Review this file change in the terminal: its complete proposed diff is not available to the relay.'); return; }
       detailsParams.proposedChanges = changes;
     }
     const details = JSON.stringify(detailsParams, null, 2);
-    const card = details.length <= 18_000 ? approvalMessage(request.method, detailsParams) : undefined;
+    const card = details.length <= 18_000 ? approvalMessage(request.method, detailsParams, agent) : undefined;
     if (card === undefined || card.length > 18_000) {
       this.attention(binding, request, 'An approval is too large to display completely here. Review and answer it in the terminal.'); return;
     }
@@ -315,7 +365,7 @@ export class Bridge {
         const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
         if (binding) {
           this.attached.delete(binding.threadId);
-          for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === binding.threadId) await this.clearPrompt(prompt);
+          await this.retireTopicPrompts(binding.threadId);
           this.notice(topicId, `Topic bound to session ${binding.threadId.slice(0, 8)}. The relay will reconnect it automatically; no Codex instruction was sent.`);
         }
       } catch (error) { this.notice(topicId, string(object(error).message) || 'Topic recovery failed.'); }
@@ -400,7 +450,7 @@ export class Bridge {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This request is closed or belongs to another topic.' }); return;
     }
     if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This question is closed or cannot currently be verified. Check Codex.' }); return; }
-    if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This session is outside your selected projects.' }); return; }
+    if (!await this.promptAllowed(prompt)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This session or its parent is no longer eligible for this topic.' }); return; }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
     const code = match![2]!;
     if (prompt.questions.length) {
@@ -416,7 +466,8 @@ export class Bridge {
     if (!result) return;
     // Consume before writing the response; a duplicated click cannot repeat a decision.
     await this.clearPrompt(prompt);
-    await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
+    if (string(prompt.request.params.threadId) !== prompt.binding.threadId) await this.codex.respond(prompt.request.id, result);
+    else await this.awaitAssistant(prompt.binding.threadId, inputId, string(prompt.request.params.turnId) || null,
       () => this.codex.respond(prompt.request.id, result));
   }
 
@@ -563,10 +614,23 @@ export class Bridge {
       catch { /* A stale keyboard cannot pass hasRequest/token checks. */ }
     }
   }
+  private async retireTopicPrompts(threadId: string): Promise<void> {
+    // A parent resume cannot replay child requests whose old destination controls were retired.
+    for (const [id, rootId] of this.agentSubscriptions) if (rootId === threadId) this.agentSubscriptions.delete(id);
+    for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === threadId) await this.clearPrompt(prompt);
+  }
+
+  private async clearTurnPrompts(threadId: string, turnId: string): Promise<void> {
+    if (!threadId || !turnId) return;
+    for (const prompt of [...this.prompts.values()]) {
+      if (!prompt.asyncCallId && (string(prompt.request.params.threadId) || prompt.binding.threadId) === threadId &&
+          (!prompt.request.params.turnId || prompt.request.params.turnId === turnId)) await this.clearPrompt(prompt);
+    }
+  }
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/${randomUUID()}`, topicId, text); }
   private attention(binding: Binding, request: RpcRequest, text: string): void {
     // JSON-RPC IDs change with each connection; native turn/item identity survives a reconnect.
-    const identity = JSON.stringify([binding.threadId, request.method, request.params.turnId,
+    const identity = JSON.stringify([string(request.params.threadId) || binding.threadId, request.method, request.params.turnId,
       request.params.itemId ?? request.params.elicitationId ?? request.params]);
     const key = 'attention/' + createHash('sha256').update(identity).digest('hex');
     this.state.enqueue(key, binding.topicId, text);
@@ -577,5 +641,21 @@ export class Bridge {
     this.attached.delete(binding.threadId);
     this.notice(binding.topicId, 'This native session moved outside your selected projects. Relaying is paused; select that project locally to reconnect it.');
     return false;
+  }
+
+  private async requestRoute(threadId: string): Promise<{ binding: Binding; agent?: AgentOrigin } | undefined> {
+    if (!threadId || this.config.ignoredThreadIds?.includes(threadId)) return;
+    const binding = this.state.binding(threadId);
+    if (binding && this.attached.has(threadId)) return await this.stillAllowed(binding) ? { binding } : undefined;
+    try {
+      const route = await agentRoute(threadId, this.codex, this.config, id => this.attached.has(id) ? this.state.binding(id) : undefined);
+      if (!route) this.agentSubscriptions.delete(threadId);
+      return route;
+    } catch (error) { this.agentSubscriptions.delete(threadId); throw error; }
+  }
+
+  private async promptAllowed(prompt: Prompt): Promise<boolean> {
+    const route = await this.requestRoute(string(prompt.request.params.threadId) || prompt.binding.threadId);
+    return route?.binding.threadId === prompt.binding.threadId && route.binding.topicId === prompt.binding.topicId && route.binding.cwd === prompt.binding.cwd;
   }
 }
