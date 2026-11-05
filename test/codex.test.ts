@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { resolve, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { CodexClient, RpcError } from '../src/codex.js';
+import { CodexClient, FirstMessageRequiredError, RpcError } from '../src/codex.js';
 import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
@@ -13,7 +13,6 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
   try {
     await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
     const sessions = await c.list(); assert.deepEqual(sessions.map(s => s.id), ['a', 'b']);
-    assert.deepEqual(await c.turns('empty'), []);
     await c.attach('a'); await c.start('a', 'hello'); await c.steer('a', 'turn-1', 'change');
     const records = await c.call('test/records', {}) as { method: string; params: Json }[];
     const capabilities = records.find(x => x.method === 'initialize')!.params.capabilities as Json;
@@ -27,6 +26,33 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/start').at(-1)!.params, { threadId: 'a', input });
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/steer').at(-1)!.params, { threadId: 'a', expectedTurnId: 'turn-1', input });
   } finally { c.close(); }
+});
+
+test('unmaterialized history remains distinct from a readable empty history even with a reserved path', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await client.call('test/discovery', { threads: [{ id: 'empty', source: 'vscode', cwd: process.cwd(), path: '/reserved/not-created.jsonl', status: { type: 'idle' } }] });
+    assert.equal((await client.list())[0]?.id, 'empty');
+    assert.deepEqual(await client.turns('a'), [], 'A readable empty history is a valid result');
+    await assert.rejects(client.turns('empty'), /first message.*locally/u);
+  } finally { client.close(); }
+});
+
+test('other history failures are not mislabeled as waiting for the first message', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    for (const message of [
+      'no rollout found for thread id a',
+      'thread another-session is not materialized yet; thread/turns/list is unavailable before first user message',
+      'failed to read stored history: permission denied',
+    ]) {
+      await client.call('test/historyError', { threadId: 'a', message });
+      await assert.rejects(client.turns('a'), error => error instanceof RpcError && !(error instanceof FirstMessageRequiredError) &&
+        error.message === `Codex rejected the request: ${message}` && !error.uncertain);
+    }
+  } finally { client.close(); }
 });
 
 test('native assistant streaming preserves started, delta and completed event identities over the actual proxy transport', async () => {

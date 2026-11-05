@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: first-message attachment (2026-11-05)
+
+Live native probes identified a loaded interactive session with a reserved rollout path, a specific pre-first-message history rejection, and a resume rejection. Regression tests reproduced the lost readiness distinction, premature topic creation, misleading saved-topic replies, manual-recovery bypass, and loss of a fast first answer. The fix is exercised through the actual WebSocket proxy client, Bridge and SQLite state with synthetic native/Telegram peers, including reconnection, healthy neighboring sessions, successful empty history, unrelated native errors, media rejection before download, and no replay of rejected input.
+
+Local Windows validation: 175 tests, 173 passed, two platform skips, zero failures. Existing approval replay, scope and topic recovery tests remain green. This is not live acceptance of a restarted relay. No first model message was injected into a user session during diagnosis or testing.
+
 ## Development: queue, scope and discovery regressions
 
 Three failing tests reproduced completion loss at a full 1,000-entry queue, old excluded-project output still sending after scope narrowing, and root sessions hidden behind more than 64 loaded subagents. After the fixes, synthetic tests retain two finals through a later baseline and an actual SQLite reopen, expose the pending-final count, and deliver each once without native writes. Scope tests cancel blocked/deferred finals, queued controls and project notices, prevent cancelled work returning after scope expansion, and stop ordinary/rich multipart output when scope is revoked between parts. Discovery integration tests use the real stdio/WebSocket peer with 80 subagent contexts, filter selected roots before capacity, and observe an explicit overflow warning only for more than 64 eligible sessions. These checks use disposable stores and adapters; no real bot request or user session is started by them.

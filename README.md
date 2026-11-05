@@ -109,6 +109,8 @@ codex-telegram-relay start
 
 ### Upgrade an existing installation
 
+Development fix: newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
+
 Development reliability changes (after v0.1.16): observed final answers are saved before active-queue admission and survive overload/restart; `/status` shows pending finals. Saved final text consumes private disk until delivered or cancelled, so an extended outage can grow this backlog. Scope narrowing now cancels excluded queued output after restart. Discovery excludes subagents, ignored IDs and out-of-scope projects before counting its 64-session limit and warns when that limit is reached. Periodic scans run alongside message polling. Older versions do not handle the deferred backlog: clear it before downgrading.
 
 Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.

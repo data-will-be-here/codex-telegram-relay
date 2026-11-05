@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { approvalMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
-import { RpcError } from './codex.js';
+import { FirstMessageRequiredError, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
 import { commandHelp } from './commands.js';
 import { State } from './state.js';
@@ -29,6 +29,7 @@ export function finalAnswer(turn: Json): string {
 
 export class Bridge {
   private attached = new Set<string>();
+  private observedUnmaterialized = new Set<string>();
   private prompts = new Map<string, Prompt>();
   private finals = new Map<string, string>();
   private fileChanges = new Map<string, unknown[]>();
@@ -94,10 +95,13 @@ export class Bridge {
       const sessions = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && allowedSessionDirectory(session.cwd, this.config));
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
+      for (const id of this.observedUnmaterialized) if (!loaded.has(id)) this.observedUnmaterialized.delete(id);
       for (const session of sessions) {
         if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) { this.attached.delete(session.id); continue; }
         try {
           const previous = this.state.binding(session.id);
+          // Check native readiness before creating/replacing a topic. Keep the binding before attach so replayed requests can route.
+          const history = !this.attached.has(session.id) || this.state.topicOperation(session.id) ? await this.codex.turns(session.id) : undefined;
           let binding = await this.topics.ensure(session);
           if (!binding) { this.attached.delete(session.id); continue; }
           if (this.attached.has(session.id) && previous?.topicId === binding.topicId) { await this.syncAsyncQuestions(binding); continue; }
@@ -105,11 +109,12 @@ export class Bridge {
             for (const prompt of [...this.prompts.values()]) if (prompt.binding.threadId === session.id) await this.clearPrompt(prompt);
           }
           if (binding.lastTurn === null) {
-            const completed = (await this.codex.turns(session.id)).find(t => t.status !== 'inProgress');
+            const completed = (history ?? await this.codex.turns(session.id)).find(t => t.status !== 'inProgress');
             const createdWhileRunning = session.createdAt !== undefined && session.createdAt * 1000 >= this.startedAt;
-            this.state.baseline(session.id, createdWhileRunning ? '-' : string(completed?.id) || '-');
+            this.state.baseline(session.id, createdWhileRunning || this.observedUnmaterialized.has(session.id) ? '-' : string(completed?.id) || '-');
             binding = this.state.binding(session.id)!;
           }
+          this.observedUnmaterialized.delete(session.id); // Baseline now preserves the first answer across attachment retries.
           this.attached.add(session.id);
           await this.codex.attach(session.id);
           // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
@@ -117,6 +122,7 @@ export class Bridge {
           await this.syncAsyncQuestions(binding);
         } catch (error) {
           this.attached.delete(session.id);
+          if (error instanceof FirstMessageRequiredError) { this.observedUnmaterialized.add(session.id); continue; }
           if (error instanceof RpcError && error.uncertain) throw error;
           this.state.enqueue(`session-unavailable/${this.generation}/${session.id}`, null,
             `Codex session ${session.id.slice(0, 8)} is temporarily unavailable. Other sessions remain connected; this session will be retried automatically.`, null, session.cwd, session.id);
@@ -305,6 +311,7 @@ export class Bridge {
           this.notice(topicId, `Saved topic #${saved.topicId} for session ${session.id.slice(0, 8)}.\n${await this.connectionStatus(saved)}\nNo replacement was created; no Codex instruction was sent.`);
           return;
         }
+        await this.codex.turns(session.id); // Explicit recovery must respect the same first-message gate as discovery.
         const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
         if (binding) {
           this.attached.delete(binding.threadId);
@@ -351,7 +358,9 @@ export class Bridge {
     try {
       const sessions = await this.codex.list(session => session.id === binding.threadId);
       if (!sessions.length) return `The session is not loaded as an eligible interactive session in Codex. Resume this exact session locally (codex resume ${binding.threadId}, or reopen the same conversation in the IDE). The relay will reconnect automatically; /bind ${binding.threadId} in the saved topic retries the connection.`;
-    } catch {
+      await this.codex.turns(binding.threadId);
+    } catch (error) {
+      if (error instanceof FirstMessageRequiredError) return error.message;
       return 'The native connection could not be checked. The saved binding does not confirm that the session is running. Check Codex locally and retry /bind in the saved topic.';
     }
     return `The native session is loaded but relay attachment has not succeeded. Check Codex locally and retry /bind ${binding.threadId} in the saved topic. Creating another Telegram topic will not reconnect it.`;
@@ -359,7 +368,8 @@ export class Bridge {
 
   private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {
     const binding = topicId === null ? undefined : this.state.topic(topicId);
-    if (!binding || !this.attached.has(binding.threadId)) throw new AttachmentError('Send attachments in an attached project topic. No instruction was sent.');
+    if (!binding) throw new AttachmentError('Send attachments in an attached project topic. No instruction was sent.');
+    if (!this.attached.has(binding.threadId)) throw new AttachmentError(`${await this.connectionStatus(binding)} No attachment was downloaded or instruction sent.`);
     if (!await this.stillAllowed(binding)) throw new AttachmentError('This session is outside your selected projects. No attachment was downloaded or instruction sent.');
     const caption = string(message.caption).trim();
     if (caption.length > 16_000) throw new AttachmentError('Attachment captions are limited to 16000 characters. No instruction was sent.');

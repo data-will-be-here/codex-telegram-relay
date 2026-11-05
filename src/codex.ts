@@ -16,6 +16,10 @@ export class RpcError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
 }
 
+export class FirstMessageRequiredError extends RpcError {
+  constructor() { super('Send the first message in this session locally in Codex. The relay will connect automatically afterwards.', false); }
+}
+
 export class CodexClient extends EventEmitter implements Codex {
   private sequence = 0;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -158,8 +162,9 @@ export class CodexClient extends EventEmitter implements Codex {
       // Display summaries retain agent replies while excluding enormous historical tool outputs.
       return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' })).data).map(object);
     } catch (error) {
-      // A newly opened interactive session has no persisted history until its first input.
-      if (error instanceof RpcError && !error.uncertain && /not materialized yet.*unavailable before first user message/u.test(error.message)) return [];
+      // A reserved rollout path is not proof of materialization. Keep this state distinct from readable empty history.
+      if (error instanceof RpcError && !error.uncertain &&
+          error.message === `Codex rejected the request: thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`) throw new FirstMessageRequiredError();
       throw error;
     }
   }
