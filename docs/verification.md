@@ -1,5 +1,9 @@
 # Verification record
 
+## v0.1.18 release candidate (2026-11-06)
+
+This candidate promotes task-aware signatures, the simpler command menu and contextual recovery. Both READMEs target v0.1.18 and contain no references to the removed instruction command. Package/lock/native metadata agree on 0.1.18. The exact candidate passed 234 local tests (232 passed, two platform skips), type checking, build, runtime audit (zero findings) and package allowlist. Required cross-platform CI must pass in the release PR before promotion; existing live acceptance limitations remain below.
+
 ## Development: task labels and simpler commands (2026-11-06)
 
 `/say` is removed from parsing, help and registration, with no replacement instruction button or mode. Ordinary text retains the existing question-answer behavior. `/questions` republishes actionable choice/free-text cards, including a liveness check after asynchronous reads; a regression first reproduced a resolved question returning as a dead card and now verifies that no copy is posted.

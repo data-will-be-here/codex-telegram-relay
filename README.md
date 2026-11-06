@@ -30,7 +30,7 @@ Follow the README's "Agent-assisted installation" instructions. Before pairing o
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.17](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.17). Adds `/model` with a current model catalog and immediate reasoning/speed selection, opt-in outgoing files, parent-topic subagent approvals, and reconnect/startup fixes. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.18](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.18). Adds native task names to output, simpler question/command flows and contextual topic recovery. Includes the v0.1.17 model picker and delivery fixes. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -49,7 +49,7 @@ Your Telegram bot / private project topics
 - No VPS, webhook, public port or cloud relay to install.
 - Each interactive terminal or IDE session gets its own topic; ephemeral contexts are excluded. In v0.1.17, approvals from verified spawned subagents appear in their root session's topic with the agent name and full ID, without creating child topics.
 - Topics use the project plus a short session ID. Session routing uses saved IDs, independently of display names.
-- In development after v0.1.17, session output starts with an italic `» project-name • session-name` signature; unnamed sessions use a short session ID. Names come from Codex. General relay notices use `» codex-telegram-relay`.
+- Since v0.1.18, session output starts with an italic `» project-name • session-name` signature; unnamed sessions use a short session ID. Names come from Codex. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
 - Replies immediately steer a running turn or start the next turn when idle.
 - `/mode all` delivers all assistant commentary and final answers; `/mode compact` delivers the first reply to Telegram input and final answer. This owner-only preference applies to all sessions, persists and changes immediately for future messages.
@@ -81,7 +81,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.17 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.18 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -224,7 +224,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 
 The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, new-session creation, or automatic history imports. Instructions sent to your session follow its existing Codex permissions.
 
-In development after v0.1.17, `/say` has been removed without a replacement command/button. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
+Since v0.1.18, the main command menu is simplified. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
 
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
