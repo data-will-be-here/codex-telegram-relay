@@ -4,6 +4,7 @@ const commands = [
   { command: 'help', args: '', en: 'Show available relay commands', ru: 'Показать команды релея' },
   { command: 'status', args: '', en: 'Show connection, message mode and streaming status', ru: 'Подключение, режим сообщений и стриминг' },
   { command: 'sessions', args: '', en: 'List attached Codex sessions and their IDs', ru: 'Список сессий Codex и их ID' },
+  { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed', ru: 'Выбрать модель, уровень рассуждений и скорость сессии' },
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies', ru: 'Все сообщения ассистента или компактный режим' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews', ru: 'Включить или отключить потоковые ответы' },
   { command: 'questions', args: '', en: 'Show pending questions in this topic', ru: 'Показать ожидающие ответа вопросы в топике' },

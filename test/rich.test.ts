@@ -142,11 +142,11 @@ test('topic recovery and a relay restart send only unaccepted rich parts', async
     };
     const rows = Array.from({ length: 160 }, (_, i) => `| item-${i} | ${'Описание 🎁 '.repeat(10)} |`);
     state.enqueue('final/thread-a/recovery', 101, '| Name | Description |\n| --- | --- |\n' + rows.join('\n'));
-    await new Outbox(state, telegram, 42, 0).flushOne();
+    await new Outbox(state, telegram, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     assert.ok(state.topicOperation('thread-a'));
     state.close(); state = new State(home);
     state.installTopic('thread-a', 103, temp.dir, 'Project');
-    const outbox = new Outbox(state, telegram, 42, 0);
+    const outbox = new Outbox(state, telegram, { ownerId: 42, roots: [temp.dir] }, 0);
     while (await outbox.flushOne()) { /* Only remaining parts should be delivered. */ }
     assert.deepEqual(accepted, Array.from({ length: 160 }, (_, i) => `item-${i}`));
   } finally { state.close(); temp.close(); }

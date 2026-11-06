@@ -56,6 +56,20 @@ test('recovers a current question before a large tool result instead of warning 
   } finally { f.close(); }
 });
 
+test('overlapping journal scans return the same complete pending question snapshot', async () => {
+  const f = temporary();
+  try {
+    const path = join(f.dir, 'concurrent.jsonl');
+    const event = (payload: unknown) => JSON.stringify({ timestamp: '2026-11-02T10:00:01Z', type: 'response_item', payload }) + '\n';
+    writeFileSync(path, event({ type: 'function_call_output', output: 'x'.repeat(1536 * 1024) }) +
+      event({ type: 'function_call', name: 'request_user_input_async', call_id: 'waiting', arguments: JSON.stringify({ questions: [{ title: 'Continue?', options: ['Yes', 'No'] }] }) }));
+    const reader = new AsyncQuestionReader();
+    await assert.rejects(reader.read(join(f.dir, 'not-created.jsonl'), 'turn', Date.parse('2026-11-02T10:00:00Z')));
+    const results = await Promise.all([reader.read(path, 'turn', Date.parse('2026-11-02T10:00:00Z')), reader.read(path, 'turn', Date.parse('2026-11-02T10:00:00Z'))]);
+    assert.deepEqual(results.map(result => result.map(question => question.callId)), [['waiting'], ['waiting']]);
+  } finally { f.close(); }
+});
+
 test('finishes the journal snapshot before publishing a question answered beyond the first read chunk', async () => {
   const f = temporary();
   try {

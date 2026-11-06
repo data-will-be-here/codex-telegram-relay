@@ -1,5 +1,57 @@
 # Verification record
 
+## v0.1.17 release candidate (2026-11-06)
+
+The release includes the session model picker, opt-in outgoing files, durable final delivery, attachment/readiness fixes, subagent approvals and approval/startup recovery corrections described below. English/Russian READMEs and installation tags now identify v0.1.17. Package and native client metadata agree on the version. The exact candidate passed 223 local tests (221 passed, two platform skips), type checking, build, runtime audit (zero findings) and the package allowlist. Cross-platform Node 22/24 CI is required on the release PR before promotion; live Telegram model selection and other outstanding acceptance limits remain as recorded below.
+
+## Development: session model picker (2026-11-06)
+
+`/model` now loads the native catalog on each command, lists models in its first screen and complete reasoning/speed combinations in its second. A combination applies immediately; there are no Refresh/Apply buttons. Initial RED tests reproduced the absent command and second screen. Additional RED-to-GREEN checks removed an unsafe guess from legacy speed names to native tier IDs, and restored a visible explanation when eligibility changes during catalog loading.
+
+The synthetic Bridge/SQLite/Telegram suite verifies fresh/new models, future effort/tier IDs, absence of unadvertised Fast, explicit standard speed, model/settings pagination, Back/Cancel/expiry, foreign/group/cross-topic/cross-message controls, moved/ignored/detached/rebound/reconnected sessions, catalog changes/errors, concurrent clicks and uncertain-write non-replay. The exact current-thread settings payload is tested through the real stdio/WebSocket transport with a local native peer, including all catalog pages and a repeated-cursor rejection. Changing an active session issues no start/steer/interrupt request and reports that following requests use the saved settings.
+
+Protocol qualification used official App Server documentation plus the generated experimental schema from installed `codex-cli 0.166.0`. A read-only catalog inspection confirmed the current effort/tier fields. A live method-recognition probe deliberately omitted required `threadId`: the daemon rejected it with `missing field threadId`, confirming recognition without targeting or modifying any thread. The public documentation does not currently describe the experimental settings setter. No live settings update, inference turn, approval decision or Telegram menu click was fabricated for testing; actual client acceptance after restart remains a separate check.
+
+Final Windows validation: **223 tests, 221 passed, two platform skips, zero failures**. `npm ci`, typecheck, build, runtime dependency audit (zero findings), package allowlist/dry run and `git diff --check` passed. Two independent reviews checked the agreed behavior and project standards; the legacy speed finding was corrected and re-reviewed. The package contains 25 allowlisted files and excludes local state and test/research data. The existing foreground relay was not replaced; restart it to load the new handler and synchronize `/model` into the bot's owner menu.
+
+## Development: Telegram startup retries (2026-11-06)
+
+A CLI integration regression first reproduced the exact `Telegram getMe connection failed. Delivery may be uncertain.` error and immediate exit before any native connection. Startup now retries temporary bot identity/webhook check failures after three seconds. The test observes actual timestamps across a network failure, a 503 response and eventual recovery, then verifies one native client starts successfully. Additional cases cover webhook-check recovery, a longer 429 interval and fatal 401 without starting Codex. The existing polling recovery and competing-consumer checks remain green. All calls use synthetic Telegram responses and disposable state, with no real bot credentials or model turns.
+
+Windows validation: **205 tests, 203 passed, two platform skips, zero failures**. Type checking, build, package allowlist and `git diff --check` passed. The built correction takes effect on the next relay start; no running foreground process was replaced during these checks.
+
+## Development: repeated pending approval cards (2026-11-05)
+
+The original reproduction submitted the same pending approval three times across three Bridge generations, including after a lost Telegram acknowledgement. It now submits once: confirmed cards receive fresh buttons and uncertain sends remain a single uncertain delivery. The implementation persists native request identity separately from destination/card receipts and callback authority. Distinct requests or changed permissions are not merged by visible text, and a consumed decision cannot be submitted again after reconnect, SQLite reopen or topic recovery.
+
+Sixteen approval-replay regressions cover those cases, multipart text/final-button receipts, held-card admission, retention beyond seven days, resolution before replay, wrong owner/topic and stale controls. Delayed HTTP regressions first reproduced stale keyboard writes and recovery triggered by an obsolete missing-topic error; they pass after ownership and binding checks. The subagent integration reconnect now replays the same native RPC ID, matching Codex 0.166.0 source, and expects one card with refreshed controls. Three CLI integration tests use real subprocess/stdin/WebSocket plumbing and intercepted Telegram calls: transient polling errors no longer restart the native client, while 401 and 409 remain fatal. No real bot, model turn or approval response is used by these tests.
+
+Final Windows validation: **201 tests, 199 passed, two platform skips, zero failures**. Type checking, build, `git diff --check` and the package allowlist passed. Two independent reviews verified the corrected races. The running foreground relay has not been restarted by this work, so live acceptance of the built fix remains pending. Legacy cards lack the required native identity; the first replay after upgrading may create one new card before durable reuse begins. [Diagnosis, primary sources and implementation](research/repeated-approval-cards-2026-11-05.md).
+
+## Development: subagent approvals (2026-11-05)
+
+Read-only native metadata and Codex 0.166.0 source confirmed that child approvals retain the child's thread ID, while parent resume replays only the parent's requests. The original routing regression delivered zero child cards to an authorized parent topic. Seven integration scenarios now exercise verified ancestry, origin-labelled parent-topic delivery, a single response to the original RPC, owner/topic/scope rejection, independent parent/child lifecycle, complete child file diffs, actual client/transport replacement with a new pending RPC ID, and replay after parent-topic recovery. The last scenario first failed during review and passes after descendant subscription invalidation. These tests use synthetic native/Telegram peers and temporary databases, not real approval decisions.
+
+The initial reconnect fixture used a new ID; the repeated-card correction above subsequently aligned replay with the same live-daemon RPC ID and verifies reuse of the existing card.
+
+Final Windows validation: **182 tests, 180 passed, two platform skips, zero failures**. `npm run typecheck`, build, `git diff --check` and `npm run check:package` passed; the package check admitted 24 files and excluded local state, tests and audit copies. The first-message reproduction remains green. Two independent reviews checked requirements and project standards; the replay finding was corrected and re-reviewed. The correction is built locally; live acceptance requires a relay restart and an actual pending child request. [Investigation and implementation](research/subagent-approvals-2026-11-05.md).
+
+A read-only probe of the affected child's actual native metadata also resolved the expected existing root topic through the new ancestry resolver. It checked the loaded root's saved binding without sending a model input, approval response or topic operation. This does not claim end-to-end event delivery by the running relay.
+
+## Development: first-message attachment (2026-11-05)
+
+Live native probes identified a loaded interactive session with a reserved rollout path, a specific pre-first-message history rejection, and a resume rejection. Regression tests reproduced the lost readiness distinction, premature topic creation, misleading saved-topic replies, manual-recovery bypass, and loss of a fast first answer. The fix is exercised through the actual WebSocket proxy client, Bridge and SQLite state with synthetic native/Telegram peers, including reconnection, healthy neighboring sessions, successful empty history, unrelated native errors, media rejection before download, and no replay of rejected input.
+
+Local Windows validation: 175 tests, 173 passed, two platform skips, zero failures. Existing approval replay, scope and topic recovery tests remain green. This is not live acceptance of a restarted relay. No first model message was injected into a user session during diagnosis or testing.
+
+## Development: queue, scope and discovery regressions
+
+Three failing tests reproduced completion loss at a full 1,000-entry queue, old excluded-project output still sending after scope narrowing, and root sessions hidden behind more than 64 loaded subagents. After the fixes, synthetic tests retain two finals through a later baseline and an actual SQLite reopen, expose the pending-final count, and deliver each once without native writes. Scope tests cancel blocked/deferred finals, queued controls and project notices, prevent cancelled work returning after scope expansion, and stop ordinary/rich multipart output when scope is revoked between parts. Discovery integration tests use the real stdio/WebSocket peer with 80 subagent contexts, filter selected roots before capacity, and observe an explicit overflow warning only for more than 64 eligible sessions. These checks use disposable stores and adapters; no real bot request or user session is started by them.
+
+## Outgoing-file development checks
+
+Synthetic export tests exercise a separate CLI process concurrently with the relay's singleton state, with no bot token present; local opt-in; exact session/topic/owner routing; ambiguous selection; path escapes, private-data paths, links/junctions, hard links, empty/oversized files and Windows alternate streams; frozen and tampered snapshots; disabled/ignored/closed/moved sessions; deduplication; queue bounds; interrupted/expired work; 429 cooldowns; uncertain transport and shutdown; and an ordinary message with buttons completing while an upload is held. Multipart adapter checks use an injected fetch implementation, verify the fixed endpoint and actual FormData contents, and check token redaction. These are not a real Telegram upload acceptance check.
+
 ## 0.1.16: account-security onboarding (2026-11-03)
 
 The English and Russian installation prompts and bare-link instructions now require an explicit user-facing security explanation before pairing, changing discovery scope or starting the relay. Setup prints a one-time warning before connection/pairing. No acknowledgement gate, new permission grant or Telegram account-setting change is introduced; existing owner checks and native approvals are unchanged.

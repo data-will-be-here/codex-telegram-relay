@@ -12,6 +12,7 @@ export interface Config {
   codexBinary: string;
   sessionScope?: 'all' | 'selected';
   ignoredThreadIds?: string[];
+  outgoingFiles?: boolean;
 }
 
 export function dataDirectory(): string {
@@ -45,12 +46,14 @@ foreach ($privateName in @('config.json','bot.token','state.sqlite','state.sqlit
   $privateFile = Join-Path $privateRoot $privateName
   if (Test-Path -LiteralPath $privateFile) { $privateTargets += $privateFile }
 }
-$privateCache = Join-Path $privateRoot 'attachments'
+foreach ($privateCacheName in @('attachments','outgoing')) {
+$privateCache = Join-Path $privateRoot $privateCacheName
 if (Test-Path -LiteralPath $privateCache) {
   $privateCacheItem = Get-Item -LiteralPath $privateCache -Force
   if (($privateCacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or !$privateCacheItem.PSIsContainer) { throw 'Invalid private cache' }
   $privateTargets += $privateCache
-  $privateTargets += @(Get-ChildItem -LiteralPath $privateCache -Force | Where-Object { $_.Name -match '^[a-f0-9-]{36}\\.[a-z0-9]{1,10}$' } | ForEach-Object { $_.FullName })
+  $privateTargets += @(Get-ChildItem -LiteralPath $privateCache -Force | Where-Object { $_.Name -match '^(?:[a-f0-9-]{36}|[a-f0-9]{64})\\.[a-z0-9]{1,10}$' } | ForEach-Object { $_.FullName })
+}
 }
 foreach ($privateTarget in $privateTargets) {
   $privateStage = 'read'
@@ -103,14 +106,30 @@ export function privateRead(path: string, maxBytes = 64 * 1024): string {
   return readFileSync(path, 'utf8');
 }
 
-export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
+/** Non-secret preferences: local file producers never need the bot credential. */
+export function readConfig(home: string): Config {
   const raw = object(JSON.parse(privateRead(join(home, 'config.json'))));
   if (raw.sessionScope !== undefined && raw.sessionScope !== 'all' && raw.sessionScope !== 'selected') throw new Error('Invalid session scope in configuration.');
   if (raw.version !== 1 || !Number.isSafeInteger(raw.ownerId) || Number(raw.ownerId) <= 0 ||
       !Array.isArray(raw.roots) || (raw.sessionScope !== 'all' && raw.roots.length === 0) || !raw.roots.every(x => typeof x === 'string' && isAbsolute(x))) {
     throw new Error('Invalid configuration; run setup again.');
   }
-  const savedBinary = string(raw.codexBinary);
+  if (raw.outgoingFiles !== undefined && typeof raw.outgoingFiles !== 'boolean') throw new Error('Invalid outgoing file setting.');
+  const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: string(raw.codexBinary) };
+  if (raw.sessionScope === 'all' || raw.sessionScope === 'selected') config.sessionScope = raw.sessionScope;
+  if (raw.outgoingFiles !== undefined) config.outgoingFiles = raw.outgoingFiles;
+  if (raw.ignoredThreadIds !== undefined) {
+    if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
+      throw new Error('Invalid ignored session list.');
+    }
+    config.ignoredThreadIds = [...new Set(raw.ignoredThreadIds as string[])];
+  }
+  return config;
+}
+
+export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
+  const config = readConfig(home);
+  const savedBinary = config.codexBinary;
   let binary: string;
   try { binary = validateBinary(options.codexBinary ?? savedBinary); }
   catch (error) {
@@ -119,14 +138,7 @@ export function loadConfig(home: string, options: { codexBinary?: string; recove
     try { binary = findCodex(); }
     catch { throw new Error('The saved Codex executable is missing and no replacement was found. Install/start Codex, or run start --codex-bin PATH. Bot pairing and topics are preserved.'); }
   }
-  const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: binary };
-  if (raw.sessionScope === 'all' || raw.sessionScope === 'selected') config.sessionScope = raw.sessionScope;
-  if (raw.ignoredThreadIds !== undefined) {
-    if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
-      throw new Error('Invalid ignored session list.');
-    }
-    config.ignoredThreadIds = [...new Set(raw.ignoredThreadIds as string[])];
-  }
+  config.codexBinary = binary;
   const token = privateRead(join(home, 'bot.token'), 4096).trim();
   if (!/^\d{5,16}:[A-Za-z0-9_-]{20,200}$/u.test(token)) throw new Error('Invalid bot token file.');
   return { config, token, binaryChanged: binary !== savedBinary };

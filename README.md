@@ -8,12 +8,14 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ### Why use it?
 
+- **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
 - **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
 - **Answer with buttons or your own words.** Structured questions offer inline choices; supported approvals have action buttons. You can also type a reply or provide attachment context.
 - **Read formatted results.** Messages preserve Markdown emphasis, links, inline code and code blocks, including when a long answer spans several messages.
 - **Get native rich messages.** Headings and tables render as Telegram rich messages, with repeated table headers and readable fallbacks for wide tables or unsupported formatting.
 - **Send screenshots and documents as context.** Attach files in the project's topic and Codex receives them through its normal image/file inputs and permissions.
+- **Receive generated files (v0.1.17).** After a one-time local opt-in, your agent can send a specific project file back to its session topic: MP4 as video, other files as documents.
 - **Choose how much to receive.** Switch between all assistant messages and compact updates; shell output and file/tool events stay out of the chat.
 - **Run locally with your own bot.** No VPS, webhook or public port is required. The relay accepts messages from its paired owner and keeps Codex's native approval and sandbox settings.
 
@@ -23,12 +25,12 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ```text
 Install Codex Telegram Relay on my computer: https://github.com/data-will-be-here/codex-telegram-relay/tree/main
-Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
+Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. If the installed release supports file exports, offer to help add artifact-delivery instructions to my AGENTS.md. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
 [Русский README](README.ru.md)
 
-[Public preview v0.1.16](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.16). Includes live rich answer streaming, per-installation command menus and account-security guidance during installation. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.17](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.17). Adds `/model` with a current model catalog and immediate reasoning/speed selection, opt-in outgoing files, parent-topic subagent approvals, and reconnect/startup fixes. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -45,7 +47,7 @@ Your Telegram bot / private project topics
 ```
 
 - No VPS, webhook, public port or cloud relay to install.
-- Session discovery includes native terminal and IDE sessions, excluding subagents and ephemeral contexts.
+- Each interactive terminal or IDE session gets its own topic; ephemeral contexts are excluded. In v0.1.17, approvals from verified spawned subagents appear in their root session's topic with the agent name and full ID, without creating child topics.
 - Topics use the project plus a short session ID. Session routing uses saved IDs, independently of display names.
 - Every message part starts with an italic `» project-name` signature, including project notices outside topics. General relay notices use `» codex-telegram-relay`.
 - By default, all assistant messages are delivered. Command output, file/tool events and internal reasoning items are excluded.
@@ -58,7 +60,7 @@ Your Telegram bot / private project topics
 - Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
   Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
-- Native sandbox, network, model, approval and instruction settings are inherited, not replaced.
+- Native sandbox, network, approval and instruction settings are inherited. In v0.1.17, `/model` explicitly changes the current session's model, reasoning effort and speed for following requests.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 Previews share roughly one update per second across the private chat; simultaneous sessions and network delays can slow individual topics. Incomplete formatting may change layout while text arrives. Very long previews show their latest part, while permanent answers retain all parts within the existing 40,000 UTF-16-unit source limit. Drafts are temporary; permanent sends retain the existing uncertainty/recovery rules. [Streaming details](docs/architecture.md#live-answer-previews).
@@ -79,7 +81,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.16 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.17 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -108,6 +110,10 @@ codex-telegram-relay start
 
 ### Upgrade an existing installation
 
+Development fix: newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
+
+Development reliability changes (after v0.1.16): observed final answers are saved before active-queue admission and survive overload/restart; `/status` shows pending finals. Saved final text consumes private disk until delivered or cancelled, so an extended outage can grow this backlog. Scope narrowing now cancels excluded queued output after restart. Discovery excludes subagents, ignored IDs and out-of-scope projects before counting its 64-session limit and warns when that limit is reached. Periodic scans run alongside message polling. Older versions do not handle the deferred backlog: clear it before downgrading.
+
 Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.
 
 Use one relay process per private state directory. Version 0.1.13 adds durable rich-message delivery progress; older versions do not understand that progress. Do not downgrade while rich deliveries are pending or unresolved.
@@ -124,13 +130,46 @@ When installing this repository for a user, follow this workflow whether they su
 
 1. Check the OS, Git, Node.js 22.13+ and the existing authenticated Codex installation. Use its native executable, following the platform instructions below. Ask the user to start a normal session and send its first prompt if no eligible session is loaded. No server, webhook or MCP registration is needed.
 2. Explain these two session-discovery modes and ask the user to choose, unless they already made that choice:
-   - **Automatic (`all`)**: connects all eligible loaded interactive terminal/IDE sessions, including future projects, approximately every five seconds. Older interactive sessions retained by the daemon can also appear. Ignored sessions and subagents remain excluded.
+   - **Automatic (`all`)**: connects all eligible loaded interactive terminal/IDE sessions, including future projects, approximately every five seconds. Older interactive sessions retained by the daemon can also appear. Ignored sessions remain excluded. Subagents get no separate topics; in v0.1.17, their supported approvals can reach the attached root's topic.
    - **Selected projects (`selected`)**: connects sessions only inside locally chosen project directories; adding another project requires `projects add PATH` and a relay restart. Recommend automatic when the user wants every new project to appear; selected when they want a limited scope.
    Wait for their answer before pairing or changing session scope. This choice is separate from `/mode all|compact`, which controls how many assistant messages are delivered.
 3. Read the release version in this README and install its version tag into a new local directory, using the clone command above. Run `npm ci` followed by `npm start -- doctor`. Report the installed version and commit. `main` contains release documentation; `dev` is for development and is not the installation source. Preserve any existing checkout changes and private relay state; do not reinstall by deleting configuration.
 4. Help the user create a dedicated bot in @BotFather and enable private-chat topics. For a fresh installation, run `npm start -- setup --scope all` or `npm start -- setup --scope selected` according to their answer. If your terminal cannot accept private interactive input, have the user run that command in their own terminal. The token must be entered only into the hidden local prompt: never request it in chat, command arguments, environment variables or logs. The user sends the displayed `/start CODE` to their bot in a private chat; pairing must finish successfully.
 5. For an already paired installation, skip setup. Run `npm start -- sessions scope all` or `npm start -- sessions scope selected` after their choice; selected mode needs at least one root added with `npm start -- projects add /absolute/path`. Keep the token, owner, ignored IDs and topic bindings intact.
 6. Start one foreground relay with `npm start -- start`, or ask the user to restart their already running relay. Keep the process running; do not create an unattended service without a separate request. Confirm the startup discovery mode, matching `/status`, and a topic for an eligible session. In automatic mode, ask the user to open a session in a new project, send its first prompt and check its topic appears. If a real bot check is pending, report it as pending rather than claiming success.
+
+For versions with outgoing files, explain that export is disabled by default and ask whether to enable it once locally with `files enable`. A person controlling the paired account can request files within Codex's effective permissions. Once enabled, individual files need no extra relay confirmation. Follow [Sending files back](#sending-files-back-development-version) when the user requests an artifact; `sent` is the success criterion.
+
+7. **Offer to help update the user's `AGENTS.md`.** For an installed version with `send-file`, explain that this makes future agents deliver images, sketches, mockups, screenshots, videos and other review artifacts to the current session's Telegram topic. Offer a global user rule or a project-only rule, and show the proposed text with the actual local CLI path. Write it after the user chooses the scope or has already explicitly requested it; preserve existing instructions. A repository URL alone does not authorize changing global agent instructions. This documentation step does not enable file exports; respect the separate local opt-in. For older releases, explain the feature's availability rather than installing `dev` automatically.
+
+Suggested rule, with placeholders resolved for that installation:
+
+```text
+When presenting a generated image, sketch, mockup, screenshot, animation, video or other review artifact in a relay-connected Codex session, send the actual file through Codex Telegram Relay's standard send-file command as part of presenting the result. Keep generated previews in an ignored artifact directory inside the current project. Use the installed CLI's absolute path:
+node "<ABSOLUTE_RELAY_CLI_PATH>" send-file "<ABSOLUTE_PROJECT_ARTIFACT_PATH>" --session "<CURRENT_NATIVE_SESSION_ID>"
+Route to the current interactive session. The CLI can use CODEX_THREAD_ID or a unique working-directory binding when --session is omitted; resolve ambiguity instead of guessing a topic. A local path or preview link can accompany the upload. Confirm delivery only when the receipt says sent; use files status REQUEST_ID for pending or uncertain results and inspect Telegram before any deliberate resend. Use existing export consent and native permissions; report disabled/unavailable export clearly. Keep the bot credential inside the relay and use this command rather than ad hoc Bot API scripts.
+```
+
+### Sending files back (v0.1.17)
+
+This feature is in v0.1.17, **not in v0.1.16**. Use it after installing the version containing it and restarting the relay once. Pairing and existing topics are preserved. Enable exports locally on that computer/server:
+
+```sh
+npm start -- files enable
+npm start -- send-file /absolute/project/path/demo.mp4 --session SESSION_ID
+npm start -- files status REQUEST_ID
+npm start -- files disable
+```
+
+`send-file` talks to the existing relay through a private SQLite queue; its process never reads the bot token. No extra server, MCP registration or poller is needed. MP4 is uploaded with Telegram's [sendVideo](https://core.telegram.org/bots/api#sendvideo); other files use [sendDocument](https://core.telegram.org/bots/api#senddocument). `--as document` preserves any file as a document, including images, audio, video and archives. The conservative per-file limit is **49,000,000 bytes**. Files must be inside the target session's project; links, hard links, special files, relay-private data, network paths and Windows alternate streams are rejected. This prevents accidental path escapes; it does not determine whether a file contains secrets.
+
+**For agents:** invoke the installed CLI using its absolute path when working in another project, for example `node /absolute/relay/dist/src/cli.js send-file /absolute/project/report.pdf --session SESSION_ID`. The session defaults to `CODEX_THREAD_ID` when available, otherwise to the unique binding for the command's working directory. Specify `--session` when ambiguous; never choose an arbitrary topic. There is no caller-controlled chat ID. Native permission prompts for invoking the command still apply.
+
+The command returns a JSON receipt and normally waits up to three minutes. Only `status: "sent"` with a message ID confirms delivery. Exit code 1 means rejected/uncertain; code 2 means the wait ended with work still pending. Save the request ID and inspect it with `files status ID`; `--no-wait` returns immediately. `--caption "text"` supplies a literal caption (up to 800 UTF-16 units) beneath the project signature.
+
+An identical request deduplicates by session, destination, content and caption; successful/rejected receipts remain for seven days. An explicit `--request-id ID` must be reused for the same attempt and cannot be reused for different content. After `uncertain`, inspect Telegram before deliberately submitting a new ID: **no automatic replay** occurs after a timeout, crash or uncertain response. Uncertain receipts remain for inspection and contribute to `/status`.
+
+Private snapshots freeze the queued bytes and are removed on completion/rejection/uncertainty. The queue allows 16 outstanding files and 200 MB of snapshots; unsent requests expire after ten minutes. A separate single-upload worker keeps message, question and button handling independent of slow network uploads. Disabling export blocks new/unstarted requests immediately; it cannot recall an upload already in flight. Neither the bot menu nor Telegram commands can enable export. These controls follow the [trusted remote-control model](SECURITY.md).
 
 ### Windows
 
@@ -153,7 +192,7 @@ Explicitly enable automatic discovery locally:
 npm start -- sessions scope all
 ```
 
-Restart the relay once. Every eligible loaded interactive session is then connected, including sessions in future projects, without another setup or restart. Discovery runs about every five seconds; a new session needs its first prompt before it has resumable history. This also includes IDE sessions and older interactive threads still loaded in the daemon. Explicitly ignored sessions, subagents and ephemeral contexts remain excluded.
+Restart the relay once. Every eligible loaded interactive session is then connected, including sessions in future projects, without another setup or restart. Discovery runs about every five seconds; a new session needs its first prompt before it has resumable history. This also includes IDE sessions and older interactive threads still loaded in the daemon. Explicitly ignored sessions and ephemeral contexts remain excluded. Subagents get no separate topics; in v0.1.17, their supported approvals can reach the attached root's topic.
 
 For a fresh installation, `npm start -- setup --scope all` opts into the same mode. Plain `setup` and existing configurations retain selected-project discovery. `npm start -- sessions scope` shows the configured mode; `/status` shows the running mode. `npm start -- sessions scope selected` restores project restrictions after restarting. These settings can only be changed locally, not through Telegram.
 
@@ -177,13 +216,16 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/status` | Show connection and uncertain-delivery counts |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
 | `/stream`, `/stream on`, `/stream off` | Show or change live answer previews for all sessions; no restart required |
-| `/bind SESSION_ID` | Bind an already created topic after uncertain creation; send inside that topic |
+| `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending native questions |
+| `/model` | Choose this session's model, reasoning effort and speed |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
 The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, new-session creation, or automatic history imports. Instructions sent to your session follow its existing Codex permissions.
+
+In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
 
 ## State and recovery
 
@@ -198,9 +240,13 @@ The optional `CODEX_TELEGRAM_RELAY_HOME` environment variable changes this direc
 
 A singleton lock prevents two relay instances using the same state directory. A Telegram polling conflict stops the relay rather than replacing another consumer. An existing webhook is never deleted automatically.
 
-One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Transport failures still reconnect.
+One temporarily unavailable Codex session does not stop discovery or relaying for healthy sessions. Native transport failures still reconnect. In v0.1.17, transient Telegram polling errors retry without restarting a healthy Codex connection; invalid credentials and competing pollers still stop the relay. During startup, temporary network/server failures in the bot identity or webhook checks retry after three seconds until Telegram recovers; a longer server rate-limit interval is respected. Ctrl+C stops startup retries.
+
+In v0.1.17, replaying the same pending approval after reconnect or relay restart refreshes the existing card's buttons instead of posting another card. Distinct native requests and changed proposals remain separate. If the original send has no confirmed receipt, another copy is not sent automatically; answer that request in Codex. Existing cards from an older version lack the required identity, so the first replay after upgrading may create one new card. [Investigation and checks](docs/research/repeated-approval-cards-2026-11-05.md).
 
 Topic creation is journaled before calling Telegram. If the response is lost, creation pauses to avoid duplicate topics, including after restarting the relay. The bot sends recovery instructions: use `/bind SESSION_ID` inside the topic if it appeared, or `/repair SESSION_ID` to explicitly retry if it did not. These commands require the paired owner and never submit an instruction to Codex.
+
+A saved topic binding does not mean the native session is running. `/sessions` shows the saved topic number and relay attachment state. In that topic, `/bind SESSION_ID` or `/repair SESSION_ID` retries discovery and attachment of an eligible loaded session. If the session is unloaded, resume that exact conversation locally with `codex resume SESSION_ID` or reopen it in the IDE; the relay will reconnect automatically. A command in another topic identifies the saved destination without moving the binding. Creating another topic does not reload a native session.
 
 If Telegram explicitly reports that a saved topic no longer exists, the relay recreates it for the loaded session and transfers queued undelivered answers. Existing sent history is not imported, and stale approval buttons are cancelled; pending native prompts are reattached with fresh controls. If you want to permanently remove a session's topic, ignore the session locally before deleting the topic.
 
@@ -232,6 +278,8 @@ JPEG, PNG and WebP are passed as native localImage input; other files are suppli
 Audio/video files are received, but this version does not transcribe speech or extract video frames. That needs a separate local processor or an explicitly approved external service. File access and inspection still follow native Codex permissions; the relay does not widen them.
 
 Native questions and supported approvals have buttons and text answers. Host request_user_input_async questions are read from the selected session journal because Codex 0.166.0 omits them from App Server items. The journal is streamed in 1 MiB chunks; only eligible question/answer records are retained, with a 256 KiB record limit. Large tool outputs do not truncate question recovery or produce warnings solely because of journal size. Answers are delivered as ordinary user input to the matching session; the host UI form may remain open. First attachment recovers the latest turn within seven days. Known unanswered questions extend that range across subsequent turns and reconnects, without importing unrelated earlier history. Sensitive/unsupported questions produce a terminal-required notice instead of forwarding private contents. A disconnected or stopped relay cannot send notices.
+
+Since v0.1.17, supported command, file-change and permission approvals from loaded spawned subagents are delivered to the attached root session's topic. Cards identify the agent by name and full ID. Pending requests are recovered by subscribing to each eligible child after reconnect or topic recovery; decisions answer the original child request once. Every ancestor must remain eligible. Child commentary, final answers and questions are not mirrored; direct Telegram instructions still address the interactive root. See [implementation and checks](docs/research/subagent-approvals-2026-11-05.md).
 
 ## Updating Codex and recovering its executable
 

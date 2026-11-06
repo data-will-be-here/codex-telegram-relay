@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { resolve, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { CodexClient, RpcError } from '../src/codex.js';
+import { CodexClient, FirstMessageRequiredError, RpcError } from '../src/codex.js';
 import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
@@ -13,7 +13,6 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
   try {
     await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
     const sessions = await c.list(); assert.deepEqual(sessions.map(s => s.id), ['a', 'b']);
-    assert.deepEqual(await c.turns('empty'), []);
     await c.attach('a'); await c.start('a', 'hello'); await c.steer('a', 'turn-1', 'change');
     const records = await c.call('test/records', {}) as { method: string; params: Json }[];
     const capabilities = records.find(x => x.method === 'initialize')!.params.capabilities as Json;
@@ -27,6 +26,58 @@ test('native proxy HTTP upgrade works; discovery excludes subagents and writes o
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/start').at(-1)!.params, { threadId: 'a', input });
     assert.deepEqual(mediaRecords.filter(x => x.method === 'turn/steer').at(-1)!.params, { threadId: 'a', expectedTurnId: 'turn-1', input });
   } finally { c.close(); }
+});
+
+test('native model catalog pagination and settings updates use exact fields without turns or permission overrides', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.call('test/models', { pages: [
+      { cursor: null, response: { data: [{ model: 'model-one' }], nextCursor: 'second-page' } },
+      { cursor: 'second-page', response: { data: [{ model: 'model-two' }], nextCursor: null } },
+    ] });
+    assert.deepEqual((await c.models()).map(m => m.model), ['model-one', 'model-two']);
+    await c.updateSettings('a', { model: 'model-two', effort: 'future-depth', serviceTier: 'future-speed' });
+    assert.equal((await c.read('a')).model, 'model-two');
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.filter(r => r.method === 'model/list').map(r => r.params), [
+      { limit: 100, includeHidden: false }, { limit: 100, includeHidden: false, cursor: 'second-page' },
+    ]);
+    assert.deepEqual(records.filter(r => r.method === 'thread/settings/update').map(r => r.params), [
+      { threadId: 'a', model: 'model-two', effort: 'future-depth', serviceTier: 'future-speed' },
+    ]);
+    assert.ok(!records.some(r => ['turn/start', 'turn/steer', 'thread/start', 'thread/resume', 'config/value/write'].includes(r.method)));
+    await c.call('test/models', { pages: [{ cursor: null, response: { data: [], nextCursor: 'loop' } },
+      { cursor: 'loop', response: { data: [], nextCursor: 'loop' } }] });
+    await assert.rejects(c.models(), /invalid model catalog cursor/u);
+  } finally { c.close(); }
+});
+
+test('unmaterialized history remains distinct from a readable empty history even with a reserved path', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await client.call('test/discovery', { threads: [{ id: 'empty', source: 'vscode', cwd: process.cwd(), path: '/reserved/not-created.jsonl', status: { type: 'idle' } }] });
+    assert.equal((await client.list())[0]?.id, 'empty');
+    assert.deepEqual(await client.turns('a'), [], 'A readable empty history is a valid result');
+    await assert.rejects(client.turns('empty'), /first message.*locally/u);
+  } finally { client.close(); }
+});
+
+test('other history failures are not mislabeled as waiting for the first message', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    for (const message of [
+      'no rollout found for thread id a',
+      'thread another-session is not materialized yet; thread/turns/list is unavailable before first user message',
+      'failed to read stored history: permission denied',
+    ]) {
+      await client.call('test/historyError', { threadId: 'a', message });
+      await assert.rejects(client.turns('a'), error => error instanceof RpcError && !(error instanceof FirstMessageRequiredError) &&
+        error.message === `Codex rejected the request: ${message}` && !error.uncertain);
+    }
+  } finally { client.close(); }
 });
 
 test('native assistant streaming preserves started, delta and completed event identities over the actual proxy transport', async () => {
@@ -101,4 +152,29 @@ test('a session disappearing during discovery does not hide healthy sessions', a
   assert.deepEqual((await c.list()).map(s => s.id), ['healthy']);
   c.read = async () => { throw new RpcError('Transport disconnected', true); };
   await assert.rejects(c.list(), /Transport disconnected/u);
+});
+
+test('many loaded subagents do not hide later interactive sessions', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const base = { source: 'cli', cwd: process.cwd(), path: '/synthetic', status: { type: 'idle' } };
+    const agents = Array.from({ length: 80 }, (_, index) => ({ ...base, id: `agent-${index}`, parentThreadId: 'root' }));
+    await client.call('test/discovery', { threads: [...agents, { ...base, id: 'project-a' }, { ...base, id: 'project-b' }] });
+    assert.deepEqual((await client.list()).map(session => session.id), ['project-a', 'project-b']);
+  } finally { client.close(); }
+});
+
+test('discovery applies project selection before its session cap and warns on true overflow', async () => {
+  const client = new CodexClient();
+  try {
+    await client.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const threads = Array.from({ length: 80 }, (_, index) => ({ id: `thread-${index}`, source: 'cli', cwd: process.cwd(), path: '/synthetic', status: { type: 'idle' } }));
+    await client.call('test/discovery', { threads });
+    const warnings: number[] = []; client.on('discoveryLimit', (limit: number) => warnings.push(limit));
+    assert.deepEqual((await client.list(session => ['thread-78', 'thread-79'].includes(session.id))).map(session => session.id), ['thread-78', 'thread-79']);
+    assert.deepEqual(warnings, []);
+    assert.equal((await client.list()).length, 64);
+    assert.deepEqual(warnings, [64]);
+  } finally { client.close(); }
 });

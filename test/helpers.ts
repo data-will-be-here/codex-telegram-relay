@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput } from '../src/types.js';
+import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings } from '../src/types.js';
 
 export function messageBody(message: Json): string {
   const text = string(message.text);
@@ -27,7 +27,11 @@ export class FakeCodex implements Codex {
   writes: { method: string; params: Json }[] = [];
   pending = new Set<string | number>();
   failSteer = false;
-  async list(): Promise<Session[]> { return this.sessions; }
+  modelCatalog: Json[] = [];
+  modelReads = 0;
+  async models(): Promise<Json[]> { this.modelReads++; return this.modelCatalog; }
+  async updateSettings(threadId: string, settings: ModelSettings): Promise<void> { this.writes.push({ method: 'settings', params: { threadId, ...settings } }); }
+  async list(eligible?: (session: Session) => boolean): Promise<Session[]> { return eligible ? this.sessions.filter(eligible) : this.sessions; }
   async attach(threadId: string): Promise<Json> { return this.read(threadId); }
   async read(threadId: string): Promise<Json> {
     const session = this.sessions.find(s => s.id === threadId)!;
@@ -73,7 +77,7 @@ export async function fixture(mode: MessageMode = 'compact'): Promise<{
   state.setMessageMode(mode);
   const bridge = new Bridge({ version: 1, ownerId: 42, roots: [projectA, projectB], codexBinary: process.execPath }, state, codex, telegram);
   await bridge.discover();
-  const outbox = new Outbox(state, telegram, 42, 0);
+  const outbox = new Outbox(state, telegram, bridge.config, 0);
   return { dir: temp.dir, projectA, projectB, state, codex, telegram, bridge, drain: async () => { while (await outbox.flushOne()) { /* Drain persisted deliveries. */ } }, close: () => { state.close(); temp.close(); } };
 }
 

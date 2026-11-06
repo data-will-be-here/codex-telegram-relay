@@ -14,8 +14,18 @@ export class AsyncQuestionReader {
   private pending = new Map<string, AsyncQuestion>();
   private notices = new Map<string, AsyncQuestion>();
   private answered = new Set<string>();
+  private reading = Promise.resolve();
 
-  async read(path: string, turnId: string, startedAtMs: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
+  read(path: string, turnId: string, startedAtMs: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
+    // Discovery and an answer-liveness check may overlap for this session. Each needs
+    // its own complete snapshot, including its own set of already answered IDs.
+    const answered = [...answeredCallIds];
+    const result = this.reading.then(() => this.snapshot(path, turnId, startedAtMs, answered));
+    this.reading = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async snapshot(path: string, turnId: string, startedAtMs: number, answeredCallIds: readonly string[]): Promise<AsyncQuestion[]> {
     const file = await open(path, 'r');
     try {
       const stat = await file.stat();

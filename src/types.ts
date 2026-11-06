@@ -31,9 +31,15 @@ export interface RpcRequest {
   params: Json;
 }
 
+export interface AgentOrigin { threadId: string; name: string; }
+export interface ModelSettings { model: string; effort?: string; serviceTier: string; }
+
 export interface Codex {
+  models(): Promise<Json[]>;
+  updateSettings(threadId: string, settings: ModelSettings): Promise<void>;
+  loaded?(): Promise<string[]>;
   asyncQuestions?(threadId: string, historySinceMs?: number, answeredCallIds?: readonly string[]): Promise<import('./async-questions.js').AsyncQuestion[]>;
-  list(): Promise<Session[]>;
+  list(eligible?: (session: Session) => boolean): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;
   read(threadId: string, timeoutMs?: number): Promise<Json>;
   turns(threadId: string): Promise<Json[]>;
@@ -44,6 +50,7 @@ export interface Codex {
 }
 
 export interface Telegram {
+  upload?(method: 'sendVideo' | 'sendDocument', params: Json, file: { name: string; bytes: Buffer }, signal: AbortSignal): Promise<unknown>;
   download?(fileId: string): Promise<Buffer>;
   call(method: string, params?: Json): Promise<unknown>;
 }

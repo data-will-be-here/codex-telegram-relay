@@ -7,10 +7,17 @@ import { lstat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
-import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput } from './types.js';
+import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings } from './types.js';
+
+const MAX_DISCOVERED_SESSIONS = 64;
+const METADATA_READ_CONCURRENCY = 8;
 
 export class RpcError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
+}
+
+export class FirstMessageRequiredError extends RpcError {
+  constructor() { super('Send the first message in this session locally in Codex. The relay will connect automatically afterwards.', false); }
 }
 
 export class CodexClient extends EventEmitter implements Codex {
@@ -61,7 +68,7 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.16' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.17' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -103,27 +110,59 @@ export class CodexClient extends EventEmitter implements Codex {
     });
   }
 
-  async list(): Promise<Session[]> {
-    const loaded = array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string').slice(0, 64);
-    for (const id of this.questionReaders.keys()) if (!loaded.includes(id)) this.questionReaders.delete(id);
+  async loaded(): Promise<string[]> {
+    return [...new Set(array(object(await this.call('thread/loaded/list', {})).data).filter((id): id is string => typeof id === 'string'))];
+  }
+
+  async list(eligible: (session: Session) => boolean = () => true): Promise<Session[]> {
+    const loaded = await this.loaded();
+    const loadedSet = new Set(loaded);
+    for (const id of this.questionReaders.keys()) if (!loadedSet.has(id)) this.questionReaders.delete(id);
     const result: Session[] = [];
-    for (const id of loaded) {
-      let thread: Json;
-      try { thread = await this.read(id); }
-      catch (error) {
-        if (error instanceof RpcError && error.uncertain) throw error;
-        this.emit('sessionUnavailable', id);
-        continue;
+    // Bound concurrent metadata reads, not the number of ineligible contexts we can skip.
+    for (let offset = 0; offset < loaded.length; offset += METADATA_READ_CONCURRENCY) {
+      const ids = loaded.slice(offset, offset + METADATA_READ_CONCURRENCY);
+      const batch = await Promise.allSettled(ids.map(id => this.read(id)));
+      for (let index = 0; index < batch.length; index++) {
+        const read = batch[index]!;
+        if (read.status === 'rejected') {
+          if (read.reason instanceof RpcError && read.reason.uncertain) throw read.reason;
+          this.emit('sessionUnavailable', ids[index]!); continue;
+        }
+        const thread = read.value;
+        if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
+        const session: Session = { id: ids[index]!, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
+        if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
+        if (!eligible(session)) continue;
+        if (result.length === MAX_DISCOVERED_SESSIONS) { this.emit('discoveryLimit', MAX_DISCOVERED_SESSIONS); return result; }
+        result.push(session);
       }
-      if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
-      const session: Session = { id, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
-      if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
-      result.push(session);
+      await new Promise<void>(done => setImmediate(done));
     }
     return result;
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
+  async models(): Promise<Json[]> {
+    const models: Json[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const result = object(await this.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }));
+      if (!Array.isArray(result.data)) throw new RpcError('Codex returned an invalid model catalog.', false);
+      models.push(...result.data.map(object));
+      if (models.length > 512) throw new RpcError('The model catalog exceeds the relay limit of 512 entries.', false);
+      if (result.nextCursor == null) return models;
+      cursor = string(result.nextCursor);
+      if (!cursor || seen.has(cursor)) throw new RpcError('Codex returned an invalid model catalog cursor.', false);
+      seen.add(cursor);
+    }
+    throw new RpcError('The model catalog exceeded the pagination limit.', false);
+  }
+  async updateSettings(threadId: string, settings: ModelSettings): Promise<void> {
+    await this.call('thread/settings/update', { threadId, model: settings.model,
+      ...(settings.effort === undefined ? {} : { effort: settings.effort }), serviceTier: settings.serviceTier });
+  }
   async asyncQuestions(threadId: string, historySinceMs?: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
     const thread = await this.read(threadId);
     const path = string(thread.path);
@@ -147,8 +186,9 @@ export class CodexClient extends EventEmitter implements Codex {
       // Display summaries retain agent replies while excluding enormous historical tool outputs.
       return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' })).data).map(object);
     } catch (error) {
-      // A newly opened interactive session has no persisted history until its first input.
-      if (error instanceof RpcError && !error.uncertain && /not materialized yet.*unavailable before first user message/u.test(error.message)) return [];
+      // A reserved rollout path is not proof of materialization. Keep this state distinct from readable empty history.
+      if (error instanceof RpcError && !error.uncertain &&
+          error.message === `Codex rejected the request: thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`) throw new FirstMessageRequiredError();
       throw error;
     }
   }

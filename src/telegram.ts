@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
-import { type State, type Delivery, type RichDeliveryPart } from './state.js';
+import { type State, type Delivery, type DeliveryContext, type RichDeliveryPart } from './state.js';
+import { allowedSessionDirectory, type Config } from './config.js';
 import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
@@ -16,6 +17,25 @@ export function isMissingTopic(error: unknown): error is TelegramError {
 
 export class TelegramClient implements Telegram {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
+  async upload(method: 'sendVideo' | 'sendDocument', params: Json, file: { name: string; bytes: Buffer }, signal: AbortSignal): Promise<unknown> {
+    if (method !== 'sendVideo' && method !== 'sendDocument') throw new Error('Invalid upload method.');
+    const form = new FormData();
+    for (const [key, value] of Object.entries(params)) form.set(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+    form.set(method === 'sendVideo' ? 'video' : 'document', new Blob([new Uint8Array(file.bytes)], { type: method === 'sendVideo' ? 'video/mp4' : 'application/octet-stream' }), file.name);
+    try {
+      const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
+        method: 'POST', body: form, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+      });
+      const result = object(JSON.parse((await boundedBody(response, 2 * 1024 * 1024)).toString('utf8')));
+      if (!response.ok || result.ok !== true) {
+        throw new TelegramError(`Telegram ${method} failed (${integer(result.error_code) ?? response.status}): ${string(result.description).replaceAll(this.token, '[redacted]').slice(0, 200)}`, integer(result.error_code) ?? response.status, integer(object(result.parameters).retry_after));
+      }
+      return result.result;
+    } catch (error) {
+      if (error instanceof TelegramError) throw error;
+      throw new TelegramError(`Telegram ${method} connection failed. Delivery may be uncertain.`, 0);
+    }
+  }
   async call(method: string, params: Json = {}): Promise<unknown> {
     if (!/^[A-Za-z]+$/u.test(method)) throw new Error('Invalid Telegram method.');
     try {
@@ -69,13 +89,32 @@ async function boundedBody(response: Response, limit: number): Promise<Buffer> {
   } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
+class DeliveryCancelled extends Error {}
+
 export class Outbox {
-  constructor(private readonly state: State, private readonly telegram: Telegram, private readonly ownerId: number, private readonly interval = 1100, private readonly ignoredThreadIds: readonly string[] = []) {}
+  constructor(private readonly state: State, private readonly telegram: Telegram,
+    private readonly config: Pick<Config, 'ownerId' | 'roots' | 'sessionScope' | 'ignoredThreadIds'>, private readonly interval = 1100) {}
+  private allowed(context: DeliveryContext): boolean {
+    const binding = context.topicId === null ? context.sourceThreadId ? this.state.binding(context.sourceThreadId) : undefined : this.state.topic(context.topicId);
+    if (context.topicId !== null && !binding) return context.ownerNotice;
+    if (context.sourceThreadId && this.config.ignoredThreadIds?.includes(context.sourceThreadId)) return false;
+    if (context.topicId !== null && context.sourceThreadId && binding?.threadId !== context.sourceThreadId) return false;
+    if (binding && this.config.ignoredThreadIds?.includes(binding.threadId)) return false;
+    return [context.projectCwd, binding?.cwd].every(cwd => !cwd || allowedSessionDirectory(cwd, this.config));
+  }
+  private check(delivery: Delivery): void {
+    if (this.allowed(delivery)) return;
+    this.state.cancelDelivery(delivery.id);
+    throw new DeliveryCancelled();
+  }
   async flushOne(): Promise<boolean> {
+    let cancelled = false;
+    for (const context of this.state.deliveryContexts()) if (!this.allowed(context)) {
+      this.state.cancelContext(context); cancelled = true;
+    }
     const delivery = this.state.next();
-    if (!delivery) return false;
+    if (!delivery) return cancelled;
     const binding = delivery.topicId === null ? undefined : this.state.topic(delivery.topicId);
-    if (binding && this.ignoredThreadIds.includes(binding.threadId)) { this.state.cancelDelivery(delivery.id); return true; }
     this.state.sending(delivery.id);
     try {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
@@ -91,13 +130,14 @@ export class Outbox {
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;
         const { text, entities } = withProjectHeader(chunk, project);
-        const params: Json = { chat_id: this.ownerId, text };
+        const params: Json = { chat_id: this.config.ownerId, text };
         if (!chunk.plain && entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
         if (index === chunks.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
         let retries = 0;
         try {
           while (true) {
+            this.check(delivery);
             try { messageId = integer(object(await this.telegram.call('sendMessage', params)).message_id) ?? null; break; }
             catch (error) {
               if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
@@ -115,6 +155,7 @@ export class Outbox {
       }
       this.state.delivered(delivery.id, messageId);
     } catch (error) {
+      if (error instanceof DeliveryCancelled) return true;
       if (binding && isMissingTopic(error)) {
         this.state.missingTopic(binding);
         return true;
@@ -134,12 +175,13 @@ export class Outbox {
     let messageId: number | null = delivery.messageId;
     for (let index = delivery.nextPart; index < parts.length; index++) {
       const part = parts[index]!;
-      const params = { ...part.params, chat_id: this.ownerId } as Json;
+      const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
       if (index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
       try {
         let retries = 0;
         while (true) {
+          this.check(delivery);
           try { messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null; break; }
           catch (error) {
             if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;

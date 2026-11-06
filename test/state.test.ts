@@ -6,6 +6,7 @@ import { Outbox, TelegramClient, TelegramError, splitMessage } from '../src/tele
 import { FakeTelegram, temporary, messageBody } from './helpers.js';
 import { projectHeader } from '../src/format.js';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
 import { string, array, object } from '../src/types.js';
 
 test('interrupted host-answer reservations, question drafts and recovery timestamps survive a real database reopen', () => {
@@ -118,9 +119,9 @@ test('missing-topic recovery blocks new output, cancels old approval buttons and
 test('Telegram errors unrelated to formatting are not retried as plain text', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); let attempts = 0;
   try {
-    state.enqueue('final/a/missing-topic', 1, '**Answer**');
+    state.enqueue('final/a/missing-topic', null, '**Answer**');
     const telegram = { call: async () => { attempts++; throw new TelegramError('Bad Request: message thread not found', 400); } };
-    await assert.rejects(new Outbox(state, telegram, 42, 0).flushOne());
+    await assert.rejects(new Outbox(state, telegram, { ownerId: 42, roots: [temp.dir] }, 0).flushOne());
     assert.equal(attempts, 1);
     assert.equal(state.uncertainCount(), 1);
   } finally { state.close(); temp.close(); }
@@ -129,13 +130,13 @@ test('Telegram errors unrelated to formatting are not retried as plain text', as
 test('format fallback on a later chunk never replays accepted chunks and keeps buttons on the last part', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
   try {
-    state.enqueue('final/a/multipart-fallback', 1, '**' + 'x'.repeat(4000) + '**', { inline_keyboard: [[{ text: 'OK', callback_data: 'test' }]] });
+    state.enqueue('final/a/multipart-fallback', null, '**' + 'x'.repeat(4000) + '**', { inline_keyboard: [[{ text: 'OK', callback_data: 'test' }]] });
     const call = t.call.bind(t); let attempts = 0;
     t.call = async (method, params = {}) => {
       if (method === 'sendMessage' && ++attempts === 2) { t.calls.push({ method, params }); throw new TelegramError("Bad Request: can't parse entities", 400); }
       return call(method, params);
     };
-    await new Outbox(state, t, 42, 0).flushOne();
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     const messages = t.sent();
     assert.equal(messages.length, 3);
     const limit = 3500 - projectHeader().length - 2;
@@ -158,9 +159,9 @@ test('HTTP errors cannot leak the bot token or its URL', async () => {
 test('an uncertain Telegram POST is not automatically replayed', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home'));
   try {
-    state.enqueue('one', 1, 'Hello');
+    state.enqueue('one', null, 'Hello');
     const failing = { call: async (): Promise<unknown> => { throw new Error('Connection lost after send'); } };
-    const outbox = new Outbox(state, failing, 42, 0);
+    const outbox = new Outbox(state, failing, { ownerId: 42, roots: [temp.dir] }, 0);
     await assert.rejects(outbox.flushOne());
     assert.equal(await outbox.flushOne(), false); assert.equal(state.uncertainCount(), 1);
   } finally { state.close(); temp.close(); }
@@ -169,13 +170,13 @@ test('an uncertain Telegram POST is not automatically replayed', async () => {
 test('a definite Telegram entity rejection falls back to readable text with link targets', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
   try {
-    state.enqueue('final/a/rejected-markup', 1, '**Result**: [docs](https://example.com/docs).');
+    state.enqueue('final/a/rejected-markup', null, '**Result**: [docs](https://example.com/docs).');
     const call = t.call.bind(t); let first = true;
     t.call = async (method, params = {}) => {
       if (method === 'sendMessage' && first) { first = false; t.calls.push({ method, params }); throw new TelegramError("Bad Request: can't parse entities", 400); }
       return call(method, params);
     };
-    await new Outbox(state, t, 42, 0).flushOne();
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     assert.equal(t.sent().length, 2);
     assert.ok(t.sent()[0]!.entities);
     assert.equal(t.sent()[1]!.entities, undefined);
@@ -187,8 +188,8 @@ test('a definite Telegram entity rejection falls back to readable text with link
 test('final answers send Telegram formatting entities instead of raw Markdown', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
   try {
-    state.enqueue('final/a/formatted', 1, '🎁 **Готово**: [документация](https://example.com/docs) и `npm test`.');
-    await new Outbox(state, t, 42, 0).flushOne();
+    state.enqueue('final/a/formatted', null, '🎁 **Готово**: [документация](https://example.com/docs) и `npm test`.');
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     const sent = t.sent()[0]!;
     assert.equal(messageBody(sent), '🎁 Готово: документация и npm test.');
     const header = projectHeader();
@@ -210,8 +211,8 @@ test('long Unicode output is split intact and buttons appear only on its last me
     const text = '🎁'.repeat(4000);
     assert.equal(splitMessage(text).join(''), text);
     assert.ok(splitMessage(text).every(x => x.length <= 3500));
-    state.enqueue('long', 1, text, { inline_keyboard: [[{ text: 'OK', callback_data: 'x' }]] });
-    await new Outbox(state, t, 42, 0).flushOne();
+    state.enqueue('long', null, text, { inline_keyboard: [[{ text: 'OK', callback_data: 'x' }]] });
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     assert.equal(t.sent().length, 3);
     assert.equal(t.sent()[0]!.reply_markup, undefined);
     assert.ok(t.sent().at(-1)!.reply_markup);
@@ -221,10 +222,10 @@ test('long Unicode output is split intact and buttons appear only on its last me
 test('each long message part includes its italic project signature and keeps formatting within limits', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home')); const t = new FakeTelegram();
   try {
-    state.bind('a', 101, join(temp.dir, 'project-a'), 'A');
+    mkdirSync(join(temp.dir, 'project-a')); state.bind('a', 101, join(temp.dir, 'project-a'), 'A');
     const text = '🎁'.repeat(4000);
     state.enqueue('final/a/header', 101, text);
-    await new Outbox(state, t, 42, 0).flushOne();
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     const sent = t.sent();
     assert.equal(sent.map(messageBody).join(''), text);
     for (const message of sent) {
@@ -234,7 +235,7 @@ test('each long message part includes its italic project signature and keeps for
       assert.equal(header.type, 'italic'); assert.equal(header.offset, 0); assert.equal(header.length, '» project-a'.length);
     }
     state.enqueue('topic-problem/synthetic', null, 'Needs attention', null, join(temp.dir, 'project-a'));
-    await new Outbox(state, t, 42, 0).flushOne();
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     assert.equal(t.sent().at(-1)!.text, '» project-a\n\nNeeds attention');
   } finally { state.close(); temp.close(); }
 });
@@ -245,8 +246,30 @@ test('older outbox schemas migrate without losing queued answers or their projec
   db.close();
   const state = new State(temp.dir); const t = new FakeTelegram();
   try {
-    state.bind('a', 101, join(temp.dir, 'legacy-project'), 'Legacy');
-    await new Outbox(state, t, 42, 0).flushOne();
+    mkdirSync(join(temp.dir, 'legacy-project')); state.bind('a', 101, join(temp.dir, 'legacy-project'), 'Legacy');
+    await new Outbox(state, t, { ownerId: 42, roots: [temp.dir] }, 0).flushOne();
     assert.equal(t.sent()[0]!.text, '» legacy-project\n\nLegacy answer');
+  } finally { state.close(); temp.close(); }
+});
+
+test('legacy topicless warnings recover their originating session for ignore checks', async () => {
+  const temp = temporary();
+  const db = new DatabaseSync(join(temp.dir, 'state.sqlite'));
+  db.exec(`CREATE TABLE outbox(id INTEGER PRIMARY KEY,key TEXT UNIQUE,topicId INTEGER,text TEXT,markup TEXT,status TEXT DEFAULT 'pending',messageId INTEGER,at INTEGER,projectCwd TEXT);
+    CREATE TABLE bindings(threadId TEXT PRIMARY KEY,topicId INTEGER UNIQUE,cwd TEXT,title TEXT,lastTurn TEXT);
+    CREATE TABLE topic_operations(threadId TEXT PRIMARY KEY,cwd TEXT,title TEXT,attempt TEXT,status TEXT,retryAt INTEGER);`);
+  db.prepare('INSERT INTO bindings VALUES(?,?,?,?,NULL)').run('ignored', 101, temp.dir, 'Project');
+  db.prepare('INSERT INTO topic_operations VALUES(?,?,?,?,?,0)').run('ignored', temp.dir, 'Project', 'old-attempt', 'failed');
+  for (const key of ['topic-problem/old-attempt', 'topic-problem/obsolete-attempt', 'session-unavailable/old-generation/ignored', 'session-unavailable/old-generation/gone', 'notice/general']) {
+    db.prepare('INSERT INTO outbox(key,text,at,projectCwd) VALUES(?,?,?,?)').run(key, key, Date.now(), temp.dir);
+  }
+  db.prepare("INSERT INTO outbox(key,text,at,status,projectCwd) VALUES(?,?,?,'uncertain',?)").run('topic-problem/ambiguous', 'Uncertain prior warning', Date.now(), temp.dir);
+  db.close();
+  const state = new State(temp.dir); const telegram = new FakeTelegram();
+  try {
+    const sender = new Outbox(state, telegram, { ownerId: 42, roots: [temp.dir], ignoredThreadIds: ['ignored'] }, 0);
+    while (await sender.flushOne()) { /* Upgrade handles pre-existing messages, too. */ }
+    assert.deepEqual(telegram.sent().map(messageBody), ['notice/general']);
+    assert.equal(state.uncertainCount(), 1, 'Migration must not reinterpret uncertain outcomes.');
   } finally { state.close(); temp.close(); }
 });

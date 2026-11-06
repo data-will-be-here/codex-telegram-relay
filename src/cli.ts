@@ -9,7 +9,8 @@ import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
 import { Drafts } from './drafts.js';
 import { syncCommandMenu } from './commands.js';
-import { configExists, dataDirectory, findCodex, loadConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
+import { configExists, dataDirectory, findCodex, loadConfig, readConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
+import { Files, type FileRequest } from './files.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
 import { withProjectHeader } from './format.js';
@@ -141,16 +142,29 @@ async function start(args: string[]): Promise<void> {
   const override = binaryFlag(args);
   const { config, token, binaryChanged } = loadConfig(home, { recoverBinary: true, ...(override ? { codexBinary: override } : {}) });
   const telegram = new TelegramClient(token);
-  await verifyBot(telegram);
+  for (;;) {
+    try { await verifyBot(telegram); break; }
+    catch (error) {
+      if (!(error instanceof TelegramError) || !(error.status === 0 || error.status === 429 || error.status >= 500)) throw error;
+      const seconds = error.status === 429 ? Math.max(3, error.retryAfter ?? 0) : 3;
+      console.error(`Telegram startup check unavailable (${error.status || 'connection'}); retrying in ${seconds} seconds. Ctrl+C stops the relay.`);
+      await delay(seconds * 1000);
+    }
+  }
   const { State } = await import('./state.js');
   const state = new State(home);
-  const outbox = new Outbox(state, telegram, config.ownerId, 1100, config.ignoredThreadIds);
+  const outbox = new Outbox(state, telegram, config, 1100);
   const drafts = new Drafts(telegram, config.ownerId);
+  const files = new Files(home);
+  files.startWorker(config.ownerId);
+  const uploadStop = new AbortController();
   let liveBridge: Bridge | undefined;
   let stopping = false;
   let current: CodexClient | undefined;
   let saveRecoveredBinary = binaryChanged;
-  const stop = (): void => { stopping = true; current?.close(); };
+  let pollFailures = 0;
+  let nextPollAt = 0;
+  const stop = (): void => { stopping = true; uploadStop.abort(); current?.close(); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   const output = async (): Promise<void> => {
     while (!stopping) {
@@ -158,6 +172,7 @@ async function start(args: string[]): Promise<void> {
         // Order settled preview calls before permanent answers; remote timeout outcomes remain uncertain.
         // Saved answers and controls always take priority over ephemeral previews.
         if (await outbox.flushOne()) continue;
+        if (await liveBridge?.flushApproval()) continue;
         if (await liveBridge?.flushDraft()) continue;
         await delay(100);
       }
@@ -165,6 +180,15 @@ async function start(args: string[]): Promise<void> {
     }
   };
   const sender = output();
+  const uploads = (async (): Promise<void> => {
+    while (!stopping) {
+      try {
+        const bridge = liveBridge;
+        if (bridge && await files.flushOne(telegram, binding => bridge.allowsFile(binding), uploadStop.signal)) continue;
+      } catch { console.error('File queue check failed; ordinary messaging is unaffected.'); }
+      await delay(250);
+    }
+  })();
   // Optional UI settings must not hold up native attachment or Telegram update handling.
   const menu = commandMenu(telegram, config.ownerId);
   try {
@@ -172,13 +196,22 @@ async function start(args: string[]): Promise<void> {
       const codex = new CodexClient(); current = codex;
       let connected = true;
       let pendingEvents = Promise.resolve();
+      let discovery = Promise.resolve();
+      let discovering = false;
       let eventCount = 0;
       try {
         const bridge = new Bridge(config, state, codex, telegram, drafts);
-        liveBridge = bridge;
         const unavailable = new Set<string>();
         codex.on('sessionUnavailable', (id: string) => {
           if (!unavailable.has(id)) { unavailable.add(id); console.error(`Skipping unavailable Codex session ${id.slice(0, 8)}; other sessions remain connected.`); }
+        });
+        let warnedLimit = false;
+        codex.on('discoveryLimit', (limit: number) => {
+          if (warnedLimit) return;
+          warnedLimit = true;
+          const warning = `Discovery reached the limit of ${limit} eligible interactive sessions. Some sessions are not connected. Ignore unused sessions or select fewer projects locally, then restart the relay. Subagents do not count toward this limit.`;
+          console.error(warning);
+          state.enqueue(`attention/discovery-limit/${limit}`, null, warning);
         });
         codex.on('disconnected', () => { connected = false; });
         // Serialize control events so completed native requests invalidate buttons in order.
@@ -200,11 +233,32 @@ async function start(args: string[]): Promise<void> {
           console.log('Codex executable path updated after a successful shared-daemon check. Bot pairing and topic bindings are preserved.');
         }
         await bridge.discover();
+        liveBridge = bridge;
         console.log(`Relay connected. Discovery: ${config.sessionScope === 'all' ? 'automatic, all interactive sessions' : 'selected projects'}. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.`);
         let lastDiscovery = Date.now();
         while (!stopping && connected) {
-          if (Date.now() - lastDiscovery > 5000) { await bridge.discover(); state.prune(); lastDiscovery = Date.now(); }
-          const updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
+          if (!discovering && Date.now() - lastDiscovery > 5000) {
+            discovering = true; lastDiscovery = Date.now();
+            // Incoming replies/buttons keep moving while metadata and journals are scanned.
+            discovery = bridge.discover().then(() => { state.prune(); }).catch(error => {
+              console.error(string(object(error).message) || 'Discovery failed; reconnecting.');
+              connected = false; codex.close();
+            }).finally(() => { discovering = false; });
+          }
+          if (Date.now() < nextPollAt) { await delay(250); continue; }
+          let updates: unknown[];
+          try {
+            updates = array(await telegram.call('getUpdates', { offset: state.offset(), timeout: 3, allowed_updates: ['message', 'callback_query'] }));
+            if (pollFailures) console.log('Telegram polling recovered.');
+            pollFailures = 0;
+          } catch (error) {
+            if (!(error instanceof TelegramError) || !(error.status === 0 || error.status === 429 || error.status >= 500)) throw error;
+            pollFailures = Math.min(pollFailures + 1, 6);
+            const seconds = error.status === 429 ? Math.max(error.retryAfter ?? 2, 1) : Math.min(2 ** (pollFailures - 1), 30);
+            nextPollAt = Date.now() + seconds * 1000;
+            if (pollFailures === 1) console.error(`Telegram polling unavailable (${error.status || 'connection'}); retrying without restarting Codex.`);
+            continue;
+          }
           for (const raw of updates) {
             if (stopping || !connected) break;
             try { await bridge.update(object(raw)); }
@@ -213,14 +267,43 @@ async function start(args: string[]): Promise<void> {
         }
       } catch (error) {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
+        if (error instanceof TelegramError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
         console.error(string(object(error).message) || 'Relay connection failed.');
-      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await pendingEvents; }
+      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {
-    stopping = true; current?.close(); await sender; await menu; state.close();
+    stopping = true; uploadStop.abort(); current?.close(); await uploads; files.close(); await sender; await menu; state.close();
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
+}
+
+async function sendFile(args: string[]): Promise<void> {
+  const request: FileRequest = { path: args[1] ?? '' };
+  if (!request.path || request.path.startsWith('--')) throw new Error('Usage: send-file PATH [--session ID] [--as auto|video|document] [--caption TEXT] [--request-id ID] [--no-wait]');
+  let wait = true;
+  for (let i = 2; i < args.length; i++) {
+    const flag = args[i];
+    if (flag === '--no-wait') { wait = false; continue; }
+    const value = args[++i];
+    if (!value || value.startsWith('--')) throw new Error(`Missing value for ${flag}.`);
+    if (flag === '--session') request.session = value;
+    else if (flag === '--caption') request.caption = value;
+    else if (flag === '--request-id') request.requestId = value;
+    else if (flag === '--as' && ['auto', 'video', 'document'].includes(value)) request.as = value as 'auto' | 'video' | 'document';
+    else throw new Error(`Unknown file option: ${flag}.`);
+  }
+  const files = new Files(dataDirectory());
+  try {
+    let result = files.enqueue(request);
+    const deadline = Date.now() + 180_000;
+    while (wait && ['preparing', 'pending', 'sending'].includes(result.status) && Date.now() < deadline) {
+      await delay(250); result = files.status(result.id);
+    }
+    console.log(JSON.stringify(result));
+    if (result.status === 'rejected' || result.status === 'uncertain') process.exitCode = 1;
+    else if (wait && result.status !== 'sent') process.exitCode = 2;
+  } finally { files.close(); }
 }
 
 async function main(): Promise<void> {
@@ -229,6 +312,20 @@ async function main(): Promise<void> {
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);
+  if (command === 'send-file') return sendFile(args);
+  if (command === 'files') {
+    const home = dataDirectory();
+    if (args[1] === 'status' && args[2] && !args[3]) {
+      const files = new Files(home);
+      try { console.log(JSON.stringify(files.status(args[2]))); } finally { files.close(); }
+      return;
+    }
+    if (args.length > 2 || (args[1] && !['enable', 'disable'].includes(args[1]))) throw new Error('Use files [enable|disable] or files status REQUEST_ID.');
+    const config = readConfig(home);
+    if (args[1]) { config.outgoingFiles = args[1] === 'enable'; saveConfig(home, config); }
+    console.log(`File export: ${config.outgoingFiles === true ? 'enabled' : 'disabled'}. Local setting; only this installation\u2019s paired owner can receive exports. Requires the updated relay to be running.`);
+    return;
+  }
   if (command === 'sessions' && args[1] === 'scope') {
     const mode = args[2];
     if (args[3] || (mode !== undefined && mode !== 'all' && mode !== 'selected')) throw new Error('Use sessions scope all or sessions scope selected.');
@@ -267,6 +364,7 @@ async function main(): Promise<void> {
   }
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
   console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+  console.log('\nFile export (local opt-in):\nfiles enable|disable   Allow or revoke outgoing files for this installation\nfiles                 Show export setting\nsend-file PATH        Send one project file to its session topic\n  --session ID        Exact ID or unique prefix (default: CODEX_THREAD_ID, then unique project)\n  --as document       Preserve any file as a document; auto sends MP4 as video\n  --caption TEXT      Optional literal caption\n  --request-id ID     Stable caller ID; reuse it for the same attempt\n  --no-wait           Return queued receipt immediately\nfiles status ID       Inspect durable result; uncertain uploads are never auto-replayed');
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

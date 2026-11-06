@@ -1,4 +1,20 @@
-import { string, type Json } from './types.js';
+import { createHash } from 'node:crypto';
+import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
+  return value;
+}
+
+/** A replay of one daemon request keeps its ID. Different requests or review context must not merge. */
+export function approvalIdentity(request: RpcRequest): string {
+  return createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex');
+}
+
+export function approvalCardIdentity(identity: string, binding: Binding, card: string): string {
+  return createHash('sha256').update(JSON.stringify([identity, binding.threadId, binding.topicId, binding.cwd, card])).digest('hex');
+}
 
 function literal(text: string): string {
   // Escaping URL/email markers also prevents GFM autolinks consuming later escapes.
@@ -18,9 +34,10 @@ function code(text: string): string {
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */
-export function approvalMessage(method: string, params: Json): string {
+export function approvalMessage(method: string, params: Json, agent?: AgentOrigin): string {
+  const origin = agent ? '**Agent**\n' + code(`${agent.name}\n${agent.threadId}`) + '\n\n' : '';
   if (method !== 'item/commandExecution/requestApproval' || !string(params.command)) {
-    return '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
+    return origin + '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
   }
   const sections = ['🔐 Command approval'];
   if (string(params.reason)) sections.push('**Reason**\n' + literal(string(params.reason)));
@@ -39,5 +56,5 @@ export function approvalMessage(method: string, params: Json): string {
   if (Object.keys(extra).length) sections.push('**Additional context**\n' + code(JSON.stringify(extra, null, 2)));
   // Keep a prose tail so the Markdown renderer cannot trim whitespace belonging to the command block.
   sections.push('Choose a decision below.');
-  return sections.join('\n\n');
+  return origin + sections.join('\n\n');
 }

@@ -25,7 +25,8 @@ test('automatic discovery picks up a later session in a new project and routes i
     assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'new-session', text: 'Continue in the new project' } }]);
     await automatic.notification('item/completed', { threadId: 'new-session', turnId: 'turn', item: { id: 'reply', type: 'agentMessage', phase: 'commentary', text: 'Working in the new project' } });
     await automatic.notification('item/completed', { threadId: 'ignored-session', turnId: 'turn', item: { id: 'ignored-reply', type: 'agentMessage', phase: 'commentary', text: 'Do not relay this' } });
-    await f.drain();
+    const sender = new Outbox(f.state, f.telegram, config, 0);
+    while (await sender.flushOne()) { /* Discovery and delivery share the current installation policy. */ }
     assert.deepEqual(f.telegram.sent().map(messageBody), ['Working in the new project']);
     assert.equal(f.telegram.sent()[0]!.message_thread_id, topic);
     await automatic.discover();
@@ -637,7 +638,7 @@ test('ignored sessions preserve their topics but never attach, receive input or 
     await bridge.update(message(2, 102, 'Still forward B'));
     await bridge.notification('item/completed', { threadId: 'thread-b', turnId: 'active-b', item: { type: 'agentMessage', phase: 'commentary', text: 'Working on B' } });
     assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-b', text: 'Still forward B' } }]);
-    const outbox = new Outbox(f.state, f.telegram, 42, 0, config.ignoredThreadIds);
+    const outbox = new Outbox(f.state, f.telegram, config, 0);
     while (await outbox.flushOne()) { /* Cancel ignored deliveries; send other topics. */ }
     assert.ok(f.telegram.sent().every(s => s.message_thread_id !== 101));
     assert.ok(f.telegram.sent().some(s => s.message_thread_id === 102));
@@ -677,7 +678,7 @@ test('a missing Telegram topic is recreated and its undelivered answer moves to 
       if (method === 'sendMessage' && params.message_thread_id === 101) throw new TelegramError('Bad Request: message thread not found', 400);
       return call(method, params);
     };
-    const outbox = new Outbox(f.state, f.telegram, 42, 0);
+    const outbox = new Outbox(f.state, f.telegram, f.bridge.config, 0);
     try { await outbox.flushOne(); } catch { /* Old behaviour marks it uncertain and never repairs. */ }
     await f.bridge.discover(); await f.drain();
     assert.equal(f.state.binding('thread-a')?.topicId, 103);
@@ -717,7 +718,7 @@ test('ambiguous replacement pauses output until binding; other topics continue a
       if (method === 'createForumTopic' && loseResponse) { loseResponse = false; throw new TelegramError('Replacement response lost', 0); }
       return result;
     };
-    const outbox = new Outbox(f.state, f.telegram, 42, 0);
+    const outbox = new Outbox(f.state, f.telegram, f.bridge.config, 0);
     await outbox.flushOne();
     await f.bridge.discover(); await f.bridge.discover();
     f.state.enqueue('assistant/a/new', 101, 'New A');
