@@ -41,7 +41,12 @@ async function nativeFixture() {
       source: { subAgent: { thread_spawn: { parent_thread_id: 'root-session', agent_path: '/root/performance', agent_nickname: 'Euclid' } } } },
   ];
   const close = (): void => { codex.close(); state.close(); temp.close(); };
-  const settle = async (): Promise<void> => { await new Promise<void>(done => setImmediate(done)); await events; };
+  const settle = async (): Promise<void> => {
+    // Round-trip the peer before awaiting handlers: resume replies and request replay
+    // may arrive in separate WebSocket batches, beyond a single setImmediate.
+    await codex.call('test/records', {});
+    await events;
+  };
   try {
     await codex.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
     await codex.call('test/discovery', { threads });
@@ -151,6 +156,8 @@ test('recovering the parent topic replays its pending child approval into the re
     await f.publish(approval()); await f.drain();
     const previous = f.state.binding('root-session')!;
     const first = f.telegram.sent().find(s => messageBody(s).includes('synthetic-child-approval'))!;
+    // A resume response can arrive before its replayed requests, in a later transport batch.
+    await f.codex.call('test/deferReplay', {});
     f.state.missingTopic(previous);
     await f.bridge.discover(); await f.drain();
     const replacement = f.state.binding('root-session')!;
