@@ -204,7 +204,7 @@ test('assistant tables arrive as native rich tables in their saved topic with a 
     const message = object(call.params.rich_message);
     assert.equal(message.skip_entity_detection, true);
     const blocks = array(message.blocks).map(object);
-    assert.deepEqual(blocks[0], { type: 'paragraph', text: { type: 'italic', text: '» project-a' } });
+    assert.deepEqual(blocks[0], { type: 'paragraph', text: { type: 'italic', text: '» project-a • thread-a' } });
     assert.ok(blocks.some(b => b.type === 'heading' && b.text === 'Suggestions'));
     assert.ok(blocks.some(b => b.text === 'Before the table.'));
     assert.ok(blocks.some(b => b.text === 'After the table.'));

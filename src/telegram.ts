@@ -119,17 +119,17 @@ export class Outbox {
     try {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
-      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project) : undefined;
+      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName) : undefined;
       if (delivery.richPlan || rich) {
         this.state.delivered(delivery.id, await this.richDelivery(delivery, rich, project));
         return true;
       }
-      const limit = 3500 - projectHeader(project).length - 2;
+      const limit = 3500 - projectHeader(project, delivery.sessionName).length - 2;
       const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:(?:final|reply|assistant)\/|prompt\/approval\/)/u.test(delivery.key), limit);
       let messageId: number | null = null;
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;
-        const { text, entities } = withProjectHeader(chunk, project);
+        const { text, entities } = withProjectHeader(chunk, project, delivery.sessionName);
         const params: Json = { chat_id: this.config.ownerId, text };
         if (!chunk.plain && entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
@@ -198,9 +198,9 @@ export class Outbox {
         const rejectedRich = error instanceof TelegramError && [400, 404].includes(error.status) &&
           /can't parse|\bunknown method\b|\bmethod (?:is )?not found\b|\brich[ _]message.*(?:invalid|unsupported|not supported|too|limit)|\b(?:table|block).*(?:invalid|too|limit)|\bmessage is too long\b/iu.test(error.message);
         if (part.method !== 'sendRichMessage' || part.fallback === undefined || !rejectedRich || isMissingTopic(error)) throw error;
-        const limit = 3500 - projectHeader(project).length - 2;
+        const limit = 3500 - projectHeader(project, delivery.sessionName).length - 2;
         parts.splice(index, 1, ...formatMessages(part.fallback, false, limit).map(chunk => {
-          const formatted = withProjectHeader(chunk, project);
+          const formatted = withProjectHeader(chunk, project, delivery.sessionName);
           return { method: 'sendMessage' as const, params: { ...formatted, link_preview_options: { is_disabled: true } } };
         }));
         this.state.saveRichPlan(delivery.id, parts);

@@ -7,10 +7,9 @@ const commands = [
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed', ru: 'Выбрать модель, уровень рассуждений и скорость сессии' },
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies', ru: 'Все сообщения ассистента или компактный режим' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews', ru: 'Включить или отключить потоковые ответы' },
-  { command: 'questions', args: '', en: 'Show pending questions in this topic', ru: 'Показать ожидающие ответа вопросы в топике' },
-  { command: 'say', args: 'TEXT', en: 'Send an instruction while a question is pending', ru: 'Отправить инструкцию, пока ожидается ответ на вопрос' },
-  { command: 'bind', args: 'SESSION_ID', en: 'Bind this topic to a session: /bind SESSION_ID', ru: 'Привязать этот топик к сессии: /bind SESSION_ID' },
-  { command: 'repair', args: 'SESSION_ID', en: 'Retry topic creation: /repair SESSION_ID', ru: 'Повторить создание топика: /repair SESSION_ID' },
+  { command: 'questions', args: '', en: 'Show pending questions with answer buttons', ru: 'Показать ожидающие вопросы с кнопками ответа' },
+  { command: 'bind', args: 'SESSION_ID', en: 'Bind this topic to a session: /bind SESSION_ID', ru: 'Привязать этот топик к сессии: /bind SESSION_ID', advanced: true },
+  { command: 'repair', args: 'SESSION_ID', en: 'Retry topic creation: /repair SESSION_ID', ru: 'Повторить создание топика: /repair SESSION_ID', advanced: true },
 ] as const;
 
 export function commandHelp(): string {
@@ -24,7 +23,7 @@ export async function syncCommandMenu(telegram: Telegram, ownerId: number): Prom
   let synced = true;
   for (const language of ['', 'ru'] as const) {
     const scope = { type: 'chat', chat_id: ownerId };
-    const desired = commands.map(c => ({ command: c.command, description: language === 'ru' ? c.ru : c.en }));
+    const desired = commands.filter(c => !('advanced' in c && c.advanced)).map(c => ({ command: c.command, description: language === 'ru' ? c.ru : c.en }));
     try {
       const current = array(await telegram.call('getMyCommands', { scope, language_code: language })).map(object);
       if (current.length === desired.length && current.every((c, i) => c.command === desired[i]!.command &&

@@ -76,7 +76,7 @@ export class Drafts {
       const revision = draft.revision;
       const source = (draft.truncated ? '… Live preview: latest part\n\n' : '') + draft.text;
       const params: Json = { chat_id: this.ownerId, message_thread_id: draft.binding.topicId, draft_id: draft.id };
-      const rich = this.richSupported && !draft.plain ? richMessages(source, draft.binding.cwd, true) : undefined;
+      const rich = this.richSupported && !draft.plain ? richMessages(source, draft.binding.cwd, true, draft.binding.sessionName) : undefined;
       let method: string;
       if (rich?.length) {
         // A draft has only one message. Preview its latest part; the durable final retains every part.
@@ -85,7 +85,7 @@ export class Drafts {
       } else {
         method = 'sendMessageDraft';
         const chunk = formatMessages(source, true, 3500).at(-1)!;
-        Object.assign(params, withProjectHeader(chunk, draft.binding.cwd));
+        Object.assign(params, withProjectHeader(chunk, draft.binding.cwd, draft.binding.sessionName));
       }
       // One budget for all topics, preserved across reconnects. No sleeps in the control-event path.
       this.nextSendAt = this.now() + 1000;

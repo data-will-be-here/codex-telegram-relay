@@ -18,6 +18,7 @@ export interface Session {
 }
 
 export interface Binding {
+  sessionName?: string | null;
   threadId: string;
   topicId: number;
   cwd: string;

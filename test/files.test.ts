@@ -48,6 +48,17 @@ test('export producer runs in another process alongside singleton State, without
   } finally { f.close(); }
 });
 
+test('export captions keep the task name saved when the file was queued', async () => {
+  const f = await setup();
+  try {
+    f.codex.sessions[0]!.name = 'File task'; await f.bridge.discover();
+    f.files.enqueue({ path: f.path, session: 'thread-a' }, f.projectA, '');
+    f.codex.sessions[0]!.name = 'Renamed task'; await f.bridge.discover();
+    await f.flush();
+    assert.match(String(f.calls[0]!.params.caption), /^» project-a • File task\n\n/u);
+  } finally { f.close(); }
+});
+
 test('exports default off and local preferences need no credential or Codex executable', async () => {
   const f = await setup();
   try {

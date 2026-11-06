@@ -10,6 +10,7 @@ const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (ke
 
 export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage'; params: Json; fallback?: string; }
 export interface Delivery {
+  sessionName?: string | null;
   id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null;
   sourceThreadId: string | null;
   ownerNotice: boolean;
@@ -67,6 +68,8 @@ export class State {
         UPDATE outbox SET status='held' WHERE status='pending' AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending');
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
+      if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE bindings ADD COLUMN sessionName TEXT');
+      if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE outbox ADD COLUMN sessionName TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sourceThreadId')) {
@@ -168,6 +171,10 @@ export class State {
     this.db.prepare('DELETE FROM settings WHERE key=?').run('titleRetry/' + threadId);
   }
   sessionDirectory(threadId: string, cwd: string): void { this.db.prepare('UPDATE bindings SET cwd=? WHERE threadId=? AND cwd!=?').run(cwd, threadId, cwd); }
+  sessionName(threadId: string, name: string): void {
+    const label = Array.from(name.replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim()).slice(0, 80).join('') || threadId.slice(0, 8);
+    this.db.prepare('UPDATE bindings SET sessionName=? WHERE threadId=?').run(label, threadId);
+  }
   messageMode(): MessageMode { return this.db.prepare("SELECT value FROM settings WHERE key='messageMode'").get()?.value === 'compact' ? 'compact' : 'all'; }
   setMessageMode(mode: MessageMode): void {
     if (mode !== 'all' && mode !== 'compact') throw new Error('Invalid message mode.');
@@ -209,7 +216,8 @@ export class State {
     const blocked = binding && this.topicOperation(binding.threadId);
     // Final answers are durable before queue admission and remain outside the active-work cap.
     const status = blocked ? key.startsWith('prompt/') ? 'cancelled' : 'blocked' : durable ? 'deferred' : 'pending';
-    this.db.prepare('INSERT OR IGNORE INTO outbox(key,topicId,text,markup,at,status,projectCwd,sourceThreadId) VALUES(?,?,?,?,?,?,?,?)').run(key, topicId, text, markup === null ? null : JSON.stringify(markup), Date.now(), status, projectCwd ?? binding?.cwd ?? null, sourceThreadId ?? binding?.threadId ?? null);
+    const sessionName = binding?.sessionName ?? (sourceThreadId ? this.binding(sourceThreadId)?.sessionName : null) ?? null;
+    this.db.prepare('INSERT OR IGNORE INTO outbox(key,topicId,text,markup,at,status,projectCwd,sourceThreadId,sessionName) VALUES(?,?,?,?,?,?,?,?,?)').run(key, topicId, text, markup === null ? null : JSON.stringify(markup), Date.now(), status, projectCwd ?? binding?.cwd ?? null, sourceThreadId ?? binding?.threadId ?? null, sessionName);
   }
   approvalCard(cardIdentity: string, identity: string, threadId: string, turnId: string, requestId: string | number, ownerToken: string): ApprovalCard {
     this.db.prepare("INSERT OR IGNORE INTO approval_requests VALUES(?,?,?,?,'pending',?)")
@@ -260,6 +268,7 @@ export class State {
       id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text),
       markup: row.markup === null ? null : object(JSON.parse(string(row.markup))), projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null,
       sourceThreadId: typeof row.sourceThreadId === 'string' ? row.sourceThreadId : null,
+      sessionName: typeof row.sessionName === 'string' ? row.sessionName : null,
       ownerNotice: row.ownerNotice === 1,
       richPlan: typeof row.richPlan === 'string' ? JSON.parse(row.richPlan) as RichDeliveryPart[] : null,
       nextPart: Number(row.nextPart), messageId: row.messageId === null ? null : Number(row.messageId),
