@@ -31,7 +31,7 @@ Setup displays this trust model without adding an acknowledgement gate. This gui
 - Bot tokens stay outside the repository, are not passed on the command line, are stripped from Telegram error text, and Telegram-token environment variables are removed from native child processes.
 - Configuration uses owner-only POSIX modes; setup and start replace Windows access rules on the private directory, known state/credential files and downloaded attachments with verified current-user grants, removing broad explicit grants too. Local administrators can still access local data. Encrypted storage is not provided.
 
-## Outgoing files (development version)
+## Outgoing files (v0.1.17)
 
 File export is off by default and requires one local `files enable` per installation. There is no Telegram command to enable it and no extra per-file relay approval after enabling. `files disable` revokes pending/new exports, but cannot recall bytes already sent or an upload in flight. A shell-capable agent running as the same OS account can modify local preferences; local opt-in is an installation control, not an independent security sandbox.
 

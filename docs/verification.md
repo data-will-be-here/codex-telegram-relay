@@ -1,5 +1,9 @@
 # Verification record
 
+## v0.1.17 release candidate (2026-11-06)
+
+The release includes the session model picker, opt-in outgoing files, durable final delivery, attachment/readiness fixes, subagent approvals and approval/startup recovery corrections described below. English/Russian READMEs and installation tags now identify v0.1.17. Package and native client metadata agree on the version. The exact candidate passed 223 local tests (221 passed, two platform skips), type checking, build, runtime audit (zero findings) and the package allowlist. Cross-platform Node 22/24 CI is required on the release PR before promotion; live Telegram model selection and other outstanding acceptance limits remain as recorded below.
+
 ## Development: session model picker (2026-11-06)
 
 `/model` now loads the native catalog on each command, lists models in its first screen and complete reasoning/speed combinations in its second. A combination applies immediately; there are no Refresh/Apply buttons. Initial RED tests reproduced the absent command and second screen. Additional RED-to-GREEN checks removed an unsafe guess from legacy speed names to native tier IDs, and restored a visible explanation when eligibility changes during catalog loading.
