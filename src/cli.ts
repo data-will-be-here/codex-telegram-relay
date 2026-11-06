@@ -222,7 +222,7 @@ async function start(args: string[]): Promise<void> {
         };
         codex.on('notification', (method: string, params: Json) => {
           bridge.streamEvent(method, params);
-          if (['item/completed', 'turn/completed', 'serverRequest/resolved'].includes(method) || (method === 'item/started' && object(params.item).type === 'fileChange')) schedule(() => bridge.notification(method, params));
+          if (['item/completed', 'turn/completed', 'serverRequest/resolved', 'thread/name/updated'].includes(method) || (method === 'item/started' && object(params.item).type === 'fileChange')) schedule(() => bridge.notification(method, params));
         });
         codex.on('request', request => schedule(() => bridge.request(request)));
         await codex.connect(config.codexBinary);

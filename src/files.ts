@@ -89,6 +89,11 @@ export class Files {
         kind TEXT NOT NULL,caption TEXT NOT NULL,status TEXT NOT NULL,at INTEGER NOT NULL,retryAt INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,messageId INTEGER,error TEXT);
       CREATE INDEX IF NOT EXISTS file_jobs_pending ON file_jobs(status,retryAt,at);`);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!this.db.prepare('PRAGMA table_info(file_jobs)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE file_jobs ADD COLUMN sessionName TEXT');
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   /** Only the singleton relay calls this after acquiring State's process lock. */
   startWorker(ownerId: number): void {
@@ -159,8 +164,8 @@ export class Files {
       const quota = this.db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(size),0) AS bytes FROM file_jobs WHERE status IN ${ACTIVE}`).get()!;
       if (Number(quota.count) >= 16 || Number(quota.bytes) + bytes.length > CACHE_BYTES) throw new Error('File queue is full. Wait for pending uploads.');
       if (Number(this.db.prepare('SELECT COUNT(*) AS count FROM file_jobs').get()!.count) >= 10_000) throw new Error('File receipt capacity reached. Inspect the local queue.');
-      this.db.prepare(`INSERT INTO file_jobs(id,fingerprint,ownerId,threadId,topicId,cwd,title,lastTurn,name,hash,size,kind,caption,status,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'preparing',?)`)
-        .run(id, fingerprint, config.ownerId, binding.threadId, binding.topicId, binding.cwd, binding.title, binding.lastTurn, name, hash, bytes.length, kind, caption, Date.now());
+      this.db.prepare(`INSERT INTO file_jobs(id,fingerprint,ownerId,threadId,topicId,cwd,title,lastTurn,name,hash,size,kind,caption,status,at,sessionName) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'preparing',?,?)`)
+        .run(id, fingerprint, config.ownerId, binding.threadId, binding.topicId, binding.cwd, binding.title, binding.lastTurn, name, hash, bytes.length, kind, caption, Date.now(), binding.sessionName ?? null);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     try {
@@ -203,7 +208,7 @@ export class Files {
       }
       const changed = this.db.prepare("UPDATE file_jobs SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'").run(job.id).changes;
       if (!changed) return false;
-      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd);
+      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd, job.sessionName);
       try {
         const result = object(await telegram.upload!(job.kind === 'video' ? 'sendVideo' : 'sendDocument', {
           chat_id: job.ownerId, message_thread_id: job.topicId, caption: formatted.text, caption_entities: formatted.entities,

@@ -24,7 +24,7 @@ test('command menus use only the owner chat, with valid English fallback and Rus
   assert.equal(sets.length, 2);
   assert.deepEqual(sets.map(c => c.params.language_code), ['', 'ru']);
   for (const call of telegram.calls) assert.deepEqual(call.params.scope, { type: 'chat', chat_id: ownerId });
-  const expected = ['help', 'status', 'sessions', 'model', 'mode', 'stream', 'questions', 'say', 'bind', 'repair'];
+  const expected = ['help', 'status', 'sessions', 'model', 'mode', 'stream', 'questions'];
   for (const set of sets) {
     const items = array(set.params.commands).map(object);
     assert.deepEqual(items.map(c => c.command), expected);
@@ -103,7 +103,7 @@ test('each command advertised in the menu is handled when tapped without argumen
     assert.equal(f.codex.writes.length, 0);
     assert.ok(f.telegram.sent().length >= items.length);
     assert.ok(!f.telegram.sent().some(c => string(c.text).includes('Unknown command')));
-    assert.ok(f.telegram.sent().some(c => string(c.text).includes('Use /say TEXT')));
+    assert.ok(!commandHelp().includes('/say'));
     assert.ok(f.telegram.sent().some(c => string(c.text).includes(commandHelp())));
   } finally { f.close(); }
 });

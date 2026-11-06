@@ -10,14 +10,16 @@ export interface Entity {
 }
 export interface FormattedText { text: string; entities: Entity[]; }
 
-export function projectHeader(cwd?: string | null): string {
+export function projectHeader(cwd?: string | null, sessionName?: string | null): string {
   const name = (cwd?.split(/[\\/]/u).filter(Boolean).at(-1) || 'codex-telegram-relay').replace(/[\x00-\x1f\x7f]/gu, ' ');
   const chars = Array.from(name);
-  return '» ' + (chars.length > 80 ? chars.slice(0, 79).join('') + '…' : name);
+  const task = Array.from((sessionName ?? '').replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim());
+  return '» ' + (chars.length > 80 ? chars.slice(0, 79).join('') + '…' : name) +
+    (task.length ? ' • ' + (task.length > 80 ? task.slice(0, 79).join('') + '…' : task.join('')) : '');
 }
 
-export function withProjectHeader(message: FormattedText, cwd?: string | null): FormattedText {
-  const header = projectHeader(cwd); const prefix = header + '\n\n';
+export function withProjectHeader(message: FormattedText, cwd?: string | null, sessionName?: string | null): FormattedText {
+  const header = projectHeader(cwd, sessionName); const prefix = header + '\n\n';
   return { text: prefix + message.text, entities: [
     { type: 'italic', offset: 0, length: header.length },
     ...message.entities.slice(0, 99).map(e => ({ ...e, offset: e.offset + prefix.length })),

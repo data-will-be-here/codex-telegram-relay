@@ -1,5 +1,19 @@
 # Verification record
 
+## v0.1.18 release candidate (2026-11-06)
+
+This candidate promotes task-aware signatures, the simpler command menu and contextual recovery. Both READMEs target v0.1.18 and contain no references to the removed instruction command. Package/lock/native metadata agree on 0.1.18. The exact candidate passed 234 local tests (232 passed, two platform skips), type checking, build, runtime audit (zero findings) and package allowlist. Required cross-platform CI must pass in the release PR before promotion; existing live acceptance limitations remain below.
+
+## Development: task labels and simpler commands (2026-11-06)
+
+`/say` is removed from parsing, help and registration, with no replacement instruction button or mode. Ordinary text retains the existing question-answer behavior. `/questions` republishes actionable choice/free-text cards, including a liveness check after asynchronous reads; a regression first reproduced a resolved question returning as a dead card and now verifies that no copy is posted.
+
+Native session names appear in ordinary/rich output, multipart fallback, live previews, model controls and file captions, with the short thread ID as an unnamed-session fallback. Nullable binding/outbox/file-job columns preserve labels at queue time and across SQLite reopen; legacy records keep their original project-only form. The official App Server thread/name contract and local Codex 0.166.0 notification schema were checked. A delayed discovery regression reproduced overwriting a newer rename; event revisions now preserve the newer label. File schema migration is serialized for concurrent producers.
+
+Recovery commands remain available manually/in help but are hidden from the main bot menu. Attempt-scoped buttons can select a session for `/bind` without an ID in the destination topic, or explicitly retry creation. Selection expires after ten minutes and does not survive reconnection. Loaded-session scope/readiness and the current attempt are checked again at the final bind step. Regression tests first reproduced binding an unloaded/moved session after an earlier valid click; those paths now reject the binding. Repeat clicks after creation cannot reuse the old attempt.
+
+Windows validation: **234 tests, 232 passed, two platform skips, zero failures**. Build, type checking, runtime dependency audit (zero findings), package allowlist and `git diff --check` passed. Both review findings and the additional eligibility finding were reproduced, corrected and re-reviewed. All tests use synthetic Telegram/native adapters; no real question, approval or topic-recovery action was generated. The existing relay needs a restart to load these development changes and synchronize its command menu.
+
 ## v0.1.17 release candidate (2026-11-06)
 
 The release includes the session model picker, opt-in outgoing files, durable final delivery, attachment/readiness fixes, subagent approvals and approval/startup recovery corrections described below. English/Russian READMEs and installation tags now identify v0.1.17. Package and native client metadata agree on the version. The exact candidate passed 223 local tests (221 passed, two platform skips), type checking, build, runtime audit (zero findings) and the package allowlist. Cross-platform Node 22/24 CI is required on the release PR before promotion; live Telegram model selection and other outstanding acceptance limits remain as recorded below.

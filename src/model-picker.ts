@@ -149,7 +149,7 @@ export class ModelPicker {
     const messageId = this.state.promptMessage(menu.key);
     if (!messageId) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: messageId,
-      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd), reply_markup: markup });
+      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, menu.binding.sessionName), reply_markup: markup });
   }
   private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/model/${randomUUID()}`, binding.topicId, text); }
   private retire(menu: Menu): void {

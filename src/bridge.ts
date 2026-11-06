@@ -48,6 +48,8 @@ export class Bridge {
   private startedAt = Date.now();
   private topics: Topics;
   private models: ModelPicker;
+  private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
+  private nameVersions = new Map<string, number>();
 
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
@@ -115,8 +117,10 @@ export class Bridge {
     if (this.discovering) return;
     this.discovering = true;
     try {
+      const nameVersions = new Map(this.nameVersions);
       const sessions = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && allowedSessionDirectory(session.cwd, this.config));
       const loaded = new Set(sessions.map(s => s.id));
+      for (const id of this.nameVersions.keys()) if (!loaded.has(id)) this.nameVersions.delete(id);
       for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
       for (const id of this.observedUnmaterialized) if (!loaded.has(id)) this.observedUnmaterialized.delete(id);
       for (const session of sessions) {
@@ -127,6 +131,8 @@ export class Bridge {
           const history = !this.attached.has(session.id) || this.state.topicOperation(session.id) ? await this.codex.turns(session.id) : undefined;
           let binding = await this.topics.ensure(session);
           if (!binding) { this.attached.delete(session.id); continue; }
+          if ((this.nameVersions.get(session.id) ?? 0) === (nameVersions.get(session.id) ?? 0)) this.state.sessionName(session.id, session.name);
+          binding = this.state.binding(session.id)!;
           if (this.attached.has(session.id) && previous?.topicId === binding.topicId) { await this.syncAsyncQuestions(binding); continue; }
           if (previous && previous.topicId !== binding.topicId) {
             await this.retireTopicPrompts(session.id);
@@ -202,6 +208,14 @@ export class Bridge {
   }
 
   async notification(method: string, params: Json): Promise<void> {
+    if (method === 'thread/name/updated') {
+      const threadId = string(params.threadId);
+      if (this.attached.has(threadId)) {
+        this.nameVersions.set(threadId, (this.nameVersions.get(threadId) ?? 0) + 1);
+        this.state.sessionName(threadId, string(params.threadName));
+      }
+      return;
+    }
     this.streamEvent(method, params);
     const threadId = string(params.threadId) || string(object(params.thread).id);
     if (method === 'serverRequest/resolved') {
@@ -415,6 +429,9 @@ export class Bridge {
     const topic = integer(message.message_thread_id) ?? null;
     if (!this.state.admit(id, topic)) { this.state.advance(id); return; }
     try {
+      if (Object.keys(callback).length && string(callback.data).startsWith('recover:')) {
+        await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
@@ -450,7 +467,17 @@ export class Bridge {
       this.notice(topicId, `Live previews for all sessions: ${this.state.streamingEnabled() ? 'on' : 'off'}.\n/stream on — show answers as they are generated, with rich formatting\n/stream off — deliver completed messages only\nComplete answers and tables are saved separately in both modes. Changes apply immediately; an existing preview may take up to 30 seconds to disappear.`); return;
     }
     if (/^\/(?:bind|repair)(?:\s|$)/u.test(text)) {
-      const [command, prefix, extra] = text.split(/\s+/u);
+      const [command, supplied, extra] = text.split(/\s+/u);
+      let prefix = supplied;
+      let selectedBind: typeof this.pendingBind;
+      if (command === '/bind' && !prefix && this.pendingBind) {
+        const pending = this.pendingBind;
+        if (pending.expires < Date.now() || this.state.topicOperation(pending.threadId)?.attempt !== pending.attempt) {
+          this.pendingBind = undefined; this.notice(topicId, 'Выбор для привязки устарел. Нажмите кнопку восстановления ещё раз.'); return;
+        }
+        prefix = pending.threadId;
+        selectedBind = pending;
+      }
       if (!prefix || extra || (command === '/bind' && topicId === null)) { this.notice(topicId, 'Use /bind SESSION_ID inside the existing topic, or /repair SESSION_ID to explicitly retry creation.'); return; }
       try {
         const session = this.topics.resolve(prefix);
@@ -465,8 +492,16 @@ export class Bridge {
           return;
         }
         await this.codex.turns(session.id); // Explicit recovery must respect the same first-message gate as discovery.
+        if (selectedBind) {
+          const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+          if (!live || live.cwd !== session.cwd || !allowedSessionDirectory(live.cwd, this.config) || this.config.ignoredThreadIds?.includes(session.id))
+            throw new Error('Сессия больше не доступна в выбранном проекте. Возобновите её в Codex и повторите восстановление.');
+          if (this.pendingBind !== selectedBind || selectedBind.expires < Date.now() || this.state.topicOperation(session.id)?.attempt !== selectedBind.attempt)
+            throw new Error('Выбор для привязки устарел. Нажмите кнопку восстановления ещё раз.');
+        }
         const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
         if (binding) {
+          if (this.pendingBind?.threadId === binding.threadId) this.pendingBind = undefined;
           this.attached.delete(binding.threadId);
           await this.retireTopicPrompts(binding.threadId);
           this.notice(topicId, `Topic bound to session ${binding.threadId.slice(0, 8)}. The relay will reconnect it automatically; no Codex instruction was sent.`);
@@ -481,9 +516,12 @@ export class Bridge {
       this.notice(topicId, `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
     }
     if (text === '/questions') {
-      const prompts = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length);
-      for (const p of prompts) this.showQuestion(p, true);
-      if (!prompts.length) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
+      let count = 0;
+      for (const p of [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length)) {
+        if (this.pending(p) && await this.asyncStillPending(p) && await this.promptAllowed(p) && this.prompts.get(p.token) === p && this.pending(p)) { this.showQuestion(p, true); count++; }
+        else if (this.prompts.get(p.token) === p) await this.clearPrompt(p);
+      }
+      if (!count) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
     }
     if (/^\/model(?:\s|$)/u.test(text)) {
@@ -492,20 +530,19 @@ export class Bridge {
       if (text !== '/model') { this.notice(topicId, 'Используйте /model и выберите модель кнопками.'); return; }
       await this.models.open(binding); return;
     }
-    if (text === '/say') { this.notice(topicId, 'Use /say TEXT in a project topic to send an instruction while a question is pending.'); return; }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding) { this.notice(topicId, 'This topic has no saved session binding. Use /sessions to find the session and its saved topic; /bind SESSION_ID only recovers a topic awaiting recovery.'); return; }
     if (!this.attached.has(binding.threadId)) { this.notice(topicId, `Saved topic #${binding.topicId} for session ${binding.threadId.slice(0, 8)}.\n${await this.connectionStatus(binding)}\nNo instruction was sent.`); return; }
     if (!allowedSessionDirectory(binding.cwd, this.config)) throw new Error('Project is outside configured roots.');
     const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.pending(p));
-    if (!text.startsWith('/say ') && !text.startsWith('/') && question.length) {
+    if (!text.startsWith('/') && question.length) {
       const focused = question.filter(p => p.freeText);
       const target = focused.length === 1 ? focused[0] : question.length === 1 ? question[0] : undefined;
       if (!target) { this.notice(topicId, 'Several questions are pending. Choose “Type an answer” on the question you want to answer.'); return; }
       await this.answer(target, text, inputId); return;
     }
-    if (text.startsWith('/') && !text.startsWith('/say ')) { this.notice(topicId, 'Unknown command. Use /help; /model changes this session’s model settings.'); return; }
-    const prompt = text.startsWith('/say ') ? text.slice(5).trim() : text;
+    if (text.startsWith('/')) { this.notice(topicId, 'Unknown command. Use /help; /model changes this session’s model settings.'); return; }
+    const prompt = text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
     await this.sendInput(binding, inputId, prompt);
   }
@@ -523,6 +560,34 @@ export class Bridge {
       return 'The native connection could not be checked. The saved binding does not confirm that the session is running. Check Codex locally and retry /bind in the saved topic.';
     }
     return `The native session is loaded but relay attachment has not succeeded. Check Codex locally and retry /bind ${binding.threadId} in the saved topic. Creating another Telegram topic will not reconnect it.`;
+  }
+
+  private async recoverTopic(callback: Json, message: Json, topicId: number | null): Promise<void> {
+    const match = /^recover:([a-f0-9]{32}):([br])$/u.exec(string(callback.data));
+    const operation = match ? this.state.topicOperations().find(op => op.attempt.replaceAll('-', '') === match[1]) : undefined;
+    if (!operation || topicId !== null || !['failed', 'uncertain'].includes(operation.status) ||
+        integer(message.message_id) !== this.state.promptMessage(`topic-problem/${operation.attempt}`)) {
+      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'Это действие восстановления уже недоступно.' }); return;
+    }
+    await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
+    try {
+      const session = this.topics.resolve(operation.threadId);
+      const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+      if (!live || live.cwd !== session.cwd) throw new Error('Возобновите эту сессию локально в Codex перед восстановлением топика.');
+      await this.codex.turns(session.id);
+      const current = this.state.topicOperation(session.id);
+      if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('Состояние восстановления уже изменилось. Проверьте /sessions.');
+      if (match![2] === 'b') {
+        this.pendingBind = { threadId: session.id, attempt: operation.attempt, expires: Date.now() + 10 * 60 * 1000 };
+        this.state.enqueue(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nОткройте появившийся топик и отправьте /bind без ID. Выбор действует 10 минут; инструкция в Codex отправлена не будет.`, null, operation.cwd, session.id);
+      } else {
+        const binding = await this.topics.retry(session.id);
+        if (binding) {
+          this.attached.delete(binding.threadId); await this.retireTopicPrompts(binding.threadId);
+          this.notice(binding.topicId, 'Топик восстановлен. Релей подключит сессию автоматически.');
+        }
+      }
+    } catch (error) { this.notice(topicId, string(object(error).message) || 'Не удалось восстановить топик.'); }
   }
 
   private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {
