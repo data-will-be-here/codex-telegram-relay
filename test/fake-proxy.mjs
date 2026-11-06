@@ -10,6 +10,8 @@ const waitingThreads = new Set(['empty']);
 const histories = new Map();
 const historyErrors = new Map();
 const pendingRequests = new Map();
+let deferReplay = false;
+const deferredReplays = [];
 let modelPages = [{ cursor: null, response: { data: [], nextCursor: null } }];
 const modelSettings = new Map();
 wss.on('connection', ws => ws.on('message', bytes => {
@@ -49,7 +51,11 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.method === 'thread/resume' && waitingThreads.has(message.params.threadId)) {
     ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: `no rollout found for thread id ${message.params.threadId}` } })); return;
   }
-  if (message.method === 'test/records') result = records;
+  if (message.method === 'test/deferReplay') deferReplay = true;
+  if (message.method === 'test/records') {
+    for (const request of deferredReplays.splice(0)) ws.send(JSON.stringify(request));
+    result = records;
+  }
   if (message.method === 'test/timeout') return;
   if (message.method === 'test/oversized') result = { output: 'x'.repeat(17 * 1024 * 1024) };
   if (message.method === 'test/request') {
@@ -76,7 +82,10 @@ wss.on('connection', ws => ws.on('message', bytes => {
   }
   ws.send(JSON.stringify({ id: message.id, result }));
   if (message.method === 'thread/resume') {
-    for (const request of pendingRequests.values()) if (request.params.threadId === message.params.threadId) ws.send(JSON.stringify(request));
+    for (const request of pendingRequests.values()) if (request.params.threadId === message.params.threadId) {
+      if (deferReplay) deferredReplays.push(request);
+      else ws.send(JSON.stringify(request));
+    }
   }
 }));
 server.listen(0, '127.0.0.1', () => {
