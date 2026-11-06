@@ -108,7 +108,7 @@ async function setup(args: string[]): Promise<void> {
     saveConfig(home, config, token);
     await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: `Paired with your local Codex Telegram Relay. Start the relay on your computer to connect ${scope === 'all' ? 'all interactive Codex sessions, including future projects' : 'the selected projects'}.`, entities: [] }) });
     await commandMenu(telegram, ownerId);
-    console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start -- start`);
+    console.log(`Paired. Private configuration saved outside the checkout: ${home}\nRun: npm start`);
   } finally { codex.close(); }
 }
 
@@ -308,7 +308,7 @@ async function sendFile(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const command = args[0] ?? 'help';
+  const command = args[0] === '--codex-bin' ? 'start' : args[0] ?? 'start';
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);

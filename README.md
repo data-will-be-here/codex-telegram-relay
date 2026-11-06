@@ -10,6 +10,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
+- **Keep a searchable conversation archive.** Messages forwarded under your chosen mode and your Telegram replies stay in the topic, so you can return to earlier discussions and results whenever you need them.
 - **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
 - **Answer with buttons or your own words.** Structured questions offer inline choices; supported approvals have action buttons. You can also type a reply or provide attachment context.
 - **Read formatted results.** Messages preserve Markdown emphasis, links, inline code and code blocks, including when a long answer spans several messages.
@@ -88,6 +89,8 @@ npm start -- doctor
 npm start -- setup
 npm start -- start
 ```
+
+**Development branch:** `npm start` now starts the relay directly. Use `npm start -- --help` for help or `npm start -- --codex-bin /absolute/path/to/native/codex` to select its executable. The explicit `npm start -- start` remains supported and is required by the published v0.1.18 installation shown above.
 
 `npm ci` builds the TypeScript CLI. Setup asks you to select projects from your currently loaded Codex sessions, reads the bot token **without echoing it**, and prints a random pairing code. Send the displayed `/start CODE` to your bot in a **private** chat. The relay binds to the sender's numeric Telegram ID. Never paste a token into an issue, AI conversation or command argument.
 
