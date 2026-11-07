@@ -11,6 +11,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 ### Why use it?
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
+- **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
 - **Keep a searchable conversation archive.** Messages forwarded under your chosen mode and your Telegram replies stay in the topic, so you can return to earlier discussions and results whenever you need them.
 - **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
@@ -216,6 +217,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
 | `/status` | Show connection and uncertain-delivery counts |
+| `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
 | `/stream`, `/stream on`, `/stream off` | Show or change live answer previews for all sessions; no restart required |
 | `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
@@ -232,6 +234,14 @@ Since v0.1.18, the main command menu is simplified. Ordinary text answers a pend
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
+
+## Account limits
+
+Available on `main`/`dev` after v0.1.19, `/limits` works in the paired owner's private chat and any topic, including one without an attached session. Each invocation reads `account/rateLimits/read` through the existing native connection and replies in the same place. The limits belong to the active Codex account, not the individual session. No model turn is created.
+
+The response shows the actual quota groups and window durations returned by Codex; it does not assume both a five-hour and a weekly window exist. Remaining percentages, reset dates in the relay computer's explicitly labelled timezone, relative time, and the snapshot time are displayed. Plan, credits and spending restrictions appear when provided; a backend-reported restriction remains visible even with a positive percentage. Unknown fields stay unavailable, and a passed reset timestamp does not imply recovered quota. Very large lists are explicitly shortened. Repeat `/limits` for a fresh snapshot; there are no background alerts.
+
+This is Codex's account-usage view, not an API billing lookup. Unsupported authentication modes, unavailable methods and read failures produce an explanatory reply without restarting the relay or exposing raw backend errors. Restart the updated relay to load the command and synchronize its menu. [Official contract](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt).
 
 ## State and recovery
 

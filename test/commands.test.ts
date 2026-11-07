@@ -24,7 +24,7 @@ test('command menus use only the owner chat, with valid English fallback and Rus
   assert.equal(sets.length, 2);
   assert.deepEqual(sets.map(c => c.params.language_code), ['', 'ru']);
   for (const call of telegram.calls) assert.deepEqual(call.params.scope, { type: 'chat', chat_id: ownerId });
-  const expected = ['help', 'status', 'sessions', 'model', 'mode', 'stream', 'questions'];
+  const expected = ['help', 'status', 'limits', 'sessions', 'model', 'mode', 'stream', 'questions'];
   for (const set of sets) {
     const items = array(set.params.commands).map(object);
     assert.deepEqual(items.map(c => c.command), expected);

@@ -10,6 +10,7 @@ import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
+import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
@@ -455,6 +456,12 @@ export class Bridge {
     if (!text) return;
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
       this.notice(topicId, commandHelp()); return;
+    }
+    if (/^\/limits(?:\s|$)/u.test(text)) {
+      if (text !== '/limits') { this.notice(topicId, 'Используйте /limits без аргументов.'); return; }
+      try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
+      catch { this.notice(topicId, 'Не удалось получить лимиты Codex. Проверьте подключение и вход в аккаунт Codex, затем повторите /limits.'); }
+      return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;

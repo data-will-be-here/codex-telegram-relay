@@ -13,6 +13,8 @@ const pendingRequests = new Map();
 let deferReplay = false;
 const deferredReplays = [];
 let modelPages = [{ cursor: null, response: { data: [], nextCursor: null } }];
+let rateLimits = {};
+let rateLimitsError;
 const modelSettings = new Map();
 wss.on('connection', ws => ws.on('message', bytes => {
   const message = JSON.parse(bytes.toString());
@@ -20,6 +22,11 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.id === undefined) return;
   records.push(message);
   let result = {};
+  if (message.method === 'test/rateLimits') { rateLimits = message.params.response ?? {}; rateLimitsError = message.params.error; }
+  if (message.method === 'account/rateLimits/read') {
+    if (rateLimitsError) { ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: rateLimitsError } })); return; }
+    result = rateLimits;
+  }
   if (message.method === 'test/models') modelPages = message.params.pages;
   if (message.method === 'model/list') result = modelPages.find(p => p.cursor === (message.params.cursor ?? null))?.response ?? { data: [], nextCursor: null };
   if (message.method === 'thread/settings/update') modelSettings.set(message.params.threadId, message.params);

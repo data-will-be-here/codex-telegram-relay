@@ -143,6 +143,7 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
+  async rateLimits(): Promise<Json> { return object(await this.call('account/rateLimits/read', {}, 8_000)); }
   async models(): Promise<Json[]> {
     const models: Json[] = [];
     const seen = new Set<string>();
