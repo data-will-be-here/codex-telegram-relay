@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: account limits (2026-11-08)
+
+`/limits` reads the current account snapshot through the existing `account/rateLimits/read` connection and works without an attached session topic. Dynamic windows/groups, remaining percentages, timezone-labelled reset times, optional credits/spending restrictions and explicit unavailable data are covered. Backend restrictions remain authoritative; past reset timestamps do not imply recovery. Read errors stay local to the command and raw errors are not sent to Telegram.
+
+The native contract was checked against the official App Server documentation and local generated Codex schema. A read-only live shared-daemon probe succeeded during planning; no model turn, account switch or settings write was generated. Automated checks passed 240 tests (238 passed, two platform skips), type checking, build, runtime audit (zero findings), package allowlist and diff whitespace validation. Six new tests exercise the real WebSocket test peer, owner authorization, duplicate updates, active questions, fresh reads, formatting and missing/expired data. A live Telegram `/limits` acceptance check still requires restarting the updated relay. Cross-platform CI is required before promotion to `main`.
+
 ## v0.1.18 release candidate (2026-11-06)
 
 This candidate promotes task-aware signatures, the simpler command menu and contextual recovery. Both READMEs target v0.1.18 and contain no references to the removed instruction command. Package/lock/native metadata agree on 0.1.18. The exact candidate passed 234 local tests (232 passed, two platform skips), type checking, build, runtime audit (zero findings) and package allowlist. Required cross-platform CI must pass in the release PR before promotion; existing live acceptance limitations remain below.

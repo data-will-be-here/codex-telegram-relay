@@ -22,6 +22,7 @@ export function temporary(): { dir: string; close: () => void } {
 }
 
 export class FakeCodex implements Codex {
+  async rateLimits(): Promise<Json> { return {}; }
   sessions: Session[] = [];
   histories = new Map<string, Json[]>();
   writes: { method: string; params: Json }[] = [];

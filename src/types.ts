@@ -36,6 +36,7 @@ export interface AgentOrigin { threadId: string; name: string; }
 export interface ModelSettings { model: string; effort?: string; serviceTier: string; }
 
 export interface Codex {
+  rateLimits(): Promise<Json>;
   models(): Promise<Json[]>;
   updateSettings(threadId: string, settings: ModelSettings): Promise<void>;
   loaded?(): Promise<string[]>;
