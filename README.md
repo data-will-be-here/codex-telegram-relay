@@ -10,6 +10,8 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ### Why use it?
 
+- **Start a separate conversation (development).** `/new` offers a general question/research workspace first, then locally enabled projects. Each choice creates its own Codex session and Telegram topic.
+
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
 - **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
@@ -216,6 +218,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
+| `/new` | Create a conversation without a project, or a session in an enabled project (development) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -227,7 +230,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
-The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, new-session creation, or automatic history imports. Instructions sent to your session follow its existing Codex permissions.
+The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, or automatic history imports. New-session locations are enabled locally. Instructions sent to your session follow its existing Codex permissions.
 
 Since v0.1.18, the main command menu is simplified. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
 
@@ -235,7 +238,27 @@ Topic-creation failure notices offer “Topic appeared — bind” and “Topic 
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
 
+## New conversations with /new (development)
+
+Enable creation locations once on the relay computer, then restart the updated relay:
+
+```sh
+npm start -- new enable --project /absolute/path/to/project
+npm start -- new enable --scratch-root /absolute/path/to/conversations
+```
+
+Use canonical absolute directories. Projects must exist; the scratch directory can be created when its parent exists. Keep scratch outside Git repositories, project roots, relay private data and `CODEX_HOME`. For example, create `D:\Codex` locally and choose `D:\Codex\Conversations`. `npm start -- new` shows configured locations; `new disable` revokes creation without deleting sessions, topics or files. This opt-in is separate from `sessions scope all`.
+
+Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **Без проекта — вопрос / исследование** (a general conversation), followed by the current enabled project and other enabled projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
+
+Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **Без проекта**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
+
+Creation uses the existing Codex connection (`thread/start` then `thread/name/set`), without a synthetic prompt or model turn. Naming saves the empty thread before its topic is created. `/model` is available before the first task. Qualified on Codex CLI 0.166.0, including empty-history reads and recovery after a separate App Server restart. Ordinary cold terminal sessions still require their first local message. Native permissions, model defaults and project configuration are inherited; Codex may initialize project trust under its own rules.
+
+The computer, relay and background Codex process must be running; a terminal window per conversation and the Windows GUI app are unnecessary. The current proxy does not start the daemon. Creation runs beside messaging and uploads. Duplicate clicks cannot repeat a start. Lost responses are reconciled by exact operation metadata, never automatically retried as a new start. Known IDs survive naming/topic failures; uncertain Telegram topic creation uses `/bind` and `/repair`. Archived sessions are not unarchived or replaced. [Protocol and recovery](docs/architecture.md#new-conversation-creation).
+
 ## Account limits
+
 
 Available on `main`/`dev` after v0.1.19, `/limits` works in the paired owner's private chat and any topic, including one without an attached session. Each invocation reads `account/rateLimits/read` through the existing native connection and replies in the same place. The limits belong to the active Codex account, not the individual session. No model turn is created.
 

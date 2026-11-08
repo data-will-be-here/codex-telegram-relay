@@ -85,7 +85,7 @@ export class Drafts {
       } else {
         method = 'sendMessageDraft';
         const chunk = formatMessages(source, true, 3500).at(-1)!;
-        Object.assign(params, withProjectHeader(chunk, draft.binding.cwd, draft.binding.sessionName));
+        Object.assign(params, withProjectHeader(chunk, draft.binding.cwd, draft.binding.sessionName, draft.binding.projectLabel));
       }
       // One budget for all topics, preserved across reconnects. No sleeps in the control-event path.
       this.nextSendAt = this.now() + 1000;

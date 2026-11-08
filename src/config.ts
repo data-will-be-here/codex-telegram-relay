@@ -13,6 +13,7 @@ export interface Config {
   sessionScope?: 'all' | 'selected';
   ignoredThreadIds?: string[];
   outgoingFiles?: boolean;
+  newSessions?: { enabled?: boolean; projects: string[]; scratchRoot?: string };
 }
 
 export function dataDirectory(): string {
@@ -118,6 +119,16 @@ export function readConfig(home: string): Config {
   const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: string(raw.codexBinary) };
   if (raw.sessionScope === 'all' || raw.sessionScope === 'selected') config.sessionScope = raw.sessionScope;
   if (raw.outgoingFiles !== undefined) config.outgoingFiles = raw.outgoingFiles;
+  if (raw.newSessions !== undefined) {
+    const creation = object(raw.newSessions);
+    if ((creation.enabled !== undefined && typeof creation.enabled !== 'boolean') || !Array.isArray(creation.projects) || creation.projects.length > 100 ||
+        !creation.projects.every(path => typeof path === 'string' && isAbsolute(path)) ||
+        (creation.scratchRoot !== undefined && (typeof creation.scratchRoot !== 'string' || !isAbsolute(creation.scratchRoot)))) {
+      throw new Error('Invalid new-session configuration.');
+    }
+    config.newSessions = { ...(typeof creation.enabled === 'boolean' ? { enabled: creation.enabled } : {}), projects: [...new Set(creation.projects as string[])],
+      ...(typeof creation.scratchRoot === 'string' ? { scratchRoot: creation.scratchRoot } : {}) };
+  }
   if (raw.ignoredThreadIds !== undefined) {
     if (!Array.isArray(raw.ignoredThreadIds) || raw.ignoredThreadIds.length > 1000 || !raw.ignoredThreadIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
       throw new Error('Invalid ignored session list.');
@@ -168,8 +179,9 @@ export function allowedDirectory(cwd: string, roots: readonly string[]): boolean
 }
 
 /** Automatic mode authorizes interactive session directories, without altering native execution policy. */
-export function allowedSessionDirectory(cwd: string, config: Pick<Config, 'roots' | 'sessionScope'>): boolean {
-  if (config.sessionScope !== 'all') return allowedDirectory(cwd, config.roots);
+export function allowedSessionDirectory(cwd: string, config: Pick<Config, 'roots' | 'sessionScope' | 'newSessions'>, ownedScratch = false): boolean {
+  if (config.sessionScope !== 'all') return allowedDirectory(cwd, config.roots) ||
+    ownedScratch && !!config.newSessions?.scratchRoot && allowedDirectory(cwd, [config.newSessions.scratchRoot]);
   try { return isAbsolute(cwd) && statSync(realpathSync(cwd)).isDirectory(); }
   catch { return false; }
 }

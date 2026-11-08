@@ -2,8 +2,9 @@
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { stdin, stdout } from 'node:process';
-import { join } from 'node:path';
-import { realpathSync, existsSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { realpathSync, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
@@ -189,6 +190,13 @@ async function start(args: string[]): Promise<void> {
       await delay(250);
     }
   })();
+  const creations = (async (): Promise<void> => {
+    while (!stopping) {
+      try { await liveBridge?.workNewSession(); }
+      catch { console.error('New-session recovery paused; ordinary messaging is unaffected.'); }
+      await delay(250);
+    }
+  })();
   // Optional UI settings must not hold up native attachment or Telegram update handling.
   const menu = commandMenu(telegram, config.ownerId);
   try {
@@ -269,11 +277,11 @@ async function start(args: string[]): Promise<void> {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
         if (error instanceof TelegramError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
         console.error(string(object(error).message) || 'Relay connection failed.');
-      } finally { liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
+      } finally { liveBridge?.close(); liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {
-    stopping = true; uploadStop.abort(); current?.close(); await uploads; files.close(); await sender; await menu; state.close();
+    stopping = true; uploadStop.abort(); current?.close(); await creations; await uploads; files.close(); await sender; await menu; state.close();
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
 }
@@ -313,6 +321,40 @@ async function main(): Promise<void> {
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);
   if (command === 'send-file') return sendFile(args);
+  if (command === 'new') {
+    const home = dataDirectory(); const config = readConfig(home);
+    if (args[1] === undefined && !args[2]) { console.log(JSON.stringify(config.newSessions ?? { projects: [] }, null, 2)); return; }
+    if (args[1] === 'disable' && !args[2]) {
+      if (config.newSessions) config.newSessions.enabled = false;
+      saveConfig(home, config); console.log('New session creation disabled. Restart the relay. Existing conversations and bindings are preserved.'); return;
+    }
+    if (args[1] !== 'enable' || !['--project', '--scratch-root'].includes(args[2] ?? '') || !args[3] || args[4] || !isAbsolute(args[3])) {
+      throw new Error('Usage: new [enable --project ABSOLUTE_PATH | enable --scratch-root ABSOLUTE_PATH | disable]');
+    }
+    const scratch = args[2] === '--scratch-root'; const path = resolve(args[3]);
+    const within = (candidate: string, root: string): boolean => {
+      const diff = relative(root, candidate); return !diff || !isAbsolute(diff) && diff !== '..' && !diff.startsWith(`..${sep}`);
+    };
+    const creation = config.newSessions ?? { projects: [] };
+    const forbidden = [home, process.env.CODEX_HOME ?? join(homedir(), '.codex')];
+    if (forbidden.some(root => within(path, resolve(root)) || within(resolve(root), path))) throw new Error('Choose a directory outside relay data and CODEX_HOME.');
+    if (scratch) {
+      if ([...config.roots, ...creation.projects].some(root => within(path, root) || within(root, path))) throw new Error('Scratch root must be separate from project roots.');
+      let ancestor = path;
+      for (;;) { if (existsSync(join(ancestor, '.git'))) throw new Error('Scratch root must be outside Git repositories.'); const parent = dirname(ancestor); if (parent === ancestor) break; ancestor = parent; }
+    }
+    if (!existsSync(path)) {
+      if (!scratch || !existsSync(dirname(path)) || realpathSync(dirname(path)) !== dirname(path)) throw new Error('Create the parent directory locally first.');
+      mkdirSync(path, { mode: 0o700 });
+    }
+    if (!statSync(path).isDirectory() || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path) throw new Error('Use an existing canonical directory, without links.');
+    if (!scratch && creation.scratchRoot && (within(path, creation.scratchRoot) || within(creation.scratchRoot, path))) throw new Error('Project must be separate from scratch root.');
+    if (!scratch && !creation.projects.includes(path) && creation.projects.length >= 100) throw new Error('At most 100 creation projects can be configured.');
+    config.newSessions = scratch ? { ...creation, enabled: true, scratchRoot: path } : { ...creation, enabled: true, projects: [...new Set([...creation.projects, path])] };
+    if (!scratch) config.roots = [...new Set([...config.roots, path])];
+    saveConfig(home, config);
+    console.log('New session location enabled. Native Codex loads its own project configuration and may initialize project trust. No sandbox, approval or model overrides are sent. Restart the relay to apply.'); return;
+  }
   if (command === 'files') {
     const home = dataDirectory();
     if (args[1] === 'status' && args[2] && !args[3]) {
@@ -365,6 +407,7 @@ async function main(): Promise<void> {
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
   console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
   console.log('\nFile export (local opt-in):\nfiles enable|disable   Allow or revoke outgoing files for this installation\nfiles                 Show export setting\nsend-file PATH        Send one project file to its session topic\n  --session ID        Exact ID or unique prefix (default: CODEX_THREAD_ID, then unique project)\n  --as document       Preserve any file as a document; auto sends MP4 as video\n  --caption TEXT      Optional literal caption\n  --request-id ID     Stable caller ID; reuse it for the same attempt\n  --no-wait           Return queued receipt immediately\nfiles status ID       Inspect durable result; uncertain uploads are never auto-replayed');
+  console.log('\nNew sessions (local opt-in; restart afterwards):\nnew                         Show configured creation locations\nnew enable --project PATH   Allow /new in this project\nnew enable --scratch-root PATH  Allow conversations in separate child directories\nnew disable                 Disable new creation, preserving saved bindings');
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

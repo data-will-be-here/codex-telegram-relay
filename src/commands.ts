@@ -5,6 +5,7 @@ const commands = [
   { command: 'status', args: '', en: 'Show connection, message mode and streaming status', ru: 'Подключение, режим сообщений и стриминг' },
   { command: 'limits', args: '', en: 'Show remaining Codex account limits and reset times', ru: 'Оставшиеся лимиты аккаунта Codex и время сброса' },
   { command: 'sessions', args: '', en: 'List attached Codex sessions and their IDs', ru: 'Список сессий Codex и их ID' },
+  { command: 'new', args: '', en: 'Start a new conversation or project session', ru: 'Новый разговор без проекта или сессия в проекте' },
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed', ru: 'Выбрать модель, уровень рассуждений и скорость сессии' },
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies', ru: 'Все сообщения ассистента или компактный режим' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews', ru: 'Включить или отключить потоковые ответы' },
