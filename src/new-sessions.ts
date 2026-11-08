@@ -28,6 +28,14 @@ export class NewSessions {
     private readonly connected: (binding: Binding) => Promise<void>) {}
 
   close(): void { this.closed = true; }
+  observeStarted(thread: Json): void {
+    const marker = string(thread.threadSource);
+    if (this.closed || !marker.startsWith(MARKER)) return;
+    const op = this.state.newSession(marker.slice(MARKER.length));
+    if (!op || !['starting', 'uncertain'].includes(op.status) || op.threadId || !this.operationAllowed(op)) return;
+    try { this.verify(thread, op); } catch { return; }
+    this.state.changeNewSession(op.id, op.status, { threadId: string(thread.id) });
+  }
   busy(threadId: string, marker?: string): boolean {
     const op = this.state.findNewSession('threadId', threadId) ?? (marker?.startsWith(MARKER) ? this.state.newSession(marker.slice(MARKER.length)) : undefined);
     return !!op && !['ready', 'failed', 'cancelled'].includes(op.status);
@@ -178,7 +186,7 @@ export class NewSessions {
         this.verify(thread, op);
       }
       if (op.status === 'uncertain' || op.status === 'starting') {
-        const thread = await this.codex.findCreatedThread!(op.cwd!, MARKER + op.id);
+        const thread = op.threadId ? await this.codex.read(op.threadId) : await this.codex.findCreatedThread!(op.cwd!, MARKER + op.id);
         if (!thread) { save({ status: 'uncertain', retryAt: Date.now() + 30_000 }); await this.reportUnknown(op); return; }
         this.verify(thread, op);
         save({ threadId: string(thread.id), status: 'known' });

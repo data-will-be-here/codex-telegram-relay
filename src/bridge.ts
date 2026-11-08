@@ -230,6 +230,7 @@ export class Bridge {
   }
 
   async notification(method: string, params: Json): Promise<void> {
+    if (method === 'thread/started') { this.newSessions.observeStarted(object(params.thread)); return; }
     if (method === 'thread/name/updated') {
       const threadId = string(params.threadId);
       if (this.attached.has(threadId)) {

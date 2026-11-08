@@ -15,7 +15,7 @@ Remove-Item Env:CODEX_RELAY_NATIVE_NEW
 
 The default suite skips native qualification without the flag; CI uses deterministic adapters. Requalify storage/archive behavior before supporting a changed history layout. Named empty threads are durable and resumable but absent from ordinary `thread/list`; list absence is not evidence of archival.
 
-Final local checks: 280 tests discovered, 277 passed and three environment-gated skips; the separately enabled native test passed. Type checking, build, package allowlist and production-dependency audit passed (zero reported vulnerabilities).
+Final local checks: 281 tests discovered, 278 passed and three environment-gated skips; the separately enabled native test passed. Type checking, build, package allowlist and production-dependency audit passed (zero reported vulnerabilities).
 
 ## Development: compact code approval cards (2026-11-08)
 

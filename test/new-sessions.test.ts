@@ -293,3 +293,20 @@ test('/new controls can be delivered in an ignored or out-of-scope originating t
     assert.equal(f.state.binding('ignored-thread')!.topicId, 999);
   } finally { f.close(); }
 });
+
+test('thread/started records an exact ID before a lost start response, without requiring a catalog scan', async () => {
+  const f = setup();
+  try {
+    const original = f.native.createThread.bind(f.native);
+    f.native.createThread = async (...args) => {
+      const thread = await original(...args);
+      await f.bridge.notification('thread/started', { thread });
+      throw new RpcError('Response lost after notification', true);
+    };
+    f.native.findCreatedThread = async () => { throw new Error('An exact ID is already recorded'); };
+    const op = await f.open(); await f.choose(0); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.threadId, 'new-thread-1');
+    f.state.changeNewSession(op.id, 'uncertain', { retryAt: 0 }); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
+  } finally { f.close(); }
+});
