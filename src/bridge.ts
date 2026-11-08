@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { approvalCardIdentity, approvalIdentity, approvalMessage } from './approvals.js';
+import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { FirstMessageRequiredError, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
@@ -322,11 +322,7 @@ export class Bridge {
       if (!changes?.length) { this.attention(binding, request, 'Review this file change in the terminal: its complete proposed diff is not available to the relay.'); return; }
       detailsParams.proposedChanges = changes;
     }
-    const details = JSON.stringify(detailsParams, null, 2);
-    const card = details.length <= 18_000 ? approvalMessage(request.method, detailsParams, agent) : undefined;
-    if (card === undefined || card.length > 18_000) {
-      this.attention(binding, request, 'An approval is too large to display completely here. Review and answer it in the terminal.'); return;
-    }
+    const card = approvalMessage(request.method, detailsParams, agent);
     if (request.method === 'item/permissions/requestApproval') {
       prompt.options.set('a', { permissions: object(request.params.permissions), scope: 'turn' });
       prompt.options.set('d', { permissions: {}, scope: 'turn' });
@@ -350,7 +346,7 @@ export class Bridge {
     const markup = keyboard as unknown as Json;
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
-    if (!receipt) this.state.enqueue(key, binding.topicId, card, markup);
+    if (!receipt) this.state.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup);
     else if (receipt.status === 'pending' || receipt.status === 'held') this.state.approvalMarkup(key, markup, prompt.token);
     else await this.refreshApproval(prompt);
   }

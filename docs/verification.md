@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: multipart approvals (2026-11-08)
+
+Supported approvals no longer fail the former 18,000-character payload/card limit or inherit ordinary answer truncation. Twelve new synthetic integration tests cover complete 60,000+ character commands, file diffs and permissions; numbered spoiler parts and Unicode boundaries; controls withheld until the final receipt; exact native decisions; checkpoint/restart recovery; missing receipts and ambiguous delivery; native cancellation; definite entity rejection; persisted rate-limit pauses; and selective abbreviation of quoted reason context. Existing replay and bridge tests were updated to verify final keyboard edits and unchanged review text. Review found two lifecycle races: retirement during a successful send lost its receipt, and finalization could overwrite a cancellation. Both were reproduced with failing regressions and corrected with guarded state transitions.
+
+Windows validation: **252 tests, 250 passed, two platform skips, zero failures**. Build, type checking, runtime dependency audit (zero findings), package allowlist and diff whitespace checks passed. Tests use synthetic Telegram/native adapters; no real approval was created or answered. The running relay was not restarted, and live Telegram appearance remains an acceptance check. Cross-platform CI is required before promotion to `main`.
+
 ## Development: account limits (2026-11-08)
 
 `/limits` reads the current account snapshot through the existing `account/rateLimits/read` connection and works without an attached session topic. Dynamic windows/groups, remaining percentages, timezone-labelled reset times, optional credits/spending restrictions and explicit unavailable data are covered. Backend restrictions remain authoritative; past reset timestamps do not imply recovery. Read errors stay local to the command and raw errors are not sent to Telegram.

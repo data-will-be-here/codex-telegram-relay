@@ -2,7 +2,7 @@ import { Lexer, type MarkedToken, type Token } from 'marked';
 import { isIP } from 'node:net';
 
 export interface Entity {
-  type: 'bold' | 'italic' | 'strikethrough' | 'code' | 'pre' | 'text_link';
+  type: 'bold' | 'italic' | 'strikethrough' | 'code' | 'pre' | 'text_link' | 'spoiler';
   offset: number;
   length: number;
   url?: string;

@@ -4,11 +4,17 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings } from '../src/types.js';
+import { array, object, string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings } from '../src/types.js';
 
 export function messageBody(message: Json): string {
   const text = string(message.text);
   return text.startsWith('» ') ? text.slice(text.indexOf('\n\n') + 2) : text;
+}
+
+export function approvalBody(message: Json): string {
+  const spoiler = array(message.entities).map(object).find(entity => entity.type === 'spoiler');
+  return spoiler ? string(message.text).slice(Number(spoiler.offset), Number(spoiler.offset) + Number(spoiler.length)) :
+    messageBody(message).replace(/^🔐 Апрув [^\n]+\n\n/u, '');
 }
 
 export function temporary(): { dir: string; close: () => void } {

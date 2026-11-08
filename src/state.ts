@@ -72,6 +72,7 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE outbox ADD COLUMN sessionName TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
+      if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'retryAt')) this.db.exec('ALTER TABLE outbox ADD COLUMN retryAt INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sourceThreadId')) {
         this.db.exec(`BEGIN IMMEDIATE;
           ALTER TABLE outbox ADD COLUMN sourceThreadId TEXT;
@@ -209,7 +210,8 @@ export class State {
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string): void {
     // A duplicate remains a no-op even while admission is full or after an uncertain send.
     if (this.db.prepare('SELECT 1 FROM outbox WHERE key=?').get(key)) return;
-    if (text.length > 40_000) text = text.slice(0, 39_900) + '\n[Message shortened. See the terminal for the full answer.]';
+    const approval = key.startsWith('prompt/approval/') && this.db.prepare('SELECT 1 FROM approval_cards WHERE deliveryKey=?').get(key);
+    if (!approval && text.length > 40_000) text = text.slice(0, 39_900) + '\n[Message shortened. See the terminal for the full answer.]';
     const durable = key.startsWith('final/') || key.startsWith('attention/');
     if (!durable && Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE status IN ('pending','blocked')").get()?.n ?? 0) >= MAX_ACTIVE_DELIVERIES) throw new Error('Delivery queue is full; check Telegram connectivity.');
     const binding = topicId === null ? undefined : this.topic(topicId);
@@ -236,6 +238,11 @@ export class State {
   ownsApprovalCard(key: string, ownerToken: string): boolean {
     return this.db.prepare('SELECT ownerToken FROM approval_cards WHERE deliveryKey=?').get(key)?.ownerToken === ownerToken;
   }
+  approvalDeliveryActive(key: string): boolean {
+    const row = this.db.prepare(`SELECT r.status AS requestStatus,o.status AS deliveryStatus FROM approval_cards c
+      JOIN approval_requests r ON r.identity=c.requestIdentity JOIN outbox o ON o.key=c.deliveryKey WHERE c.deliveryKey=?`).get(key);
+    return !row || row.requestStatus === 'pending' && row.deliveryStatus === 'sending';
+  }
   invalidateApprovalMarkup(key: string): void { this.db.prepare("UPDATE outbox SET markup=NULL WHERE key=? AND status='sent'").run(key); }
   consumeApproval(identity: string): boolean {
     return Number(this.db.prepare("UPDATE approval_requests SET status='consumed',at=? WHERE identity=? AND status='pending'").run(Date.now(), identity).changes) === 1;
@@ -249,7 +256,7 @@ export class State {
     this.cancelResolvedApprovalCards();
   }
   private cancelResolvedApprovalCards(): void {
-    this.db.exec("UPDATE outbox SET status='cancelled' WHERE status IN ('pending','held') AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='resolved')");
+    this.db.exec("UPDATE outbox SET status='cancelled' WHERE status IN ('pending','held','sending') AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='resolved')");
   }
   approvalMarkup(key: string, markup: Json, ownerToken: string): boolean {
     return Number(this.db.prepare(`UPDATE outbox SET markup=?,status=CASE WHEN status='held' THEN 'pending' ELSE status END
@@ -262,7 +269,7 @@ export class State {
       SELECT id FROM outbox WHERE status='deferred' ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id
       LIMIT MAX(0,${MAX_ACTIVE_DELIVERIES}-(SELECT count(*) FROM outbox WHERE status='pending'))
     )`);
-    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id LIMIT 1`).get();
+    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' AND retryAt<=? ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id LIMIT 1`).get(Date.now());
     if (!row) return undefined;
     return {
       id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text),
@@ -281,6 +288,24 @@ export class State {
   acceptRichPart(id: number, index: number, messageId: number | null): void {
     this.db.prepare("UPDATE outbox SET nextPart=?,messageId=? WHERE id=? AND status='sending' AND nextPart=?").run(index + 1, messageId, id, index);
   }
+  acceptApprovalPart(id: number, index: number, messageId: number): boolean {
+    // Retirement can hold an in-flight send. Keep its receipt without releasing the hold.
+    return this.db.prepare(`UPDATE outbox SET nextPart=?,messageId=?,status=CASE WHEN status='sending' THEN 'pending' ELSE status END
+      WHERE id=? AND status IN ('sending','pending','held') AND nextPart=? AND key IN (
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') RETURNING status`)
+      .get(index + 1, messageId, id, index)?.status === 'pending';
+  }
+  pauseApprovalPart(id: number, index: number, retryAt: number): boolean {
+    return this.db.prepare(`UPDATE outbox SET status=CASE WHEN status='sending' THEN 'pending' ELSE status END,retryAt=?
+      WHERE id=? AND status IN ('sending','pending','held') AND nextPart=? AND key IN (
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') RETURNING status`)
+      .get(retryAt, id, index)?.status === 'pending';
+  }
+  completeApprovalDelivery(id: number, parts: number): void {
+    this.db.prepare(`UPDATE outbox SET status='sent',markup=NULL WHERE id=? AND status IN ('sending','pending')
+      AND nextPart=? AND messageId IS NOT NULL AND key IN (
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(id, parts);
+  }
   delivered(id: number, messageId: number | null): void { this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id); }
   uncertain(id: number): void { this.db.prepare("UPDATE outbox SET status='uncertain' WHERE id=?").run(id); }
   deliveryContexts(): DeliveryContext[] {
@@ -294,7 +319,7 @@ export class State {
   pendingFinalCount(): number { return Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE key LIKE 'final/%' AND status IN ('pending','blocked','deferred')").get()?.n ?? 0); }
   cancelPrompt(key: string): number | undefined {
     const id = this.promptMessage(key);
-    this.db.prepare("UPDATE outbox SET status=CASE WHEN key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') THEN 'held' ELSE 'cancelled' END WHERE key=? AND status IN ('pending','held')").run(key);
+    this.db.prepare("UPDATE outbox SET status=CASE WHEN key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') THEN 'held' ELSE 'cancelled' END WHERE key=? AND status IN ('pending','held','sending')").run(key);
     return typeof id === 'number' ? id : undefined;
   }
   promptMessage(key: string): number | undefined {

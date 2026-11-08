@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, message, click, messageBody } from './helpers.js';
+import { fixture, message, click, messageBody, approvalBody } from './helpers.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox, TelegramError } from '../src/telegram.js';
 import { RpcError } from '../src/codex.js';
@@ -413,13 +413,16 @@ test('a multipart approval retains its entire command and offers buttons only af
   const f = await fixture();
   try {
     const command = 'echo ' + 'literal'.repeat(900);
+    f.codex.pending.add('long-command');
     await f.bridge.request({ id: 'long-command', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, cwd: f.projectA } });
     await f.drain();
     const sent = f.telegram.sent();
     assert.ok(sent.length > 1);
-    assert.ok(sent.map(messageBody).join('').includes(command));
+    assert.ok(sent.map(approvalBody).join('').includes(command));
     assert.ok(sent.slice(0, -1).every(s => !s.reply_markup));
-    assert.ok(sent.at(-1)!.reply_markup);
+    assert.equal(sent.at(-1)!.reply_markup, undefined);
+    await f.bridge.flushApproval();
+    assert.ok(f.telegram.calls.some(call => call.method === 'editMessageReplyMarkup' && object(call.params.reply_markup).inline_keyboard));
     assert.equal(f.codex.writes.length, 0);
   } finally { f.close(); }
 });
@@ -550,11 +553,10 @@ test('moved native cwd outside approved roots cannot receive an instruction', as
   } finally { f.close(); }
 });
 
-test('unsupported and oversized approvals do not offer a blind acceptance button', async () => {
+test('unsupported approval methods do not offer a blind acceptance button', async () => {
   const f = await fixture();
   try {
     await f.bridge.request({ id: 1, method: 'mcpServer/elicitation/request', params: { threadId: 'thread-a' } });
-    await f.bridge.request({ id: 2, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command: 'x'.repeat(19_000) } });
     await f.drain();
     assert.equal(f.codex.writes.length, 0);
     assert.ok(f.telegram.sent().every(x => !x.reply_markup));

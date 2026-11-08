@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import { Lexer } from 'marked';
 import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
+import { formatMessages, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -14,6 +16,44 @@ export function approvalIdentity(request: RpcRequest): string {
 
 export function approvalCardIdentity(identity: string, binding: Binding, card: string): string {
   return createHash('sha256').update(JSON.stringify([identity, binding.threadId, binding.topicId, binding.cwd, card])).digest('hex');
+}
+
+/** Long review text is literal inside spoilers; Telegram forbids nesting pre/code there. */
+export function approvalParts(card: string, reference: string, cwd?: string | null, sessionName?: string | null): FormattedText[] | undefined {
+  const limit = 3500 - projectHeader(cwd, sessionName).length - 2;
+  if (formatMessages(card, true, limit).length <= 1) return undefined;
+  // Reserve space for a stable request reference and counters even for very large plans.
+  const chunks = formatMessages(card, true, limit - 100);
+  return chunks.map((chunk, index) => {
+    const prefix = `🔐 Апрув ${reference.slice(0, 8)} · ${index + 1}/${chunks.length}\n\n`;
+    return withProjectHeader({ text: prefix + chunk.text,
+      entities: [{ type: 'spoiler', offset: prefix.length, length: chunk.text.length }] }, cwd, sessionName);
+  });
+}
+
+function shortenAuxiliaryQuotes(reason: string): string {
+  let result = ''; let offset = 0; let cursor = 0;
+  for (const token of Lexer.lex(reason)) {
+    const start = reason.indexOf(token.raw, cursor);
+    if (start < 0) continue;
+    cursor = start + token.raw.length;
+    if (token.type !== 'code' && token.type !== 'blockquote') continue;
+    const lines = token.raw.split('\n');
+    if (token.raw.length <= 2000 && lines.length <= 40) continue;
+    const head = lines.slice(0, 20).join('\n').slice(0, 1200).replace(/[\ud800-\udbff]$/u, '');
+    const tail = lines.slice(-10).join('\n').slice(-600).replace(/^[\udc00-\udfff]/u, '');
+    const omitted = Math.max(0, lines.length - head.split('\n').length - tail.split('\n').length);
+    const note = `[Цитата сокращена: пропущено ${omitted} строк, ${token.raw.length - head.length - tail.length} символов]`;
+    result += reason.slice(offset, start) + head + '\n' + note + '\n' + tail;
+    offset = cursor;
+  }
+  return result + reason.slice(offset);
+}
+
+/** Only explicitly quoted context in the reason is abbreviated, never the proposed operation. */
+export function approvalDisplayMessage(method: string, params: Json, agent?: AgentOrigin): string {
+  const reason = string(params.reason);
+  return approvalMessage(method, reason ? { ...params, reason: shortenAuxiliaryQuotes(reason) } : params, agent);
 }
 
 function literal(text: string): string {
