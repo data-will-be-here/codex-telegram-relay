@@ -377,5 +377,8 @@ test('long operational arguments stay complete while single-line interpreter cod
     const previews = f.telegram.sent().slice(previous).map(approvalBody).join('');
     assert.equal(previews.includes(data), false);
     assert.equal(previews.match(/Команда сокращена/gu)?.length, 4);
+    for (const part of f.telegram.sent().slice(previous)) assert.ok(
+      array(part.entities).map(object).some(entity => entity.type === 'expandable_blockquote'),
+      'An abbreviated script preview stays collapsed even when it fits in one message');
   } finally { f.close(); }
 });

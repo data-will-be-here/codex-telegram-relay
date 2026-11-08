@@ -23,12 +23,13 @@ export function approvalCardIdentity(identity: string, binding: Binding, card: s
 /** Collapsed review blocks reduce message height; literal bodies avoid incompatible nested entities. */
 export function approvalParts(card: string, reference: string, cwd?: string | null, sessionName?: string | null): FormattedText[] | undefined {
   const limit = 3500 - projectHeader(cwd, sessionName).length - 2;
-  if (formatMessages(card, true, limit).length <= 1) return undefined;
+  const preview = card.startsWith(PREVIEW_NOTICE);
+  if (!preview && formatMessages(card, true, limit).length <= 1) return undefined;
   // Reserve space for a stable request reference and counters even for very large plans.
   const chunks = formatMessages(card, true, limit - 200);
   return chunks.map((chunk, index) => {
     const prefix = `🔐 Апрув ${reference.slice(0, 8)} · ${index + 1}/${chunks.length}\n\n` +
-      (card.startsWith(PREVIEW_NOTICE) ? '⚠️ Превью: кнопка одобряет полную команду в Codex.\n\n' : '');
+      (preview ? '⚠️ Превью: кнопка одобряет полную команду в Codex.\n\n' : '');
     return withProjectHeader({ text: prefix + chunk.text,
       entities: [{ type: 'expandable_blockquote', offset: prefix.length, length: chunk.text.length }] }, cwd, sessionName);
   });
