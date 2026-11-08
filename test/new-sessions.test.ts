@@ -310,3 +310,12 @@ test('thread/started records an exact ID before a lost start response, without r
     assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
   } finally { f.close(); }
 });
+
+test('ordinary discovery uses one metadata scan when no owned session needs restoring', async () => {
+  const f = setup();
+  try {
+    let scans = 0; const original = f.native.list.bind(f.native);
+    f.native.list = async (...args) => { scans++; return original(...args); };
+    await f.bridge.discover(); assert.equal(scans, 1);
+  } finally { f.close(); }
+});

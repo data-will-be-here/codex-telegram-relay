@@ -239,9 +239,10 @@ export class NewSessions {
   }
 
   /** Load only recorded, non-archived relay-owned sessions, leaving ordinary discovery unchanged. */
-  async restore(): Promise<void> {
-    if (!this.codex.nonArchivedThread || this.closed) return;
-    const loaded = new Set((await this.codex.list()).map(thread => thread.id));
+  async restore(loadedIds: readonly string[]): Promise<boolean> {
+    if (!this.codex.nonArchivedThread || this.closed) return false;
+    let changed = false;
+    const loaded = new Set(loadedIds);
     for (const op of this.state.newSessions(['ready']).filter(item => item.threadId &&
       !loaded.has(item.threadId) && (this.restoreAfter.get(item.threadId) ?? 0) <= Date.now()).slice(0, Math.max(0, 64 - loaded.size))) {
       if (!this.operationAllowed(op)) continue;
@@ -251,12 +252,13 @@ export class NewSessions {
         if (!saved) continue;
         this.verify(saved, op);
         const binding = this.state.binding(op.threadId!);
-        if (binding) await this.connected(binding);
+        if (binding) { await this.connected(binding); changed = true; }
       } catch (error) {
         if (error instanceof RpcError && error.uncertain) throw error;
         this.state.enqueueOwnerNotice(`notice/new-restore/${op.id}`, op.topicId,
           `Сохранённая сессия ${op.threadId} сейчас недоступна. Проверьте её локально в Codex. Остальные сессии продолжают работать; замена не создавалась.`);
       }
     }
+    return changed;
   }
 }

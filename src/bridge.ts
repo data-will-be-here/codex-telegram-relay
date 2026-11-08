@@ -137,9 +137,10 @@ export class Bridge {
     if (this.discovering) return;
     this.discovering = true;
     try {
-      await this.newSessions.restore();
       const nameVersions = new Map(this.nameVersions);
-      const sessions = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      const readSessions = () => this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      let sessions = await readSessions();
+      if (await this.newSessions.restore(sessions.map(session => session.id))) sessions = await readSessions();
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.nameVersions.keys()) if (!loaded.has(id)) this.nameVersions.delete(id);
       for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
