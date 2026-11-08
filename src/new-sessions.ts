@@ -138,7 +138,9 @@ export class NewSessions {
     for (const path of paths) {
       try {
         const canonical = realpathSync(path); const scratch = this.config.newSessions?.scratchRoot;
-        if (!this.state.ownsScratch(canonical) && (!scratch || !inside(canonical, scratch))) result.add(canonical);
+        // Only eligible projects participate in workspace-overlap checks. A home
+        // directory containing private state is not a project and cannot hide scratch.
+        if (!this.state.ownsScratch(canonical) && (!scratch || !inside(canonical, scratch)) && this.validRoot(canonical, false)) result.add(canonical);
       }
       catch { /* Removed projects cannot appear in a creation menu. */ }
     }

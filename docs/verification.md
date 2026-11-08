@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: home-directory project collision (2026-11-09)
+
+A real binding for `C:\Users\large` appeared in automatic project candidates. It was correctly excluded from project buttons because it contains private relay/Codex data, but still participated in scratch overlap validation. This incorrectly suppressed the general-conversation choice under AppData.
+
+The fix filters ineligible projects before any workspace overlap check. A regression through Bridge reproduces the home binding, asserts the first actual Telegram keyboard button is “Без проекта”, and creates the selected session. A separate isolated replay of the device's configuration/bindings failed before the fix and passed afterwards with the expected first button; it sends no Telegram messages and creates no native session. Full local suite: 287 discovered, 284 passed, three environment-gated skips; build and package verification passed.
+
 ## Development: automatic /new defaults (2026-11-09)
 
 Removed the mandatory `new enable` setup step. Existing installations without `newSessions` get an enabled general-conversation workspace and known project choices automatically. Defaults are computed without rewriting configuration or creating folders during a config read; `/new` creates its workspace after owner authorization. Explicit overrides and intentional disable remain respected.

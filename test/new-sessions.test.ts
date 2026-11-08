@@ -350,3 +350,20 @@ test('automatic project choices follow known bindings and scope without listing 
     assert.equal(next.choices[0]!.kind, 'scratch');
   } finally { f.close(); }
 });
+
+test('a known home-directory session cannot hide the general conversation option', async () => {
+  const f = setup(true);
+  try {
+    f.config.sessionScope = 'all';
+    // Like a native session opened at C:\Users\name: this candidate contains
+    // private relay data and is rejected as a project, but also contains scratch.
+    f.state.bind('home-directory-thread', 777, f.dir, 'Home');
+    const op = await f.open();
+    assert.equal(op.choices[0]!.kind, 'scratch');
+    const keyboard = object(f.telegram.sent().at(-1)!.reply_markup).inline_keyboard as { text: string }[][];
+    assert.match(keyboard[0]![0]!.text, /Без проекта/u);
+    assert.equal(op.choices.some(choice => choice.cwd === f.dir), false);
+    await f.choose(0); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'ready');
+  } finally { f.close(); }
+});
