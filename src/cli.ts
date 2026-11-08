@@ -171,8 +171,8 @@ async function start(args: string[]): Promise<void> {
       try {
         // Order settled preview calls before permanent answers; remote timeout outcomes remain uncertain.
         // Saved answers and controls always take priority over ephemeral previews.
-        if (await outbox.flushOne()) continue;
         if (await liveBridge?.flushApproval()) continue;
+        if (await outbox.flushOne()) continue;
         if (await liveBridge?.flushDraft()) continue;
         await delay(100);
       }

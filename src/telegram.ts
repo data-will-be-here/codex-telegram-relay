@@ -3,6 +3,7 @@ import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State, type Delivery, type DeliveryContext, type RichDeliveryPart } from './state.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
+import { approvalParts } from './approvals.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
 export { splitMessage } from './format.js';
@@ -103,7 +104,7 @@ export class Outbox {
     return [context.projectCwd, binding?.cwd].every(cwd => !cwd || allowedSessionDirectory(cwd, this.config));
   }
   private check(delivery: Delivery): void {
-    if (this.allowed(delivery)) return;
+    if (this.allowed(delivery) && (!delivery.key.startsWith('prompt/approval/') || this.state.approvalDeliveryActive(delivery.key))) return;
     this.state.cancelDelivery(delivery.id);
     throw new DeliveryCancelled();
   }
@@ -119,9 +120,30 @@ export class Outbox {
     try {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
+      const approval = delivery.key.startsWith('prompt/approval/');
+      const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName) : undefined;
+      if (review) {
+        delivery.richPlan = review.map(part => ({ method: 'sendMessage', params: { ...part, link_preview_options: { is_disabled: true } } }));
+        this.state.saveRichPlan(delivery.id, delivery.richPlan);
+      }
+      if (approval && delivery.richPlan) {
+        let changed = false;
+        for (const part of delivery.richPlan.slice(delivery.nextPart)) {
+          if (!Array.isArray(part.params.entities)) continue;
+          for (const value of part.params.entities) {
+            const entity = object(value);
+            if (entity.type === 'spoiler') { entity.type = 'expandable_blockquote'; changed = true; }
+          }
+        }
+        if (changed) this.state.saveRichPlan(delivery.id, delivery.richPlan);
+      }
       const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName) : undefined;
       if (delivery.richPlan || rich) {
-        this.state.delivered(delivery.id, await this.richDelivery(delivery, rich, project));
+        const result = await this.richDelivery(delivery, rich, project, approval);
+        if (result.complete) {
+          if (approval) this.state.completeApprovalDelivery(delivery.id, delivery.richPlan!.length);
+          else this.state.delivered(delivery.id, result.messageId);
+        }
         return true;
       }
       const limit = 3500 - projectHeader(project, delivery.sessionName).length - 2;
@@ -167,7 +189,7 @@ export class Outbox {
     return true;
   }
 
-  private async richDelivery(delivery: Delivery, rich: RichPart[] | undefined, project?: string | null): Promise<number | null> {
+  private async richDelivery(delivery: Delivery, rich: RichPart[] | undefined, project?: string | null, approval = false): Promise<{ messageId: number | null; complete: boolean }> {
     const parts: RichDeliveryPart[] = delivery.richPlan ?? rich!.map(part => ({
       method: 'sendRichMessage', params: { rich_message: part.richMessage }, fallback: part.fallback,
     }));
@@ -177,13 +199,17 @@ export class Outbox {
       const part = parts[index]!;
       const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
-      if (index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
+      if (!approval && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
       try {
         let retries = 0;
         while (true) {
           this.check(delivery);
           try { messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null; break; }
           catch (error) {
+            if (approval && error instanceof TelegramError && error.status === 429) {
+              if (!this.state.pauseApprovalPart(delivery.id, index, Date.now() + Math.max(1, error.retryAfter ?? 2) * 1000)) throw new DeliveryCancelled();
+              return { messageId, complete: false };
+            }
             if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
             await delay(Math.min(error.retryAfter ?? 2, 60) * 1000);
           }
@@ -206,9 +232,13 @@ export class Outbox {
         this.state.saveRichPlan(delivery.id, parts);
         index--; continue;
       }
-      this.state.acceptRichPart(delivery.id, index, messageId);
+      if (approval) {
+        if (messageId === null) throw new TelegramError('Approval part receipt was not confirmed.', 0);
+        if (!this.state.acceptApprovalPart(delivery.id, index, messageId)) throw new DeliveryCancelled();
+      } else this.state.acceptRichPart(delivery.id, index, messageId);
       if (this.interval > 0) await delay(this.interval);
+      if (approval && index < parts.length - 1) return { messageId, complete: false };
     }
-    return messageId;
+    return { messageId, complete: true };
   }
 }

@@ -7,7 +7,7 @@ import { RpcError } from '../src/codex.js';
 import { State } from '../src/state.js';
 import { Outbox, TelegramError } from '../src/telegram.js';
 import { array, object, string, type RpcRequest } from '../src/types.js';
-import { fixture, click, messageBody, temporary, FakeCodex, FakeTelegram } from './helpers.js';
+import { fixture, click, messageBody, approvalBody, temporary, FakeCodex, FakeTelegram } from './helpers.js';
 
 const request: RpcRequest = { id: 'pending-approval', method: 'item/commandExecution/requestApproval', params: {
   threadId: 'thread-a', turnId: 'turn-a', itemId: 'command-a', command: 'echo waiting-for-owner', availableDecisions: ['accept', 'cancel'],
@@ -206,12 +206,12 @@ test('reconnect during a card send refreshes the eventual receipt without submit
 test('multipart approval replay edits only the final control message and preserves all review text', async () => {
   const f = await persistentFixture();
   try {
-    const command = 'echo ' + 'literal-command-content '.repeat(300);
-    const long = { ...request, params: { ...request.params, command } };
+    const command = 'echo literal-command-content';
+    const long = { ...request, params: { ...request.params, command, reason: 'Complete review context. '.repeat(300) } };
     await f.bridge.request(long); await f.drain();
     const parts = f.telegram.sent().length; const lastMessage = f.telegram.message;
     assert.ok(parts > 1);
-    assert.ok(f.telegram.sent().map(messageBody).join('').includes(command));
+    assert.ok(f.telegram.sent().map(approvalBody).join('').includes(command));
     assert.ok(f.telegram.sent().slice(0, -1).every(part => !part.reply_markup));
     await f.reconnect(); await f.bridge.request(long); await f.drain();
     assert.equal(f.telegram.sent().length, parts);

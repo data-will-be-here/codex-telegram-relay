@@ -1,5 +1,29 @@
 # Verification record
 
+## Development: compact code approval cards (2026-11-08)
+
+The owner refined code previews to a few lines in a single ordinary message rather than divided collapsible quotations. Embedded scripts and fenced reason examples now show at most six code lines including an omission marker, with a 600-unit/six-line abbreviation threshold. Repeated execution-policy code may refer to the command preview instead of duplicating it. A code-heavy approval retains the full-command warning and native decision controls in the same message. Large non-code review context, file diffs and permission requests keep their prior delivery rules and original identities.
+
+Integration regressions first rejected the quotation-based preview, then verified one send, actual `pre` entities, bounded code lines, surrounding prose outside the source block, no quotation/spoiler entities and an unchanged native decision. The earlier forced single-preview collapse and larger code budgets below describe previous behavior and are superseded by this refinement. Tests use synthetic native/Telegram adapters; the running relay was not restarted.
+
+Review reproduced two additional failures: CRLF/CR reason input bypassed source recognition, and eight large examples collectively overflowed the card. Display-only newline normalization and a shared 1,000-unit excerpt budget now handle these cases; at most the first two and last source examples remain, with a visible notice for omitted blocks. Both new integration regressions failed before their fixes and passed afterward. Windows validation: **257 tests, 255 passed, two platform skips, zero failures**; clean install, type checking, build, runtime audit (zero findings), package allowlist and whitespace checks passed.
+
+## Development: collapsed approvals and code previews (2026-11-08)
+
+A Telegram screenshot exposed a presentation mismatch: `spoiler` masks text without reducing its height. Approval bodies now use Telegram's collapsed-by-default `expandable_blockquote` entity. A regression failed on the masking entity before the change, then passed with collapsible blocks. Resuming an older persisted plan converts only its unsent parts without reposting confirmed receipts; this upgrade path also failed before its fix.
+
+Abbreviated embedded-code previews stay collapsed even when they fit in a single message; their warning remains outside the collapsed body. A focused regression reproduced the earlier single-message path bypassing collapse.
+
+The owner clarified that code inside the command should also be abbreviated. Embedded scripts and their execution-policy amendment code strings now use labelled head/tail previews after 2,000 UTF-16 units or 40 lines, with an explicit warning that the button approves the original full command. A new integration regression covers inline code, its duplicated policy suggestion, unchanged native parameters and the resulting decision. Multipart lifecycle fixtures use complete unquoted context so they still exercise multiple messages after command previews become shorter. Earlier full-command display guarantees below describe the preceding implementation and are superseded by this explicitly approved preview behavior. No running relay restart or live Telegram send was performed.
+
+The scope regression preserves long ordinary arguments, quoted multiline data and `-e` inside script arguments; recognized interpreter flags must precede the script entrypoint. Simple heredocs require an unquoted header and matching terminator. Unknown command patterns keep the full text. Windows validation passed **255 tests: 253 passed, two platform skips, zero failures**, plus type checking, build, runtime audit (zero findings), package allowlist and diff whitespace checks. The three new tests cover old-plan upgrades, code/policy previews and the code-versus-data boundary.
+
+## Development: multipart approvals (2026-11-08)
+
+Supported approvals no longer fail the former 18,000-character payload/card limit or inherit ordinary answer truncation. Twelve new synthetic integration tests cover complete 60,000+ character commands, file diffs and permissions; numbered spoiler parts and Unicode boundaries; controls withheld until the final receipt; exact native decisions; checkpoint/restart recovery; missing receipts and ambiguous delivery; native cancellation; definite entity rejection; persisted rate-limit pauses; and selective abbreviation of quoted reason context. Existing replay and bridge tests were updated to verify final keyboard edits and unchanged review text. Review found two lifecycle races: retirement during a successful send lost its receipt, and finalization could overwrite a cancellation. Both were reproduced with failing regressions and corrected with guarded state transitions.
+
+Windows validation: **252 tests, 250 passed, two platform skips, zero failures**. Build, type checking, runtime dependency audit (zero findings), package allowlist and diff whitespace checks passed. Tests use synthetic Telegram/native adapters; no real approval was created or answered. The running relay was not restarted, and live Telegram appearance remains an acceptance check. Cross-platform CI is required before promotion to `main`.
+
 ## Development: account limits (2026-11-08)
 
 `/limits` reads the current account snapshot through the existing `account/rateLimits/read` connection and works without an attached session topic. Dynamic windows/groups, remaining percentages, timezone-labelled reset times, optional credits/spending restrictions and explicit unavailable data are covered. Backend restrictions remain authoritative; past reset timestamps do not imply recovery. Read errors stay local to the command and raw errors are not sent to Telegram.

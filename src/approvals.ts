@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
+import { Lexer } from 'marked';
 import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
+import { formatMessages, projectHeader, withProjectHeader, type FormattedText } from './format.js';
+
+const PREVIEW_NOTICE = '⚠️ Сокращённое превью. Кнопка одобряет полную команду, включая пропущенный код. Полный текст доступен в Codex.\n\n';
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -14,6 +18,113 @@ export function approvalIdentity(request: RpcRequest): string {
 
 export function approvalCardIdentity(identity: string, binding: Binding, card: string): string {
   return createHash('sha256').update(JSON.stringify([identity, binding.threadId, binding.topicId, binding.cwd, card])).digest('hex');
+}
+
+/** Collapsed review blocks reduce message height; literal bodies avoid incompatible nested entities. */
+export function approvalParts(card: string, reference: string, cwd?: string | null, sessionName?: string | null): FormattedText[] | undefined {
+  const limit = 3500 - projectHeader(cwd, sessionName).length - 2;
+  const preview = card.startsWith(PREVIEW_NOTICE);
+  if (formatMessages(card, true, limit).length <= 1) return undefined;
+  // Reserve space for a stable request reference and counters even for very large plans.
+  const chunks = formatMessages(card, true, limit - 200);
+  return chunks.map((chunk, index) => {
+    const prefix = `🔐 Апрув ${reference.slice(0, 8)} · ${index + 1}/${chunks.length}\n\n` +
+      (preview ? '⚠️ Превью: кнопка одобряет полную команду в Codex.\n\n' : '');
+    return withProjectHeader({ text: prefix + chunk.text,
+      entities: [{ type: 'expandable_blockquote', offset: prefix.length, length: chunk.text.length }] }, cwd, sessionName);
+  });
+}
+
+function shortenReviewText(text: string, label: string, limit = 600): string {
+  const lines = text.split('\n');
+  if (text.length <= limit && lines.length <= 6) return text;
+  const head = lines.slice(0, 4).join('\n').slice(0, Math.floor(limit * 0.58)).replace(/[\ud800-\udbff]$/u, '');
+  const tail = lines.slice(-1).join('\n').slice(-Math.floor(limit * 0.2)).replace(/^[\udc00-\udfff]/u, '');
+  const omitted = Math.max(0, lines.length - head.split('\n').length - tail.split('\n').length);
+  return head + `\n[${label}: пропущено ${omitted} строк, ${text.length - head.length - tail.length} символов]\n` + tail;
+}
+
+function shortenAuxiliaryQuotes(reason: string): string {
+  const tokens = Lexer.lex(reason);
+  const sources = tokens.filter(token => token.type === 'code');
+  const selected = new Set(sources.length <= 3 ? sources : [sources[0], sources[1], sources.at(-1)]);
+  const omitted = sources.filter(token => !selected.has(token));
+  const budget = Math.min(600, Math.floor(1000 / Math.max(1, selected.size)));
+  let omittedNotice = false;
+  let result = ''; let offset = 0; let cursor = 0;
+  for (const token of tokens) {
+    const start = reason.indexOf(token.raw, cursor);
+    if (start < 0) continue;
+    cursor = start + token.raw.length;
+    if (token.type !== 'code' && token.type !== 'blockquote') continue;
+    let shown: string;
+    if (token.type === 'code' && !selected.has(token)) {
+      shown = omittedNotice ? '' : `[Фрагменты кода сокращены: пропущено ${omitted.length} блоков, ${omitted.reduce((sum, block) => sum + block.raw.length, 0)} символов. Полный текст в Codex.]\n\n`;
+      omittedNotice = true;
+    } else shown = token.type === 'code' ? code(shortenReviewText(token.text, 'Код сокращён', budget)) + '\n\n' : shortenReviewText(token.raw, 'Цитата сокращена');
+    result += reason.slice(offset, start) + shown;
+    offset = cursor;
+  }
+  return result + reason.slice(offset);
+}
+
+function reasonMarkdown(reason: string): string {
+  let result = ''; let offset = 0; let cursor = 0;
+  for (const token of Lexer.lex(reason)) {
+    const start = reason.indexOf(token.raw, cursor);
+    if (start < 0) continue;
+    cursor = start + token.raw.length;
+    if (token.type !== 'code') continue;
+    result += literal(reason.slice(offset, start)) + code(token.text) + '\n\n';
+    offset = cursor;
+  }
+  return result + literal(reason.slice(offset));
+}
+
+function hasEmbeddedCode(command: string): boolean {
+  // Only a simple unquoted heredoc header with a matching terminator is unambiguous here.
+  if (/^\s*(?:[^\s"'<>]+[ \t]+)*<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1[ \t]*\r?\n[\s\S]*\r?\n\2[ \t]*(?:\r?\n|$)/u.test(command)) return true;
+  // Recognize common inline interpreters conservatively; ordinary arguments stay complete.
+  const invocation = /^\s*(?:&\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))\s+([\s\S]*)$/u.exec(command);
+  if (!invocation) return false;
+  const program = (invocation[1] ?? invocation[2] ?? invocation[3]!).split(/[\\/]/u).at(-1)!.replace(/\.exe$/iu, '').toLowerCase();
+  const inline: [RegExp, RegExp][] = [
+    [/^(?:node|nodejs|bun)$/u, /^(?:(?:--input-type=\S+|--no-warnings|--enable-source-maps)\s+)*(?:-e|--eval|-p|--print)(?:\s|=)/u],
+    [/^(?:python(?:\d+(?:\.\d+)*)?|py)$/u, /^(?:(?:-[uBEsSIO]+|-3(?:\.\d+)?)\s+)*-c(?:\s|$)/u],
+    [/^(?:bash|sh|zsh)$/u, /^(?:--(?:noprofile|norc)\s+)*-c(?:\s|$)/u],
+    [/^(?:pwsh|powershell)$/u, /^(?:(?:-(?:NoProfile|NoLogo|NonInteractive)|-ExecutionPolicy\s+\w+)\s+)*-(?:Command|EncodedCommand)(?:\s|$)/iu],
+    [/^(?:ruby|perl)$/u, /^-e(?:\s|$)/u],
+    [/^php$/u, /^-r(?:\s|$)/u],
+    [/^deno$/u, /^eval(?:\s|$)/u],
+  ];
+  return inline.some(([name, flag]) => name.test(program) && flag.test(invocation[4]!));
+}
+
+/** Display previews never mutate the request used for identity, callbacks or native decisions. */
+export function approvalDisplayMessage(method: string, params: Json, agent?: AgentOrigin): string {
+  const display = { ...params };
+  const reason = string(params.reason);
+  if (reason) display.reason = shortenAuxiliaryQuotes(reason.replace(/\r\n?/gu, '\n'));
+  let preview = false;
+  if (method === 'item/commandExecution/requestApproval' && hasEmbeddedCode(string(params.command))) {
+    const command = string(params.command);
+    if (command) {
+      display.command = shortenReviewText(command, 'Команда сокращена');
+      preview = display.command !== command;
+    }
+    if (Array.isArray(params.proposedExecpolicyAmendment)) {
+      display.proposedExecpolicyAmendment = params.proposedExecpolicyAmendment.map(value => {
+        if (typeof value !== 'string') return value;
+        const shown = shortenReviewText(value, 'Код в правиле разрешений сокращён');
+        if (shown !== value) {
+          preview = true;
+          if (command.includes(value)) return `[Код в правиле разрешений сокращён: ${value.length} символов; см. превью команды выше, полный текст в Codex]`;
+        }
+        return shown;
+      });
+    }
+  }
+  return (preview ? PREVIEW_NOTICE : '') + approvalMessage(method, display, agent, reason ? reasonMarkdown(string(display.reason)) : undefined);
 }
 
 function literal(text: string): string {
@@ -34,13 +145,13 @@ function code(text: string): string {
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */
-export function approvalMessage(method: string, params: Json, agent?: AgentOrigin): string {
+export function approvalMessage(method: string, params: Json, agent?: AgentOrigin, renderedReason?: string): string {
   const origin = agent ? '**Agent**\n' + code(`${agent.name}\n${agent.threadId}`) + '\n\n' : '';
   if (method !== 'item/commandExecution/requestApproval' || !string(params.command)) {
     return origin + '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
   }
   const sections = ['🔐 Command approval'];
-  if (string(params.reason)) sections.push('**Reason**\n' + literal(string(params.reason)));
+  if (string(params.reason)) sections.push('**Reason**\n' + (renderedReason ?? literal(string(params.reason))));
   if (string(params.cwd)) sections.push('**Working directory**\n' + code(string(params.cwd)));
   sections.push('**Command**\n' + code(string(params.command)));
   if (string(params.environmentId) && params.environmentId !== 'local') {
