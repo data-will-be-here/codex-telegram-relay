@@ -44,11 +44,11 @@ class Native extends FakeCodex {
   }
 }
 
-function setup() {
+function setup(automatic = false) {
   const temp = temporary(); const project = join(temp.dir, 'project'); const scratch = join(temp.dir, 'conversations');
   mkdirSync(project); mkdirSync(scratch);
   const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: process.execPath,
-    newSessions: { projects: [project], scratchRoot: scratch } };
+    ...(!automatic ? { newSessions: { projects: [project], scratchRoot: scratch } } : {}) };
   const state = new State(join(temp.dir, 'private')); const native = new Native(); const telegram = new FakeTelegram();
   const bridge = new Bridge(config, state, native, telegram);
   const outbox = new Outbox(state, telegram, config, 0);
@@ -317,5 +317,36 @@ test('ordinary discovery uses one metadata scan when no owned session needs rest
     let scans = 0; const original = f.native.list.bind(f.native);
     f.native.list = async (...args) => { scans++; return original(...args); };
     await f.bridge.discover(); assert.equal(scans, 1);
+  } finally { f.close(); }
+});
+
+test('/new works out of the box without new enable or a newSessions configuration section', async () => {
+  const f = setup(true);
+  try {
+    const root = f.config.newSessions!.scratchRoot!;
+    assert.equal(existsSync(root), false);
+    await f.bridge.update(message(1, 999, '/new', 99));
+    assert.equal(existsSync(root), false); assert.equal(f.state.newSessions().length, 0);
+    const op = await f.open();
+    assert.equal(existsSync(root), true); assert.equal(op.choices[0]!.kind, 'scratch');
+    assert.ok(op.choices.some(choice => choice.cwd === f.project));
+    await f.choose(0); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'ready');
+    assert.equal(f.state.newSession(op.id)!.cwd, join(root, op.id));
+    assert.equal(f.native.starts, 1);
+  } finally { f.close(); }
+});
+
+test('automatic project choices follow known bindings and scope without listing scratch UUID directories', async () => {
+  const f = setup(true);
+  try {
+    const other = join(f.dir, 'connected-project'); mkdirSync(other);
+    f.state.bind('connected-thread', 777, other, 'Connected');
+    const selected = await f.open(); assert.equal(selected.choices.some(choice => choice.cwd === other), false);
+    f.config.sessionScope = 'all';
+    const all = await f.open(777); assert.ok(all.choices.some(choice => choice.cwd === other && /Этот проект/u.test(choice.label)));
+    await f.choose(0); await f.bridge.workNewSession(); const scratch = f.state.newSession(all.id)!.cwd!;
+    const next = await f.open(888); assert.equal(next.choices.some(choice => choice.cwd === scratch), false);
+    assert.equal(next.choices[0]!.kind, 'scratch');
   } finally { f.close(); }
 });

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { readConfig, saveConfig } from '../src/config.js';
 import { temporary } from './helpers.js';
 
-test('local creation opt-in persists projects and scratch separately; disable preserves token and roots', () => {
+test('optional creation customization persists projects and scratch; disable preserves token and roots', () => {
   const temp = temporary();
   try {
     const home = join(temp.dir, 'relay'); const project = join(temp.dir, 'project'); const scratch = join(temp.dir, 'conversations');
@@ -17,7 +17,7 @@ test('local creation opt-in persists projects and scratch separately; disable pr
     });
     assert.equal(run('enable', '--scratch-root', scratch).status, 0);
     assert.equal(run('enable', '--project', project).status, 0);
-    assert.deepEqual(readConfig(home).newSessions, { enabled: true, projects: [project], scratchRoot: scratch });
+    assert.deepEqual(readConfig(home).newSessions, { enabled: true, autoProjects: true, projects: [project], scratchRoot: scratch });
     assert.equal(existsSync(scratch), true);
     assert.equal(run('disable').status, 0);
     assert.equal(readConfig(home).newSessions?.enabled, false); assert.equal(readConfig(home).newSessions?.scratchRoot, scratch); assert.deepEqual(readConfig(home).roots, [project]);
@@ -38,7 +38,22 @@ test('local creation settings reject private, repository and project scratch roo
     const repo = join(temp.dir, 'repo'); mkdirSync(repo); writeFileSync(join(repo, '.git'), 'gitdir: elsewhere');
     assert.equal(run('enable', '--scratch-root', join(repo, 'work')).status, 1);
     assert.equal(existsSync(join(home, 'work')), false); assert.equal(existsSync(join(repo, 'work')), false);
-    assert.equal(readConfig(home).newSessions, undefined);
+    assert.equal(readConfig(home).newSessions?.enabled, true);
+  } finally { temp.close(); }
+});
+
+test('legacy installations get automatic defaults without rewriting config or creating directories on read', () => {
+  const temp = temporary();
+  try {
+    const home = join(temp.dir, 'relay'); const project = join(temp.dir, 'project'); mkdirSync(project);
+    saveConfig(home, { version: 1, ownerId: 42, roots: [project], codexBinary: process.execPath });
+    const original = readFileSync(join(home, 'config.json'), 'utf8');
+    const defaults = readConfig(home).newSessions!;
+    assert.equal(defaults.enabled, true); assert.equal(defaults.autoProjects, true);
+    assert.deepEqual(defaults.projects, [project]);
+    assert.equal(defaults.scratchRoot, join(temp.dir, 'codex-telegram-conversations'));
+    assert.equal(existsSync(defaults.scratchRoot!), false);
+    assert.equal(readFileSync(join(home, 'config.json'), 'utf8'), original);
   } finally { temp.close(); }
 });
 

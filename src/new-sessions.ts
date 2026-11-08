@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { allowedSessionDirectory, type Config } from './config.js';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { allowedSessionDirectory, newSessionDefaults, type Config } from './config.js';
 import { RpcError } from './codex.js';
 import { State, type NewSessionOperation, type NewSessionPhase } from './state.js';
 import { Topics } from './topics.js';
@@ -25,7 +25,7 @@ export class NewSessions {
   private restoreAfter = new Map<string, number>();
   constructor(private readonly config: Config, private readonly state: State, private readonly codex: Codex,
     private readonly telegram: Telegram, private readonly topics: Topics,
-    private readonly connected: (binding: Binding) => Promise<void>) {}
+    private readonly connected: (binding: Binding) => Promise<void>) { newSessionDefaults(config, state.home); }
 
   close(): void { this.closed = true; }
   observeStarted(thread: Json): void {
@@ -59,13 +59,17 @@ export class NewSessions {
     }
     const choices: NewSessionOperation['choices'] = [];
     const scratch = this.config.newSessions?.scratchRoot;
-    if (scratch && this.validRoot(scratch, true)) choices.push({ cwd: scratch, label: '💬 Без проекта — вопрос / исследование', kind: 'scratch' });
+    if (scratch && this.validRoot(scratch, true, true)) {
+      try { mkdirSync(scratch, { recursive: true, mode: 0o700 }); }
+      catch { /* Project choices remain available when the workspace cannot be prepared. */ }
+      if (this.validRoot(scratch, true)) choices.push({ cwd: scratch, label: '💬 Без проекта — вопрос / исследование', kind: 'scratch' });
+    }
     const current = topicId === null ? undefined : this.state.topic(topicId);
-    const projects = [...new Set(this.config.newSessions?.projects ?? [])].filter(path => this.validRoot(path, false) && !this.state.ownsScratch(path));
+    const projects = this.projectPaths().filter(path => this.validRoot(path, false));
     projects.sort((a, b) => Number(b === current?.cwd) - Number(a === current?.cwd));
     for (const path of projects) choices.push({ cwd: path, kind: 'project', label:
       `${current?.cwd === path ? '📁 Этот проект — ' : '📁 '}${clean(basename(path))} · ${clean(path)}` });
-    if (!choices.length) { this.notice(topicId, 'Создание сессий ещё не настроено локально. На компьютере выполните new enable --project PATH или new enable --scratch-root PATH, затем перезапустите релей.'); return; }
+    if (!choices.length) { this.notice(topicId, 'Не удалось подготовить папку для нового разговора. Проверьте доступ к рабочему каталогу релея на компьютере и повторите /new.'); return; }
     const id = randomUUID();
     const op: NewSessionOperation = { id, status: 'selecting', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
       expires: Date.now() + LIFETIME, choices, page: 0 };
@@ -123,13 +127,38 @@ export class NewSessions {
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueueOwnerNotice(`notice/new/${randomUUID()}`, topicId, text); }
 
-  private validRoot(path: string, scratch: boolean): boolean {
+  private projectPaths(): string[] {
+    const paths = [...(this.config.newSessions?.projects ?? [])];
+    if (this.config.newSessions?.autoProjects) {
+      paths.push(...this.config.roots, ...this.state.bindings().filter(binding =>
+        !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.ownsScratch(binding.cwd) &&
+        allowedSessionDirectory(binding.cwd, this.config)).map(binding => binding.cwd));
+    }
+    const result = new Set<string>();
+    for (const path of paths) {
+      try {
+        const canonical = realpathSync(path); const scratch = this.config.newSessions?.scratchRoot;
+        if (!this.state.ownsScratch(canonical) && (!scratch || !inside(canonical, scratch))) result.add(canonical);
+      }
+      catch { /* Removed projects cannot appear in a creation menu. */ }
+    }
+    return [...result];
+  }
+  private validRoot(path: string, scratch: boolean, allowMissing = false): boolean {
     try {
-      if (!isAbsolute(path) || !statSync(path).isDirectory() || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path) return false;
+      if (!isAbsolute(path)) return false;
+      if (existsSync(path)) {
+        if (!statSync(path).isDirectory() || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path) return false;
+      } else {
+        if (!allowMissing) return false;
+        let ancestor = dirname(path);
+        while (!existsSync(ancestor)) { const parent = dirname(ancestor); if (parent === ancestor) return false; ancestor = parent; }
+        if (!statSync(ancestor).isDirectory() || realpathSync(ancestor) !== ancestor) return false;
+      }
       const forbidden = [this.state.home, process.env.CODEX_HOME ?? join(homedir(), '.codex')];
       if (forbidden.some(root => inside(path, existsSync(root) ? realpathSync(root) : resolve(root)) || inside(resolve(root), path))) return false;
       if (scratch) {
-        if ((this.config.newSessions?.projects ?? []).some(root => inside(path, root) || inside(root, path))) return false;
+        if (this.projectPaths().some(root => inside(path, root) || inside(root, path))) return false;
         let parent = path;
         for (;;) { if (existsSync(join(parent, '.git'))) return false; const next = resolve(parent, '..'); if (next === parent) break; parent = next; }
       }
@@ -137,7 +166,7 @@ export class NewSessions {
     } catch { return false; }
   }
   private choiceAllowed(root: string, kind: 'scratch' | 'project'): boolean {
-    return (kind === 'scratch' ? this.config.newSessions?.scratchRoot === root : this.config.newSessions?.projects.includes(root)) === true && this.validRoot(root, kind === 'scratch');
+    return (kind === 'scratch' ? this.config.newSessions?.scratchRoot === root : this.projectPaths().includes(root)) === true && this.validRoot(root, kind === 'scratch');
   }
   private operationAllowed(op: NewSessionOperation): boolean {
     if (!op.root || !op.cwd || !op.kind || !this.choiceAllowed(op.root, op.kind)) return false;

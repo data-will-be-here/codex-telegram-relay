@@ -16,8 +16,8 @@ import { FakeTelegram, message, temporary } from './helpers.js';
 test('native /new: empty workspace-write thread persists across app-server restart without a model turn', {
   skip: process.env.CODEX_RELAY_NATIVE_NEW !== '1', timeout: 60_000,
 }, async () => {
-  const temp = temporary(); const home = join(temp.dir, 'codex'); const scratch = join(temp.dir, 'conversations');
-  mkdirSync(home); mkdirSync(scratch); const previousHome = process.env.CODEX_HOME; process.env.CODEX_HOME = home;
+  const temp = temporary(); const home = join(temp.dir, 'codex');
+  mkdirSync(home); const previousHome = process.env.CODEX_HOME; process.env.CODEX_HOME = home;
   const configFile = join(home, 'config.toml');
   const initialConfig = 'sandbox_mode = "workspace-write"\napproval_policy = "on-request"\n';
   writeFileSync(configFile, initialConfig);
@@ -52,7 +52,7 @@ test('native /new: empty workspace-write thread persists across app-server resta
     await boot();
     state = new State(join(temp.dir, 'relay'));
     const project = join(temp.dir, 'project'); mkdirSync(project);
-    const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: findCodex(), newSessions: { projects: [], scratchRoot: scratch } };
+    const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: findCodex() };
     const telegram = new FakeTelegram(); bridge = new Bridge(config, state, native, telegram);
     const outbox = new Outbox(state, telegram, config, 0);
     const update = message(1, 999, '/new'); delete object(update.message).message_thread_id;

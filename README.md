@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ### Why use it?
 
-- **Start a separate conversation (development).** `/new` offers a general question/research workspace first, then locally enabled projects. Each choice creates its own Codex session and Telegram topic.
+- **Start a separate conversation (development).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
 - **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
@@ -218,7 +218,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
-| `/new` | Create a conversation without a project, or a session in an enabled project (development) |
+| `/new` | Create a conversation without a project, or in a connected project (development) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -230,7 +230,7 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
-The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, or automatic history imports. New-session locations are enabled locally. Instructions sent to your session follow its existing Codex permissions.
+The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, or automatic history imports. New conversations use an automatically prepared workspace or known projects within the current discovery scope. Instructions sent to your session follow its existing Codex permissions.
 
 Since v0.1.18, the main command menu is simplified. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
 
@@ -240,16 +240,20 @@ In v0.1.17, `/model` in a connected session topic fetches the current native mod
 
 ## New conversations with /new (development)
 
-Enable creation locations once on the relay computer, then restart the updated relay:
+`/new` works out of the box, including existing installations without a `newSessions` configuration section. The relay automatically prepares `codex-telegram-conversations` beside its private data directory, keeping workspace files separate from the bot token and state database. If that location lies inside a Git repository, the default is `~/Codex/Conversations`. No `new enable` or manual directory creation is required.
+
+The project picker uses selected roots and previously connected projects within the current discovery scope. Ignored sessions and scratch UUID directories are excluded. Arbitrary paths cannot be supplied from Telegram. Existing explicit custom settings and a deliberate `new disable` remain respected.
+
+Optional local customization, followed by a relay restart:
 
 ```sh
 npm start -- new enable --project /absolute/path/to/project
 npm start -- new enable --scratch-root /absolute/path/to/conversations
 ```
 
-Use canonical absolute directories. Projects must exist; the scratch directory can be created when its parent exists. Keep scratch outside Git repositories, project roots, relay private data and `CODEX_HOME`. For example, create `D:\Codex` locally and choose `D:\Codex\Conversations`. `npm start -- new` shows configured locations; `new disable` revokes creation without deleting sessions, topics or files. This opt-in is separate from `sessions scope all`.
+Use canonical absolute directories for overrides. Keep scratch outside Git repositories, project roots, relay private data and `CODEX_HOME`. `npm start -- new` shows effective settings; `new disable` disables new creation while keeping existing conversations usable. These commands are optional; updating an existing relay requires only loading the updated code, not a new setup step.
 
-Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **Без проекта — вопрос / исследование** (a general conversation), followed by the current enabled project and other enabled projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
+Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **Без проекта — вопрос / исследование** (a general conversation), followed by the current available project and other known projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
 
 Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **Без проекта**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
 

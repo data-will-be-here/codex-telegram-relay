@@ -1,5 +1,13 @@
 # Verification record
 
+## Development: automatic /new defaults (2026-11-09)
+
+Removed the mandatory `new enable` setup step. Existing installations without `newSessions` get an enabled general-conversation workspace and known project choices automatically. Defaults are computed without rewriting configuration or creating folders during a config read; `/new` creates its workspace after owner authorization. Explicit overrides and intentional disable remain respected.
+
+Regression coverage includes a legacy configuration, first-use workspace creation, no directory creation for an unauthorized sender, known project choices under all/selected scope, omission of scratch UUID projects, and file export through a separate producer using the same implicit defaults. The real-native qualification now runs the complete creation/restart/archive scenario without any `newSessions` configuration section.
+
+Local results: 286 tests discovered, 283 passed and three environment-gated skips; the separately enabled native test passed. Build, type checking and package verification passed.
+
 ## Development: /new creation (2026-11-09)
 
 Tests exercise topic-less and bound origins, general/project selection, first-response baseline, duplicate updates/clicks, unknown native starts, uncertain naming, uncertain topic creation and `/bind`, selected-scope ownership/revocation, callback authorization/expiry, path substitution, persisted operation recovery and restoration without unarchiving. File-export coverage includes owned scratch producer/worker admission, readable labels and rejection of neighboring conversations. Transport assertions check exact start/name fields and absence of synthetic turns or permission overrides.

@@ -13,7 +13,21 @@ export interface Config {
   sessionScope?: 'all' | 'selected';
   ignoredThreadIds?: string[];
   outgoingFiles?: boolean;
-  newSessions?: { enabled?: boolean; projects: string[]; scratchRoot?: string };
+  newSessions?: { enabled?: boolean; autoProjects?: boolean; projects: string[]; scratchRoot?: string };
+}
+
+/** Defaults are computed for legacy installations too; reading config never creates directories. */
+export function newSessionDefaults(config: Config, home: string): NonNullable<Config['newSessions']> {
+  config.newSessions ??= { enabled: true, autoProjects: true, projects: config.roots.slice(0, 100) };
+  if (!config.newSessions.scratchRoot) {
+    let root = join(dirname(resolve(home)), 'codex-telegram-conversations');
+    for (let parent = root;;) {
+      if (existsSync(join(parent, '.git'))) { root = join(homedir(), 'Codex', 'Conversations'); break; }
+      const next = dirname(parent); if (next === parent) break; parent = next;
+    }
+    config.newSessions.scratchRoot = root;
+  }
+  return config.newSessions;
 }
 
 export function dataDirectory(): string {
@@ -121,12 +135,14 @@ export function readConfig(home: string): Config {
   if (raw.outgoingFiles !== undefined) config.outgoingFiles = raw.outgoingFiles;
   if (raw.newSessions !== undefined) {
     const creation = object(raw.newSessions);
-    if ((creation.enabled !== undefined && typeof creation.enabled !== 'boolean') || !Array.isArray(creation.projects) || creation.projects.length > 100 ||
+    if ((creation.enabled !== undefined && typeof creation.enabled !== 'boolean') ||
+        (creation.autoProjects !== undefined && typeof creation.autoProjects !== 'boolean') || !Array.isArray(creation.projects) || creation.projects.length > 100 ||
         !creation.projects.every(path => typeof path === 'string' && isAbsolute(path)) ||
         (creation.scratchRoot !== undefined && (typeof creation.scratchRoot !== 'string' || !isAbsolute(creation.scratchRoot)))) {
       throw new Error('Invalid new-session configuration.');
     }
     config.newSessions = { ...(typeof creation.enabled === 'boolean' ? { enabled: creation.enabled } : {}), projects: [...new Set(creation.projects as string[])],
+      ...(typeof creation.autoProjects === 'boolean' ? { autoProjects: creation.autoProjects } : {}),
       ...(typeof creation.scratchRoot === 'string' ? { scratchRoot: creation.scratchRoot } : {}) };
   }
   if (raw.ignoredThreadIds !== undefined) {
@@ -135,6 +151,7 @@ export function readConfig(home: string): Config {
     }
     config.ignoredThreadIds = [...new Set(raw.ignoredThreadIds as string[])];
   }
+  newSessionDefaults(config, home);
   return config;
 }
 
