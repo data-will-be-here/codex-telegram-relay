@@ -24,7 +24,7 @@ export function approvalCardIdentity(identity: string, binding: Binding, card: s
 export function approvalParts(card: string, reference: string, cwd?: string | null, sessionName?: string | null): FormattedText[] | undefined {
   const limit = 3500 - projectHeader(cwd, sessionName).length - 2;
   const preview = card.startsWith(PREVIEW_NOTICE);
-  if (!preview && formatMessages(card, true, limit).length <= 1) return undefined;
+  if (formatMessages(card, true, limit).length <= 1) return undefined;
   // Reserve space for a stable request reference and counters even for very large plans.
   const chunks = formatMessages(card, true, limit - 200);
   return chunks.map((chunk, index) => {
@@ -35,26 +35,50 @@ export function approvalParts(card: string, reference: string, cwd?: string | nu
   });
 }
 
-function shortenReviewText(text: string, label: string): string {
+function shortenReviewText(text: string, label: string, limit = 600): string {
   const lines = text.split('\n');
-  if (text.length <= 2000 && lines.length <= 40) return text;
-  const head = lines.slice(0, 20).join('\n').slice(0, 1200).replace(/[\ud800-\udbff]$/u, '');
-  const tail = lines.slice(-10).join('\n').slice(-600).replace(/^[\udc00-\udfff]/u, '');
+  if (text.length <= limit && lines.length <= 6) return text;
+  const head = lines.slice(0, 4).join('\n').slice(0, Math.floor(limit * 0.58)).replace(/[\ud800-\udbff]$/u, '');
+  const tail = lines.slice(-1).join('\n').slice(-Math.floor(limit * 0.2)).replace(/^[\udc00-\udfff]/u, '');
   const omitted = Math.max(0, lines.length - head.split('\n').length - tail.split('\n').length);
   return head + `\n[${label}: пропущено ${omitted} строк, ${text.length - head.length - tail.length} символов]\n` + tail;
 }
 
 function shortenAuxiliaryQuotes(reason: string): string {
+  const tokens = Lexer.lex(reason);
+  const sources = tokens.filter(token => token.type === 'code');
+  const selected = new Set(sources.length <= 3 ? sources : [sources[0], sources[1], sources.at(-1)]);
+  const omitted = sources.filter(token => !selected.has(token));
+  const budget = Math.min(600, Math.floor(1000 / Math.max(1, selected.size)));
+  let omittedNotice = false;
+  let result = ''; let offset = 0; let cursor = 0;
+  for (const token of tokens) {
+    const start = reason.indexOf(token.raw, cursor);
+    if (start < 0) continue;
+    cursor = start + token.raw.length;
+    if (token.type !== 'code' && token.type !== 'blockquote') continue;
+    let shown: string;
+    if (token.type === 'code' && !selected.has(token)) {
+      shown = omittedNotice ? '' : `[Фрагменты кода сокращены: пропущено ${omitted.length} блоков, ${omitted.reduce((sum, block) => sum + block.raw.length, 0)} символов. Полный текст в Codex.]\n\n`;
+      omittedNotice = true;
+    } else shown = token.type === 'code' ? code(shortenReviewText(token.text, 'Код сокращён', budget)) + '\n\n' : shortenReviewText(token.raw, 'Цитата сокращена');
+    result += reason.slice(offset, start) + shown;
+    offset = cursor;
+  }
+  return result + reason.slice(offset);
+}
+
+function reasonMarkdown(reason: string): string {
   let result = ''; let offset = 0; let cursor = 0;
   for (const token of Lexer.lex(reason)) {
     const start = reason.indexOf(token.raw, cursor);
     if (start < 0) continue;
     cursor = start + token.raw.length;
-    if (token.type !== 'code' && token.type !== 'blockquote') continue;
-    result += reason.slice(offset, start) + shortenReviewText(token.raw, 'Цитата сокращена');
+    if (token.type !== 'code') continue;
+    result += literal(reason.slice(offset, start)) + code(token.text) + '\n\n';
     offset = cursor;
   }
-  return result + reason.slice(offset);
+  return result + literal(reason.slice(offset));
 }
 
 function hasEmbeddedCode(command: string): boolean {
@@ -80,7 +104,7 @@ function hasEmbeddedCode(command: string): boolean {
 export function approvalDisplayMessage(method: string, params: Json, agent?: AgentOrigin): string {
   const display = { ...params };
   const reason = string(params.reason);
-  if (reason) display.reason = shortenAuxiliaryQuotes(reason);
+  if (reason) display.reason = shortenAuxiliaryQuotes(reason.replace(/\r\n?/gu, '\n'));
   let preview = false;
   if (method === 'item/commandExecution/requestApproval' && hasEmbeddedCode(string(params.command))) {
     const command = string(params.command);
@@ -92,12 +116,15 @@ export function approvalDisplayMessage(method: string, params: Json, agent?: Age
       display.proposedExecpolicyAmendment = params.proposedExecpolicyAmendment.map(value => {
         if (typeof value !== 'string') return value;
         const shown = shortenReviewText(value, 'Код в правиле разрешений сокращён');
-        if (shown !== value) preview = true;
+        if (shown !== value) {
+          preview = true;
+          if (command.includes(value)) return `[Код в правиле разрешений сокращён: ${value.length} символов; см. превью команды выше, полный текст в Codex]`;
+        }
         return shown;
       });
     }
   }
-  return (preview ? PREVIEW_NOTICE : '') + approvalMessage(method, display, agent);
+  return (preview ? PREVIEW_NOTICE : '') + approvalMessage(method, display, agent, reason ? reasonMarkdown(string(display.reason)) : undefined);
 }
 
 function literal(text: string): string {
@@ -118,13 +145,13 @@ function code(text: string): string {
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */
-export function approvalMessage(method: string, params: Json, agent?: AgentOrigin): string {
+export function approvalMessage(method: string, params: Json, agent?: AgentOrigin, renderedReason?: string): string {
   const origin = agent ? '**Agent**\n' + code(`${agent.name}\n${agent.threadId}`) + '\n\n' : '';
   if (method !== 'item/commandExecution/requestApproval' || !string(params.command)) {
     return origin + '🔐 Approval required\n\n' + code(JSON.stringify(params, null, 2));
   }
   const sections = ['🔐 Command approval'];
-  if (string(params.reason)) sections.push('**Reason**\n' + literal(string(params.reason)));
+  if (string(params.reason)) sections.push('**Reason**\n' + (renderedReason ?? literal(string(params.reason))));
   if (string(params.cwd)) sections.push('**Working directory**\n' + code(string(params.cwd)));
   sections.push('**Command**\n' + code(string(params.command)));
   if (string(params.environmentId) && params.environmentId !== 'local') {

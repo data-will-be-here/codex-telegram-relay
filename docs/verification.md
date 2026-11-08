@@ -1,5 +1,13 @@
 # Verification record
 
+## Development: compact code approval cards (2026-11-08)
+
+The owner refined code previews to a few lines in a single ordinary message rather than divided collapsible quotations. Embedded scripts and fenced reason examples now show at most six code lines including an omission marker, with a 600-unit/six-line abbreviation threshold. Repeated execution-policy code may refer to the command preview instead of duplicating it. A code-heavy approval retains the full-command warning and native decision controls in the same message. Large non-code review context, file diffs and permission requests keep their prior delivery rules and original identities.
+
+Integration regressions first rejected the quotation-based preview, then verified one send, actual `pre` entities, bounded code lines, surrounding prose outside the source block, no quotation/spoiler entities and an unchanged native decision. The earlier forced single-preview collapse and larger code budgets below describe previous behavior and are superseded by this refinement. Tests use synthetic native/Telegram adapters; the running relay was not restarted.
+
+Review reproduced two additional failures: CRLF/CR reason input bypassed source recognition, and eight large examples collectively overflowed the card. Display-only newline normalization and a shared 1,000-unit excerpt budget now handle these cases; at most the first two and last source examples remain, with a visible notice for omitted blocks. Both new integration regressions failed before their fixes and passed afterward. Windows validation: **257 tests, 255 passed, two platform skips, zero failures**; clean install, type checking, build, runtime audit (zero findings), package allowlist and whitespace checks passed.
+
 ## Development: collapsed approvals and code previews (2026-11-08)
 
 A Telegram screenshot exposed a presentation mismatch: `spoiler` masks text without reducing its height. Approval bodies now use Telegram's collapsed-by-default `expandable_blockquote` entity. A regression failed on the masking entity before the change, then passed with collapsible blocks. Resuming an older persisted plan converts only its unsent parts without reposting confirmed receipts; this upgrade path also failed before its fix.

@@ -300,11 +300,18 @@ test('only explicit auxiliary source quotes are shortened, while short commands 
     f.codex.pending.add('quote');
     await f.bridge.request({ id: 'quote', method: 'item/commandExecution/requestApproval', params }); await f.drain();
     const text = f.telegram.sent().map(approvalBody).join('');
-    assert.match(text, /Цитата сокращена: пропущено/u);
+    assert.match(text, /Код сокращён: пропущено/u);
     assert.match(text, /source line 0/u); assert.match(text, /source line 399/u);
     assert.doesNotMatch(text, /source line 200\n/u);
     assert.match(text, /Reason after the quote/u); assert.match(text, /echo short/u);
     assert.equal(JSON.stringify(params), before, 'Presentation must not mutate native request identity or parameters');
+    assert.equal(f.telegram.sent().length, 1);
+    const part = f.telegram.sent()[0]!;
+    const entities = array(part.entities).map(object);
+    assert.equal(entities.some(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler'), false);
+    const code = entities.find(entity => entity.type === 'pre' && string(part.text).slice(Number(entity.offset), Number(entity.offset) + Number(entity.length)).includes('source line 0'));
+    assert.ok(code, 'Quoted source is rendered as code rather than literal Markdown fences or a quotation');
+    assert.ok(string(part.text).slice(Number(code.offset), Number(code.offset) + Number(code.length)).split('\n').length <= 6);
     assert.ok(f.telegram.sent()[0]!.reply_markup, 'A short review keeps its existing command card and controls');
   } finally { f.close(); }
 });
@@ -318,6 +325,7 @@ test('inline command code and its execution-policy copy use labelled previews wi
     f.codex.pending.add('code-preview');
     await f.bridge.request({ id: 'code-preview', method: 'item/commandExecution/requestApproval', params });
     await f.drain(); await f.bridge.flushApproval();
+    assert.equal(f.telegram.sent().length, 1, 'A code-heavy approval must fit in one readable card');
     const body = f.telegram.sent().map(approvalBody).join('');
     assert.match(body, /Сокращённое превью/u);
     assert.match(body, /одобряет полную команду/u);
@@ -327,16 +335,61 @@ test('inline command code and its execution-policy copy use labelled previews wi
     assert.doesNotMatch(body, /synthetic line 200/u);
     assert.ok(body.length < 6000, 'Command code must not be repeated in full in permission context');
     for (const part of f.telegram.sent()) {
-      const review = array(part.entities).map(object).find(entity => entity.type === 'expandable_blockquote');
+      const entities = array(part.entities).map(object);
+      assert.equal(entities.some(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler'), false);
+      const code = entities.find(entity => entity.type === 'pre' && string(part.text).slice(Number(entity.offset), Number(entity.offset) + Number(entity.length)).includes('node -e'));
+      assert.ok(code, 'The preview must be a code block');
+      const source = string(part.text).slice(Number(code.offset), Number(code.offset) + Number(code.length));
+      assert.ok(source.split('\n').length <= 6, 'Show only a few lines of code');
       assert.ok(string(part.text).length <= 4096);
-      if (review) assert.ok(string(part.text).slice(0, Number(review.offset)).includes('одобряет полную команду'),
-        'The full-command warning must stay visible outside every collapsed preview');
+      assert.ok(string(part.text).slice(0, Number(code.offset)).includes('одобряет полную команду'));
     }
     assert.equal(JSON.stringify(params), original);
     const control = f.telegram.calls.find(call => call.method === 'editMessageReplyMarkup')?.params ?? f.telegram.sent().at(-1)!;
     const data = string(object(array(array(object(control.reply_markup).inline_keyboard)[0])[0]).callback_data);
     await f.bridge.update(click(430, data));
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'code-preview', result: { decision: 'accept' } } }]);
+  } finally { f.close(); }
+});
+
+test('Windows source excerpts use compact code blocks without changing original line endings', async () => {
+  const f = await fixture();
+  try {
+    for (const [index, newline] of ['\r\n', '\r'].entries()) {
+      const previous = f.telegram.sent().length;
+      const reason = ['Source:', '```ts', ...Array.from({ length: 400 }, (_, i) => `source line ${i}`), '```', 'Reason after the source.'].join(newline);
+      const params = { threadId: 'thread-a', command: 'echo synthetic', reason };
+      const original = JSON.stringify(params); const id = `windows-source-${index}`; f.codex.pending.add(id);
+      await f.bridge.request({ id, method: 'item/commandExecution/requestApproval', params }); await f.drain();
+      const parts = f.telegram.sent().slice(previous);
+      assert.equal(parts.length, 1);
+      const part = parts[0]!; const entities = array(part.entities).map(object);
+      const source = entities.filter(entity => entity.type === 'pre').map(entity => string(part.text).slice(Number(entity.offset), Number(entity.offset) + Number(entity.length))).find(text => text.includes('source line 0'));
+      assert.ok(source); assert.ok(source.split('\n').length <= 6);
+      assert.ok(source.includes('source line 399')); assert.equal(source.includes('source line 200\n'), false);
+      assert.equal(source.includes('Reason after'), false);
+      assert.ok(string(part.text).includes('Reason after the source.'));
+      assert.equal(JSON.stringify(params), original);
+    }
+  } finally { f.close(); }
+});
+
+test('multiple large code examples share one compact message without reverting to split quotes', async () => {
+  const f = await fixture();
+  try {
+    const reason = Array.from({ length: 8 }, (_, index) => `Example ${index}:\n\n\`\`\`js\n` +
+      Array.from({ length: 400 }, (_, line) => `synthetic source line ${line}: ` + 'x'.repeat(90)).join('\n') + '\n```\n\n').join('');
+    const params = { threadId: 'thread-a', command: 'echo synthetic', reason }; const original = JSON.stringify(params);
+    f.codex.pending.add('many-code');
+    await f.bridge.request({ id: 'many-code', method: 'item/commandExecution/requestApproval', params }); await f.drain();
+    assert.equal(f.telegram.sent().length, 1);
+    const part = f.telegram.sent()[0]!; const entities = array(part.entities).map(object);
+    assert.ok(string(part.text).length <= 4096);
+    assert.equal(entities.some(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler'), false);
+    assert.ok(entities.some(entity => entity.type === 'pre'));
+    assert.ok(string(part.text).includes('Example 0:')); assert.ok(string(part.text).includes('Example 7:'));
+    assert.match(string(part.text), /Фрагменты кода сокращены/u);
+    assert.equal(JSON.stringify(params), original);
   } finally { f.close(); }
 });
 
@@ -377,8 +430,11 @@ test('long operational arguments stay complete while single-line interpreter cod
     const previews = f.telegram.sent().slice(previous).map(approvalBody).join('');
     assert.equal(previews.includes(data), false);
     assert.equal(previews.match(/Команда сокращена/gu)?.length, 4);
-    for (const part of f.telegram.sent().slice(previous)) assert.ok(
-      array(part.entities).map(object).some(entity => entity.type === 'expandable_blockquote'),
-      'An abbreviated script preview stays collapsed even when it fits in one message');
+    assert.equal(f.telegram.sent().slice(previous).length, 4, 'Each abbreviated code approval fits in one message');
+    for (const part of f.telegram.sent().slice(previous)) {
+      const entities = array(part.entities).map(object);
+      assert.equal(entities.some(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler'), false);
+      assert.ok(entities.some(entity => entity.type === 'pre'));
+    }
   } finally { f.close(); }
 });
