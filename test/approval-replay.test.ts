@@ -206,8 +206,8 @@ test('reconnect during a card send refreshes the eventual receipt without submit
 test('multipart approval replay edits only the final control message and preserves all review text', async () => {
   const f = await persistentFixture();
   try {
-    const command = 'echo ' + 'literal-command-content '.repeat(300);
-    const long = { ...request, params: { ...request.params, command } };
+    const command = 'echo literal-command-content';
+    const long = { ...request, params: { ...request.params, command, reason: 'Complete review context. '.repeat(300) } };
     await f.bridge.request(long); await f.drain();
     const parts = f.telegram.sent().length; const lastMessage = f.telegram.message;
     assert.ok(parts > 1);

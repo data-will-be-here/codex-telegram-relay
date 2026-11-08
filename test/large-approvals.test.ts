@@ -17,13 +17,15 @@ async function persistentReview() {
   let state = new State(join(temp.dir, 'state'));
   let bridge = new Bridge(config, state, codex, telegram);
   await bridge.discover();
-  const command = 'echo ' + 'synthetic 😀 literal-content '.repeat(1700);
+  const command = 'echo synthetic 😀 literal-content';
   const request: RpcRequest = { id: 'large-request', method: 'item/commandExecution/requestApproval', params: {
-    threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command, availableDecisions: ['accept', 'decline'],
+    threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command,
+    reason: 'Synthetic context for a complete review. '.repeat(1700), availableDecisions: ['accept', 'decline'],
   } };
   const tick = async () => new Outbox(state, telegram, config, 0).flushOne();
   return { telegram, codex, request, command, tick,
     get bridge() { return bridge; },
+    get state() { return state; },
     parts: () => telegram.sent().filter(part => string(part.text).includes('🔐 Апрув ')),
     restart: async () => { state.close(); state = new State(join(temp.dir, 'state')); bridge = new Bridge(config, state, codex, telegram); await bridge.discover(); },
     drain: async () => { while (await tick() || await bridge.flushApproval()) {} },
@@ -31,13 +33,14 @@ async function persistentReview() {
   };
 }
 
-test('a long command is delivered intact in numbered spoiler parts and receives controls only after complete delivery', async () => {
+test('a long approval uses collapsed numbered review blocks and receives controls only after complete delivery', async () => {
   const f = await fixture();
   try {
-    const command = 'node -e "' + '/* synthetic 😀 α <b> [text] `code` */'.repeat(1800) + '"';
+    const command = 'node -e "/* synthetic 😀 α <b> [text] `code` */"';
+    const reason = 'Complete synthetic context 😀 α <b> [text] `code`. '.repeat(1800);
     f.codex.pending.add('large-command');
     await f.bridge.request({ id: 'large-command', method: 'item/commandExecution/requestApproval', params: {
-      threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command, availableDecisions: ['accept', 'decline'],
+      threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command, reason, availableDecisions: ['accept', 'decline'],
     } });
     await f.drain();
     const parts = f.telegram.sent();
@@ -51,11 +54,13 @@ test('a long command is delivered intact in numbered spoiler parts and receives 
       assert.equal(part.reply_markup, undefined);
       const entities = array(part.entities).map(object);
       assert.equal(entities.some(entity => entity.type === 'code' || entity.type === 'pre' || entity.type === 'text_link'), false);
-      const spoiler = entities.find(entity => entity.type === 'spoiler');
-      assert.ok(spoiler);
-      details += text.slice(Number(spoiler.offset), Number(spoiler.offset) + Number(spoiler.length));
+      assert.equal(entities.some(entity => entity.type === 'spoiler'), false, 'Noise masking does not collapse a tall approval');
+      const review = entities.find(entity => entity.type === 'expandable_blockquote');
+      assert.ok(review, 'Review text must use Telegram\'s collapsed-by-default quotation');
+      details += text.slice(Number(review.offset), Number(review.offset) + Number(review.length));
     }
     assert.ok(details.includes(command), 'Every command character, including Unicode and markup literals, must survive');
+    assert.ok(details.includes(reason), 'Unquoted review context must not be dropped');
     assert.doesNotMatch(details, /Message shortened/u);
     assert.equal(f.telegram.calls.some(call => call.method === 'editMessageReplyMarkup'), false);
     await f.bridge.flushApproval();
@@ -130,6 +135,30 @@ test('confirmed approval parts survive a database reopen and replay refreshes on
   } finally { f.close(); }
 });
 
+test('resuming an older spoiler plan collapses only its remaining parts without replaying receipts', async () => {
+  const f = await persistentReview();
+  try {
+    await f.bridge.request(f.request); await f.tick();
+    const first = string(f.parts()[0]!.text);
+    const delivery = f.state.next()!;
+    for (const part of delivery.richPlan!) for (const entity of array(part.params.entities).map(object)) {
+      if (entity.type === 'expandable_blockquote') entity.type = 'spoiler';
+    }
+    // Store the old-version plan at a confirmed checkpoint, then reopen like an upgrade.
+    f.state.sending(delivery.id); f.state.saveRichPlan(delivery.id, delivery.richPlan!);
+    f.state.pauseApprovalPart(delivery.id, delivery.nextPart, 0);
+    await f.restart(); await f.bridge.request(f.request); await f.drain();
+    assert.equal(f.parts().filter(part => part.text === first).length, 1);
+    for (const part of f.parts().slice(1)) {
+      const entities = array(part.entities).map(object);
+      assert.equal(entities.some(entity => entity.type === 'spoiler'), false);
+      assert.ok(entities.some(entity => entity.type === 'expandable_blockquote'));
+    }
+    assert.ok(f.parts().map(approvalBody).join('').includes(f.command));
+    assert.equal(f.telegram.calls.filter(call => call.method === 'editMessageReplyMarkup').length, 1);
+  } finally { f.close(); }
+});
+
 test('an unknown acknowledgement part is not replayed or given approval controls after restart', async () => {
   const f = await persistentReview();
   try {
@@ -152,8 +181,10 @@ test('an unknown acknowledgement part is not replayed or given approval controls
 test('a receipt arriving after prompt retirement checkpoints the held part before native replay', async () => {
   const f = await fixture();
   try {
-    const command = 'echo ' + 'synthetic '.repeat(1000);
-    const request: RpcRequest = { id: 'retired', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command } };
+    const command = 'echo synthetic';
+    const request: RpcRequest = { id: 'retired', method: 'item/commandExecution/requestApproval', params: {
+      threadId: 'thread-a', command, reason: 'Synthetic review context. '.repeat(400),
+    } };
     f.codex.pending.add(request.id);
     await f.bridge.request(request);
     const key = f.state.next()!.key;
@@ -180,7 +211,7 @@ test('resolution after the final checkpoint cannot be overwritten by delivery fi
   try {
     f.codex.pending.add('final-race');
     await f.bridge.request({ id: 'final-race', method: 'item/commandExecution/requestApproval', params: {
-      threadId: 'thread-a', command: 'echo ' + 'synthetic '.repeat(1000),
+      threadId: 'thread-a', command: 'echo synthetic', reason: 'Synthetic review context. '.repeat(400),
     } });
     const key = f.state.next()!.key;
     const accept = f.state.acceptApprovalPart.bind(f.state);
@@ -218,7 +249,7 @@ test('native resolution during a part send stops the remaining review and its co
   } finally { f.close(); }
 });
 
-test('a definite spoiler rejection falls back for only that part without changing numbering or content', async () => {
+test('a definite collapsed-block rejection falls back for only that part without changing numbering or content', async () => {
   const f = await persistentReview();
   try {
     const call = f.telegram.call.bind(f.telegram); let rejected = false;
@@ -275,5 +306,76 @@ test('only explicit auxiliary source quotes are shortened, while short commands 
     assert.match(text, /Reason after the quote/u); assert.match(text, /echo short/u);
     assert.equal(JSON.stringify(params), before, 'Presentation must not mutate native request identity or parameters');
     assert.ok(f.telegram.sent()[0]!.reply_markup, 'A short review keeps its existing command card and controls');
+  } finally { f.close(); }
+});
+
+test('inline command code and its execution-policy copy use labelled previews without changing the approved request', async () => {
+  const f = await fixture();
+  try {
+    const script = Array.from({ length: 400 }, (_, index) => `console.log('synthetic line ${index} 😀');`).join('\n');
+    const params = { threadId: 'thread-a', command: `node -e "${script}"`, proposedExecpolicyAmendment: ['node', '-e', script] };
+    const original = JSON.stringify(params);
+    f.codex.pending.add('code-preview');
+    await f.bridge.request({ id: 'code-preview', method: 'item/commandExecution/requestApproval', params });
+    await f.drain(); await f.bridge.flushApproval();
+    const body = f.telegram.sent().map(approvalBody).join('');
+    assert.match(body, /Сокращённое превью/u);
+    assert.match(body, /одобряет полную команду/u);
+    assert.match(body, /Команда сокращена/u);
+    assert.match(body, /Код в правиле разрешений сокращён/u);
+    assert.match(body, /synthetic line 0/u); assert.match(body, /synthetic line 399/u);
+    assert.doesNotMatch(body, /synthetic line 200/u);
+    assert.ok(body.length < 6000, 'Command code must not be repeated in full in permission context');
+    for (const part of f.telegram.sent()) {
+      const review = array(part.entities).map(object).find(entity => entity.type === 'expandable_blockquote');
+      assert.ok(string(part.text).length <= 4096);
+      if (review) assert.ok(string(part.text).slice(0, Number(review.offset)).includes('одобряет полную команду'),
+        'The full-command warning must stay visible outside every collapsed preview');
+    }
+    assert.equal(JSON.stringify(params), original);
+    const control = f.telegram.calls.find(call => call.method === 'editMessageReplyMarkup')?.params ?? f.telegram.sent().at(-1)!;
+    const data = string(object(array(array(object(control.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    await f.bridge.update(click(430, data));
+    assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'code-preview', result: { decision: 'accept' } } }]);
+  } finally { f.close(); }
+});
+
+test('long operational arguments stay complete while single-line interpreter code uses a preview', async () => {
+  const f = await fixture();
+  try {
+    const data = 'synthetic-payload'.repeat(400);
+    const curl = `curl --data '${data}' https://example.com --max-time 30`;
+    f.codex.pending.add('arguments');
+    await f.bridge.request({ id: 'arguments', method: 'item/commandExecution/requestApproval', params: {
+      threadId: 'thread-a', command: curl, proposedExecpolicyAmendment: ['curl', '--data', data],
+    } });
+    await f.drain();
+    const body = f.telegram.sent().map(approvalBody).join('');
+    assert.ok(body.includes(curl), 'Long arguments are not an inline code fragment');
+    assert.ok(body.includes(data));
+    assert.equal(body.includes('Сокращённое превью'), false);
+    let previous = f.telegram.sent().length;
+    for (const [index, command] of [
+      `node script.js --data '${data} -e user-data'`, `curl --data 'line1\n${data}\nlineN' https://example.com`,
+    ].entries()) {
+      const id = `ordinary-${index}`; f.codex.pending.add(id);
+      await f.bridge.request({ id, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command } });
+      await f.drain();
+      const ordinary = f.telegram.sent().slice(previous).map(approvalBody).join('');
+      assert.ok(ordinary.includes(command), 'Quoted data and script arguments are not interpreter flags');
+      assert.equal(ordinary.includes('Сокращённое превью'), false);
+      previous = f.telegram.sent().length;
+    }
+    for (const [index, command] of [
+      `node --input-type=module -e '${data}'`, `python3 -c '${data}'`, `pwsh -NoProfile -Command '${data}'`,
+      `node <<'SCRIPT'\n${data}\nSCRIPT`,
+    ].entries()) {
+      const id = `interpreter-${index}`; f.codex.pending.add(id);
+      await f.bridge.request({ id, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command } });
+    }
+    await f.drain();
+    const previews = f.telegram.sent().slice(previous).map(approvalBody).join('');
+    assert.equal(previews.includes(data), false);
+    assert.equal(previews.match(/Команда сокращена/gu)?.length, 4);
   } finally { f.close(); }
 });

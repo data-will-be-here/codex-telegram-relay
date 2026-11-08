@@ -126,6 +126,17 @@ export class Outbox {
         delivery.richPlan = review.map(part => ({ method: 'sendMessage', params: { ...part, link_preview_options: { is_disabled: true } } }));
         this.state.saveRichPlan(delivery.id, delivery.richPlan);
       }
+      if (approval && delivery.richPlan) {
+        let changed = false;
+        for (const part of delivery.richPlan.slice(delivery.nextPart)) {
+          if (!Array.isArray(part.params.entities)) continue;
+          for (const value of part.params.entities) {
+            const entity = object(value);
+            if (entity.type === 'spoiler') { entity.type = 'expandable_blockquote'; changed = true; }
+          }
+        }
+        if (changed) this.state.saveRichPlan(delivery.id, delivery.richPlan);
+      }
       const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName) : undefined;
       if (delivery.richPlan || rich) {
         const result = await this.richDelivery(delivery, rich, project, approval);

@@ -412,9 +412,11 @@ test('approval control characters remain visible and round-trip without Markdown
 test('a multipart approval retains its entire command and offers buttons only after the last part', async () => {
   const f = await fixture();
   try {
-    const command = 'echo ' + 'literal'.repeat(900);
+    const command = 'echo literal';
     f.codex.pending.add('long-command');
-    await f.bridge.request({ id: 'long-command', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command, cwd: f.projectA } });
+    await f.bridge.request({ id: 'long-command', method: 'item/commandExecution/requestApproval', params: {
+      threadId: 'thread-a', command, reason: 'Complete review context. '.repeat(300), cwd: f.projectA,
+    } });
     await f.drain();
     const sent = f.telegram.sent();
     assert.ok(sent.length > 1);
