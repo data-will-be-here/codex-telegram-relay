@@ -112,6 +112,10 @@ export class Files {
     if (this.generation) this.db.prepare('DELETE FROM file_runtime WHERE generation=?').run(this.generation);
     this.db.close();
   }
+  private ownsScratch(cwd: string, threadId?: string): boolean {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='new_sessions'").get()) return false;
+    return !!this.db.prepare("SELECT 1 FROM new_sessions WHERE json_extract(payload,'$.cwd')=? AND json_extract(payload,'$.kind')='scratch' AND json_extract(payload,'$.threadId') IS NOT NULL AND status IN ('persisted','topic','ready') " + (threadId ? " AND json_extract(payload,'$.threadId')=?" : '') + ' LIMIT 1').get(cwd, ...(threadId ? [threadId] : []));
+  }
   status(id: string): FileReceipt {
     const job = this.job(id);
     if (!job || job.ownerId !== readConfig(this.home).ownerId) throw new Error('Unknown file request.');
@@ -130,7 +134,7 @@ export class Files {
     const target = request.session ?? session;
     if (target && !/^[a-zA-Z0-9-]{6,128}$/u.test(target)) throw new Error('Invalid session ID or prefix.');
     let bindings = (this.db.prepare('SELECT * FROM bindings').all() as unknown as Binding[]).filter(binding =>
-      !config.ignoredThreadIds?.includes(binding.threadId) && allowedSessionDirectory(binding.cwd, config) &&
+      !config.ignoredThreadIds?.includes(binding.threadId) && allowedSessionDirectory(binding.cwd, config, this.ownsScratch(binding.cwd, binding.threadId)) &&
       (target ? binding.threadId.startsWith(target) : realpathSync(binding.cwd) === realpathSync(cwd)));
     if (target && bindings.some(binding => binding.threadId === target)) bindings = bindings.filter(binding => binding.threadId === target);
     if (bindings.length !== 1) throw new Error('Select exactly one session with --session ID. No file was queued.');
@@ -193,7 +197,7 @@ export class Files {
           const config = readConfig(this.home);
           const binding = this.db.prepare('SELECT * FROM bindings WHERE threadId=?').get(job.threadId);
           return config.outgoingFiles === true && this.ownerId === job.ownerId && config.ownerId === job.ownerId && !config.ignoredThreadIds?.includes(job.threadId) &&
-            allowedSessionDirectory(job.cwd, config) && binding?.topicId === job.topicId && binding.cwd === job.cwd;
+            allowedSessionDirectory(job.cwd, config, this.ownsScratch(job.cwd, job.threadId)) && binding?.topicId === job.topicId && binding.cwd === job.cwd;
         };
         if (!allowed() || !await authorize(job) || !allowed()) { this.finish(job.id, 'rejected', 'Export disabled or session/destination is no longer eligible.'); return true; }
         bytes = bytesFrom(this.snapshot(job.id));
@@ -208,7 +212,7 @@ export class Files {
       }
       const changed = this.db.prepare("UPDATE file_jobs SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'").run(job.id).changes;
       if (!changed) return false;
-      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd, job.sessionName);
+      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd, job.sessionName, this.ownsScratch(job.cwd, job.threadId) ? 'Без проекта' : undefined);
       try {
         const result = object(await telegram.upload!(job.kind === 'video' ? 'sendVideo' : 'sendDocument', {
           chat_id: job.ownerId, message_thread_id: job.topicId, caption: formatted.text, caption_entities: formatted.entities,

@@ -132,6 +132,7 @@ export class CodexClient extends EventEmitter implements Codex {
         const thread = read.value;
         if (!['cli', 'vscode', 'appServer'].includes(string(thread.source)) || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false || !string(thread.cwd) || ('path' in thread && !thread.path)) continue;
         const session: Session = { id: ids[index]!, cwd: string(thread.cwd), name: string(thread.name), status: string(object(thread.status).type) };
+        if (typeof thread.threadSource === 'string') session.threadSource = thread.threadSource;
         if (typeof thread.createdAt === 'number') session.createdAt = thread.createdAt;
         if (!eligible(session)) continue;
         if (result.length === MAX_DISCOVERED_SESSIONS) { this.emit('discoveryLimit', MAX_DISCOVERED_SESSIONS); return result; }
@@ -143,6 +144,52 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
+  async createThread(cwd: string, marker: string): Promise<Json> {
+    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker })).thread);
+  }
+  async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
+  async nonArchivedThread(threadId: string): Promise<Json | undefined> {
+    const thread = await this.read(threadId);
+    const path = string(thread.path);
+    if (!path || (await lstat(path)).isSymbolicLink()) throw new RpcError('The saved native history path could not be verified.', false);
+    const target = await realpath(path);
+    const home = await realpath(process.env.CODEX_HOME ?? join(homedir(), '.codex'));
+    const diff = relative(join(home, 'sessions'), target);
+    if (!isAbsolute(diff) && diff !== '..' && !diff.startsWith(`..${sep}`) && diff && target.endsWith('.jsonl')) return thread;
+    const archived = relative(join(home, 'archived_sessions'), target);
+    if (!isAbsolute(archived) && archived !== '..' && !archived.startsWith(`..${sep}`) && archived) return undefined;
+    throw new RpcError('Native history is outside the verified sessions directory.', false);
+  }
+  async storedThreads(cwd: string): Promise<Json[]> {
+    const result: Json[] = []; const cursors = new Set<string>(); let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const response = object(await this.call('thread/list', { cwd, archived: false, limit: 100,
+        sourceKinds: ['cli', 'vscode', 'appServer'], ...(cursor ? { cursor } : {}) }));
+      if (!Array.isArray(response.data)) throw new RpcError('Invalid stored-session response.', false);
+      result.push(...response.data.map(object));
+      if (response.nextCursor == null) return result;
+      cursor = string(response.nextCursor);
+      if (!cursor || cursors.has(cursor)) throw new RpcError('Invalid stored-session cursor.', false);
+      cursors.add(cursor);
+    }
+    throw new RpcError('Stored-session scan was incomplete. Creation will not be repeated.', false);
+  }
+  async findCreatedThread(cwd: string, marker: string): Promise<Json | undefined> {
+    const loaded = await this.loaded();
+    if (loaded.length > 512) throw new RpcError('Loaded-session scan was incomplete.', false);
+    const candidates = new Map<string, Json>();
+    for (let offset = 0; offset < loaded.length; offset += METADATA_READ_CONCURRENCY) {
+      for (const thread of await Promise.all(loaded.slice(offset, offset + METADATA_READ_CONCURRENCY).map(id => this.read(id)))) {
+        if (thread.cwd === cwd && thread.threadSource === marker) candidates.set(string(thread.id), thread);
+      }
+    }
+    for (const metadata of await this.storedThreads(cwd)) {
+      const thread = metadata.threadSource === undefined ? await this.read(string(metadata.id)) : metadata;
+      if (thread.cwd === cwd && thread.threadSource === marker) candidates.set(string(thread.id), thread);
+    }
+    if (candidates.size > 1) throw new RpcError('Multiple threads match this creation operation. Check Codex locally.', false);
+    return [...candidates.values()][0];
+  }
   async rateLimits(): Promise<Json> { return object(await this.call('account/rateLimits/read', {}, 8_000)); }
   async models(): Promise<Json[]> {
     const models: Json[] = [];

@@ -1,5 +1,36 @@
 # Verification record
 
+## Development: home-directory project collision (2026-11-09)
+
+A binding for the user's home directory appeared in automatic project candidates. It was correctly excluded from project buttons because it contains private relay/Codex data, but still participated in scratch overlap validation. This incorrectly suppressed the general-conversation choice under AppData.
+
+The fix filters ineligible projects before any workspace overlap check. A regression through Bridge reproduces the home binding, asserts the first actual Telegram keyboard button is “Без проекта”, and creates the selected session. A separate isolated replay of the device's configuration/bindings failed before the fix and passed afterwards with the expected first button; it sends no Telegram messages and creates no native session. Full local suite: 287 discovered, 284 passed, three environment-gated skips; build and package verification passed.
+
+## Development: automatic /new defaults (2026-11-09)
+
+Removed the mandatory `new enable` setup step. Existing installations without `newSessions` get an enabled general-conversation workspace and known project choices automatically. Defaults are computed without rewriting configuration or creating folders during a config read; `/new` creates its workspace after owner authorization. Explicit overrides and intentional disable remain respected.
+
+Regression coverage includes a legacy configuration, first-use workspace creation, no directory creation for an unauthorized sender, known project choices under all/selected scope, omission of scratch UUID projects, and file export through a separate producer using the same implicit defaults. The real-native qualification now runs the complete creation/restart/archive scenario without any `newSessions` configuration section.
+
+Local results: 286 tests discovered, 283 passed and three environment-gated skips; the separately enabled native test passed. Build, type checking and package verification passed.
+
+## Development: /new creation (2026-11-09)
+
+Tests exercise topic-less and bound origins, general/project selection, first-response baseline, duplicate updates/clicks, unknown native starts, uncertain naming, uncertain topic creation and `/bind`, selected-scope ownership/revocation, callback authorization/expiry, path substitution, persisted operation recovery and restoration without unarchiving. File-export coverage includes owned scratch producer/worker admission, readable labels and rejection of neighboring conversations. Transport assertions check exact start/name fields and absence of synthetic turns or permission overrides.
+
+The opt-in native test uses its own temporary `CODEX_HOME` and local App Server, fake Telegram and no model turn. It runs actual Bridge `/new`, reads empty history, restarts only that App Server, restores the same ID, archives the test thread and proves no unarchive/resume occurs. It passed locally on Windows with Codex CLI 0.166.0. The isolated native config remained unchanged. Real Telegram topics and the user's Codex profile were untouched.
+
+```powershell
+npm run build
+$env:CODEX_RELAY_NATIVE_NEW='1'
+node --test dist/test/native-new-sessions.test.js
+Remove-Item Env:CODEX_RELAY_NATIVE_NEW
+```
+
+The default suite skips native qualification without the flag; CI uses deterministic adapters. Requalify storage/archive behavior before supporting a changed history layout. Named empty threads are durable and resumable but absent from ordinary `thread/list`; list absence is not evidence of archival.
+
+Final local checks: 282 tests discovered, 279 passed and three environment-gated skips; the separately enabled native test passed. Type checking, build, package allowlist and production-dependency audit passed (zero reported vulnerabilities).
+
 ## Development: compact code approval cards (2026-11-08)
 
 The owner refined code previews to a few lines in a single ordinary message rather than divided collapsible quotations. Embedded scripts and fenced reason examples now show at most six code lines including an omission marker, with a 600-unit/six-line abbreviation threshold. Repeated execution-policy code may refer to the command preview instead of duplicating it. A code-heavy approval retains the full-command warning and native decision controls in the same message. Large non-code review context, file diffs and permission requests keep their prior delivery rules and original identities.

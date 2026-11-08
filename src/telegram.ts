@@ -94,14 +94,15 @@ class DeliveryCancelled extends Error {}
 
 export class Outbox {
   constructor(private readonly state: State, private readonly telegram: Telegram,
-    private readonly config: Pick<Config, 'ownerId' | 'roots' | 'sessionScope' | 'ignoredThreadIds'>, private readonly interval = 1100) {}
+    private readonly config: Pick<Config, 'ownerId' | 'roots' | 'sessionScope' | 'ignoredThreadIds' | 'newSessions'>, private readonly interval = 1100) {}
   private allowed(context: DeliveryContext): boolean {
+    if (context.ownerNotice) return true;
     const binding = context.topicId === null ? context.sourceThreadId ? this.state.binding(context.sourceThreadId) : undefined : this.state.topic(context.topicId);
     if (context.topicId !== null && !binding) return context.ownerNotice;
     if (context.sourceThreadId && this.config.ignoredThreadIds?.includes(context.sourceThreadId)) return false;
     if (context.topicId !== null && context.sourceThreadId && binding?.threadId !== context.sourceThreadId) return false;
     if (binding && this.config.ignoredThreadIds?.includes(binding.threadId)) return false;
-    return [context.projectCwd, binding?.cwd].every(cwd => !cwd || allowedSessionDirectory(cwd, this.config));
+    return [context.projectCwd, binding?.cwd].every(cwd => !cwd || allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, context.sourceThreadId ?? binding?.threadId)));
   }
   private check(delivery: Delivery): void {
     if (this.allowed(delivery) && (!delivery.key.startsWith('prompt/approval/') || this.state.approvalDeliveryActive(delivery.key))) return;
@@ -121,7 +122,7 @@ export class Outbox {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
       const approval = delivery.key.startsWith('prompt/approval/');
-      const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName) : undefined;
+      const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName, delivery.projectLabel) : undefined;
       if (review) {
         delivery.richPlan = review.map(part => ({ method: 'sendMessage', params: { ...part, link_preview_options: { is_disabled: true } } }));
         this.state.saveRichPlan(delivery.id, delivery.richPlan);
@@ -137,7 +138,7 @@ export class Outbox {
         }
         if (changed) this.state.saveRichPlan(delivery.id, delivery.richPlan);
       }
-      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName) : undefined;
+      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName, delivery.projectLabel) : undefined;
       if (delivery.richPlan || rich) {
         const result = await this.richDelivery(delivery, rich, project, approval);
         if (result.complete) {
@@ -146,12 +147,12 @@ export class Outbox {
         }
         return true;
       }
-      const limit = 3500 - projectHeader(project, delivery.sessionName).length - 2;
+      const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
       const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:(?:final|reply|assistant)\/|prompt\/approval\/)/u.test(delivery.key), limit);
       let messageId: number | null = null;
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;
-        const { text, entities } = withProjectHeader(chunk, project, delivery.sessionName);
+        const { text, entities } = withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel);
         const params: Json = { chat_id: this.config.ownerId, text };
         if (!chunk.plain && entities.length) params.entities = entities;
         if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
@@ -224,9 +225,9 @@ export class Outbox {
         const rejectedRich = error instanceof TelegramError && [400, 404].includes(error.status) &&
           /can't parse|\bunknown method\b|\bmethod (?:is )?not found\b|\brich[ _]message.*(?:invalid|unsupported|not supported|too|limit)|\b(?:table|block).*(?:invalid|too|limit)|\bmessage is too long\b/iu.test(error.message);
         if (part.method !== 'sendRichMessage' || part.fallback === undefined || !rejectedRich || isMissingTopic(error)) throw error;
-        const limit = 3500 - projectHeader(project, delivery.sessionName).length - 2;
+        const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
         parts.splice(index, 1, ...formatMessages(part.fallback, false, limit).map(chunk => {
-          const formatted = withProjectHeader(chunk, project, delivery.sessionName);
+          const formatted = withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel);
           return { method: 'sendMessage' as const, params: { ...formatted, link_preview_options: { is_disabled: true } } };
         }));
         this.state.saveRichPlan(delivery.id, parts);

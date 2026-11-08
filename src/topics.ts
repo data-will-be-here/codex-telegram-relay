@@ -4,10 +4,10 @@ import { State } from './state.js';
 import { TelegramError, isMissingTopic } from './telegram.js';
 import { integer, object, type Binding, type Session, type Telegram } from './types.js';
 
-type TopicSession = Pick<Session, 'id' | 'cwd'>;
+type TopicSession = Pick<Session, 'id' | 'cwd'> & { projectLabel?: string | undefined };
 
 export function topicTitle(session: TopicSession): string {
-  const project = basename(session.cwd).replace(/\s+/gu, ' ').trim() || 'project';
+  const project = (session.projectLabel || basename(session.cwd)).replace(/\s+/gu, ' ').trim() || 'project';
   const suffix = ' · ' + session.id.slice(0, 8);
   let name = '';
   for (const char of project) { if (name.length + char.length + suffix.length > 128) break; name += char; }
@@ -19,6 +19,7 @@ export class Topics {
   constructor(private readonly config: Config, private readonly state: State, private readonly telegram: Telegram) {}
 
   async ensure(session: TopicSession): Promise<Binding | undefined> {
+    session = { ...session, projectLabel: this.state.workspaceLabel(session.cwd) };
     const binding = this.state.binding(session.id);
     const previous = this.state.topicOperation(session.id);
     if (binding && !previous) return this.syncTitle(binding, session);
@@ -96,7 +97,7 @@ export class Topics {
     const matches = [...sessions.values()].filter(s => s.id.startsWith(prefix));
     if (matches.length !== 1) throw new Error('Session prefix must identify exactly one saved session.');
     const session = matches[0]!;
-    if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) throw new Error('This session is ignored or outside your selected projects.');
+    if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id))) throw new Error('This session is ignored or outside your selected projects.');
     return session;
   }
 

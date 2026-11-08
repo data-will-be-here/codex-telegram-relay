@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { linkSync, readdirSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readdirSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Files, MAX_EXPORT_BYTES } from '../src/files.js';
 import { readConfig, type Config } from '../src/config.js';
@@ -29,6 +29,42 @@ async function setup() {
   const flush = (adapter = telegram, signal = new AbortController().signal) => files.flushOne(adapter, binding => f.bridge.allowsFile(binding), signal);
   return { ...f, home, config, save, files, path, calls, messages: f.telegram, telegram, flush, close: () => { files.close(); f.close(); } };
 }
+
+test('owned scratch export works in selected scope and cannot export a neighboring conversation', async () => {
+  const f = await setup();
+  try {
+    const root = join(f.dir, 'conversations'); const cwd = join(root, 'operation'); const neighbor = join(root, 'other');
+    mkdirSync(cwd, { recursive: true }); mkdirSync(neighbor);
+    f.config.newSessions = { projects: [], scratchRoot: root }; f.bridge.config.newSessions = f.config.newSessions; f.save();
+    f.state.createNewSession({ id: 'operation', status: 'ready', kind: 'scratch', root, cwd, threadId: 'scratch-thread',
+      topicId: null, menuKey: 'notice/menu', token: 'token', expires: 0, choices: [], page: 0 });
+    f.state.bind('scratch-thread', 777, cwd, 'Без проекта');
+    f.codex.sessions.push({ id: 'scratch-thread', cwd, name: 'Research', status: 'idle' }); await f.bridge.discover();
+    const own = join(cwd, 'report.md'); const foreign = join(neighbor, 'report.md');
+    writeFileSync(own, 'own report'); writeFileSync(foreign, 'neighbor report');
+    assert.throws(() => f.files.enqueue({ path: foreign, session: 'scratch-thread' }, cwd, ''), /outside|project/iu);
+    const receipt = f.files.enqueue({ path: own, session: 'scratch-thread' }, cwd, '');
+    assert.equal(await f.flush(), true); assert.equal(f.files.status(receipt.id).status, 'sent');
+    assert.match(String(f.calls[0]!.params.caption), /^» Без проекта • Research/u);
+    assert.equal(f.calls[0]!.params.message_thread_id, 777);
+  } finally { f.close(); }
+});
+
+test('legacy file producers use the same automatic scratch root as the relay without saved creation settings', async () => {
+  const f = await setup();
+  try {
+    const root = readConfig(f.home).newSessions!.scratchRoot!; const cwd = join(root, 'automatic-operation');
+    mkdirSync(cwd, { recursive: true });
+    f.state.createNewSession({ id: 'automatic-operation', status: 'ready', kind: 'scratch', root, cwd, threadId: 'automatic-thread',
+      topicId: null, menuKey: 'notice/menu', token: 'token', expires: 0, choices: [], page: 0 });
+    f.state.bind('automatic-thread', 778, cwd, 'Без проекта');
+    f.codex.sessions.push({ id: 'automatic-thread', cwd, name: 'Automatic', status: 'idle' }); await f.bridge.discover();
+    const report = join(cwd, 'report.md'); writeFileSync(report, 'automatic report');
+    const receipt = f.files.enqueue({ path: report, session: 'automatic-thread' }, cwd, '');
+    assert.equal(await f.flush(), true); assert.equal(f.files.status(receipt.id).status, 'sent');
+    assert.equal(JSON.parse(readFileSync(join(f.home, 'config.json'), 'utf8')).newSessions, undefined);
+  } finally { f.close(); }
+});
 
 test('export producer runs in another process alongside singleton State, without a bot token', async () => {
   const f = await setup();

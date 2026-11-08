@@ -10,6 +10,7 @@ import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
+import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
@@ -49,13 +50,31 @@ export class Bridge {
   private startedAt = Date.now();
   private topics: Topics;
   private models: ModelPicker;
+  private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
 
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.modelThread(binding));
+  }
+
+  private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
+  workNewSession(): Promise<void> { return this.newSessions.tick(); }
+  close(): void { this.newSessions.close(); }
+  private async connectCreated(binding: Binding): Promise<void> {
+    if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
+    if (binding.lastTurn === null) this.state.baseline(binding.threadId, '-');
+    this.attached.add(binding.threadId);
+    try {
+      const thread = await this.codex.attach(binding.threadId);
+      if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true ||
+          thread.canAcceptDirectInput === false || !['cli', 'vscode', 'appServer'].includes(string(thread.source))) throw new Error('Created session attachment returned incompatible metadata.');
+      this.state.sessionName(binding.threadId, string(thread.name));
+    }
+    catch (error) { this.attached.delete(binding.threadId); throw error; }
   }
 
   private async modelThread(binding: Binding): Promise<Json | undefined> {
@@ -63,7 +82,7 @@ export class Bridge {
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
     if (!eligible()) return;
     const thread = await this.codex.read(binding.threadId, 1000);
-    if (eligible() && string(thread.cwd) === binding.cwd && allowedSessionDirectory(binding.cwd, this.config) &&
+    if (eligible() && string(thread.cwd) === binding.cwd && this.allowed(binding.cwd, binding.threadId) &&
         ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
   }
 
@@ -100,7 +119,7 @@ export class Bridge {
       if (!eligible()) return false;
       // Recheck the live native directory before forwarding text, with a short read-only timeout.
       const current = await this.codex.read(binding.threadId, 1000);
-      return allowedSessionDirectory(string(current.cwd), this.config) && eligible();
+      return this.allowed(string(current.cwd), binding.threadId) && eligible();
     });
   }
 
@@ -111,7 +130,7 @@ export class Bridge {
       !this.config.ignoredThreadIds?.includes(binding.threadId);
     if (!eligible() || !(await this.codex.list(session => session.id === binding.threadId)).some(session => session.id === binding.threadId)) return false;
     const current = await this.codex.read(binding.threadId, 1000);
-    return string(current.cwd) === binding.cwd && allowedSessionDirectory(binding.cwd, this.config) && eligible();
+    return string(current.cwd) === binding.cwd && this.allowed(binding.cwd, binding.threadId) && eligible();
   }
 
   async discover(): Promise<void> {
@@ -119,13 +138,16 @@ export class Bridge {
     this.discovering = true;
     try {
       const nameVersions = new Map(this.nameVersions);
-      const sessions = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && allowedSessionDirectory(session.cwd, this.config));
+      const readSessions = () => this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      let sessions = await readSessions();
+      if (await this.newSessions.restore(sessions.map(session => session.id))) sessions = await readSessions();
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.nameVersions.keys()) if (!loaded.has(id)) this.nameVersions.delete(id);
       for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
       for (const id of this.observedUnmaterialized) if (!loaded.has(id)) this.observedUnmaterialized.delete(id);
       for (const session of sessions) {
-        if (this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config)) { this.attached.delete(session.id); continue; }
+        if (this.newSessions.busy(session.id, session.threadSource)) continue;
+        if (this.config.ignoredThreadIds?.includes(session.id) || !this.allowed(session.cwd, session.id)) { this.attached.delete(session.id); continue; }
         try {
           const previous = this.state.binding(session.id);
           // Check native readiness before creating/replacing a topic. Keep the binding before attach so replayed requests can route.
@@ -171,7 +193,7 @@ export class Bridge {
       if (this.attached.has(id)) continue;
       let route;
       try {
-        route = await agentRoute(id, this.codex, this.config, root => this.attached.has(root) ? this.state.binding(root) : undefined);
+        route = await agentRoute(id, this.codex, this.config, root => this.attached.has(root) ? this.state.binding(root) : undefined, cwd => this.state.ownsScratch(cwd));
         if (!route) continue;
         if (eligible.size >= 128) {
           this.state.enqueue(`notice/subagent-limit/${this.generation}`, null, 'The relay reached its limit of 128 loaded subagents. Check Codex locally for additional approvals.');
@@ -209,6 +231,7 @@ export class Bridge {
   }
 
   async notification(method: string, params: Json): Promise<void> {
+    if (method === 'thread/started') { this.newSessions.observeStarted(object(params.thread)); return; }
     if (method === 'thread/name/updated') {
       const threadId = string(params.threadId);
       if (this.attached.has(threadId)) {
@@ -429,6 +452,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('recover:')) {
         await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('n:')) {
+        await this.newSessions.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
@@ -453,6 +479,7 @@ export class Bridge {
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
       this.notice(topicId, commandHelp()); return;
     }
+    if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
     if (/^\/limits(?:\s|$)/u.test(text)) {
       if (text !== '/limits') { this.notice(topicId, 'Используйте /limits без аргументов.'); return; }
       try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
@@ -497,7 +524,7 @@ export class Bridge {
         await this.codex.turns(session.id); // Explicit recovery must respect the same first-message gate as discovery.
         if (selectedBind) {
           const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
-          if (!live || live.cwd !== session.cwd || !allowedSessionDirectory(live.cwd, this.config) || this.config.ignoredThreadIds?.includes(session.id))
+          if (!live || live.cwd !== session.cwd || !this.allowed(live.cwd, session.id) || this.config.ignoredThreadIds?.includes(session.id))
             throw new Error('Сессия больше не доступна в выбранном проекте. Возобновите её в Codex и повторите восстановление.');
           if (this.pendingBind !== selectedBind || selectedBind.expires < Date.now() || this.state.topicOperation(session.id)?.attempt !== selectedBind.attempt)
             throw new Error('Выбор для привязки устарел. Нажмите кнопку восстановления ещё раз.');
@@ -536,7 +563,7 @@ export class Bridge {
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding) { this.notice(topicId, 'This topic has no saved session binding. Use /sessions to find the session and its saved topic; /bind SESSION_ID only recovers a topic awaiting recovery.'); return; }
     if (!this.attached.has(binding.threadId)) { this.notice(topicId, `Saved topic #${binding.topicId} for session ${binding.threadId.slice(0, 8)}.\n${await this.connectionStatus(binding)}\nNo instruction was sent.`); return; }
-    if (!allowedSessionDirectory(binding.cwd, this.config)) throw new Error('Project is outside configured roots.');
+    if (!this.allowed(binding.cwd, binding.threadId)) throw new Error('Project is outside configured roots.');
     const question = [...this.prompts.values()].filter(p => p.binding.topicId === topicId && p.questions.length && this.pending(p));
     if (!text.startsWith('/') && question.length) {
       const focused = question.filter(p => p.freeText);
@@ -552,7 +579,7 @@ export class Bridge {
 
   private async connectionStatus(binding: Binding): Promise<string> {
     if (this.config.ignoredThreadIds?.includes(binding.threadId)) return 'This session is ignored. Re-enable it locally before reconnecting.';
-    if (!allowedSessionDirectory(binding.cwd, this.config)) return 'This session is outside your selected projects. Select its project locally before reconnecting.';
+    if (!this.allowed(binding.cwd, binding.threadId)) return 'This session is outside your selected projects. Select its project locally before reconnecting.';
     if (this.attached.has(binding.threadId)) return 'The native session is connected. Send instructions in its saved topic.';
     try {
       const sessions = await this.codex.list(session => session.id === binding.threadId);
@@ -768,7 +795,7 @@ export class Bridge {
   }
   private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
     const thread = await this.codex.read(binding.threadId);
-    if (!allowedSessionDirectory(string(thread.cwd), this.config)) throw new RpcError('Native session moved outside configured roots.', false);
+    if (!this.allowed(string(thread.cwd), binding.threadId)) throw new RpcError('Native session moved outside configured roots.', false);
     const status = string(object(thread.status).type);
     if (status === 'active') {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
@@ -825,7 +852,7 @@ export class Bridge {
   }
   private async stillAllowed(binding: Binding): Promise<boolean> {
     const current = await this.codex.read(binding.threadId);
-    if (allowedSessionDirectory(string(current.cwd), this.config)) return true;
+    if (this.allowed(string(current.cwd), binding.threadId)) return true;
     this.attached.delete(binding.threadId);
     this.notice(binding.topicId, 'This native session moved outside your selected projects. Relaying is paused; select that project locally to reconnect it.');
     return false;
@@ -836,7 +863,7 @@ export class Bridge {
     const binding = this.state.binding(threadId);
     if (binding && this.attached.has(threadId)) return await this.stillAllowed(binding) ? { binding } : undefined;
     try {
-      const route = await agentRoute(threadId, this.codex, this.config, id => this.attached.has(id) ? this.state.binding(id) : undefined);
+      const route = await agentRoute(threadId, this.codex, this.config, id => this.attached.has(id) ? this.state.binding(id) : undefined, cwd => this.state.ownsScratch(cwd));
       if (!route) this.agentSubscriptions.delete(threadId);
       return route;
     } catch (error) { this.agentSubscriptions.delete(threadId); throw error; }

@@ -8,6 +8,21 @@ import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
 
+test('new thread creation and naming send only cwd, persistence and correlation fields', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.createThread(process.cwd(), 'codex-telegram-relay:new:operation');
+    await c.setThreadName('new-thread', 'New conversation');
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.find(record => record.method === 'thread/start')!.params,
+      { cwd: process.cwd(), ephemeral: false, threadSource: 'codex-telegram-relay:new:operation' });
+    assert.deepEqual(records.find(record => record.method === 'thread/name/set')!.params,
+      { threadId: 'new-thread', name: 'New conversation' });
+    assert.equal(records.some(record => record.method === 'turn/start' || record.method === 'thread/fork'), false);
+  } finally { c.close(); }
+});
+
 test('native proxy HTTP upgrade works; discovery excludes subagents and writes omit all policy overrides', async () => {
   const c = new CodexClient();
   try {

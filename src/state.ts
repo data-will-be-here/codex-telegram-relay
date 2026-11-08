@@ -10,6 +10,7 @@ const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (ke
 
 export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage'; params: Json; fallback?: string; }
 export interface Delivery {
+  projectLabel?: string | undefined;
   sessionName?: string | null;
   id: number; key: string; topicId: number | null; text: string; markup: Json | null; projectCwd: string | null;
   sourceThreadId: string | null;
@@ -22,6 +23,14 @@ export interface TopicOperation {
   status: 'missing' | 'creating' | 'uncertain' | 'failed' | 'retry'; retryAt: number;
 }
 export interface ApprovalCard { identity: string; deliveryKey: string; status: string; }
+
+export type NewSessionPhase = 'selecting' | 'cancelled' | 'preparing' | 'starting' | 'uncertain' | 'known' | 'persisted' | 'topic' | 'ready' | 'failed';
+export interface NewSessionOperation {
+  id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
+  choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
+  kind?: 'project' | 'scratch'; root?: string; cwd?: string; threadId?: string; name?: string;
+  retryAt?: number; error?: string;
+}
 
 export class State {
   private db: DatabaseSync;
@@ -62,6 +71,12 @@ export class State {
         CREATE TABLE IF NOT EXISTS approval_requests(identity TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, requestId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS approval_cards(identity TEXT PRIMARY KEY, deliveryKey TEXT NOT NULL UNIQUE, requestIdentity TEXT NOT NULL, ownerToken TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS new_sessions_status ON new_sessions(status);
+        CREATE UNIQUE INDEX IF NOT EXISTS new_sessions_thread ON new_sessions(json_extract(payload,'$.threadId'));
+        CREATE INDEX IF NOT EXISTS new_sessions_token ON new_sessions(json_extract(payload,'$.token'));
+        CREATE INDEX IF NOT EXISTS new_sessions_workspace ON new_sessions(json_extract(payload,'$.cwd'),status);
+        UPDATE new_sessions SET status='uncertain' WHERE status='starting';
         UPDATE topic_operations SET status='uncertain' WHERE status='creating';
         UPDATE incoming SET status='uncertain' WHERE status='dispatching';
         UPDATE outbox SET status='uncertain' WHERE status='sending';
@@ -91,9 +106,38 @@ export class State {
     this.db.close();
     if (existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
   }
-  bindings(): Binding[] { return this.db.prepare('SELECT * FROM bindings').all() as unknown as Binding[]; }
-  binding(threadId: string): Binding | undefined { return this.db.prepare('SELECT * FROM bindings WHERE threadId=?').get(threadId) as unknown as Binding | undefined; }
-  topic(topicId: number): Binding | undefined { return this.db.prepare('SELECT * FROM bindings WHERE topicId=?').get(topicId) as unknown as Binding | undefined; }
+  newSessions(phases?: readonly NewSessionPhase[]): NewSessionOperation[] {
+    const rows = phases ? this.db.prepare(`SELECT * FROM new_sessions WHERE status IN (${phases.map(() => '?').join(',')})`).all(...phases) : this.db.prepare('SELECT * FROM new_sessions').all();
+    return rows.map(row => ({ ...JSON.parse(string(row.payload)), status: row.status }) as NewSessionOperation);
+  }
+  findNewSession(field: 'token' | 'threadId', value: string): NewSessionOperation | undefined {
+    const row = this.db.prepare(`SELECT * FROM new_sessions WHERE json_extract(payload,'$.${field}')=? LIMIT 1`).get(value);
+    return row ? { ...JSON.parse(string(row.payload)), status: row.status } as NewSessionOperation : undefined;
+  }
+  newSession(id: string): NewSessionOperation | undefined {
+    const row = this.db.prepare('SELECT * FROM new_sessions WHERE id=?').get(id);
+    return row ? { ...JSON.parse(string(row.payload)), status: row.status } as NewSessionOperation : undefined;
+  }
+  createNewSession(operation: NewSessionOperation): void {
+    this.db.prepare('INSERT INTO new_sessions VALUES(?,?,?)').run(operation.id, operation.status, JSON.stringify(operation));
+  }
+  changeNewSession(id: string, expected: NewSessionPhase, patch: Partial<NewSessionOperation>): NewSessionOperation | undefined {
+    const previous = this.newSession(id);
+    if (!previous || previous.status !== expected) return;
+    const next = { ...previous, ...patch, id };
+    return this.db.prepare('UPDATE new_sessions SET status=?,payload=? WHERE id=? AND status=?').run(next.status, JSON.stringify(next), id, expected).changes ? next : undefined;
+  }
+  ownsScratch(cwd: string, threadId?: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM new_sessions WHERE json_extract(payload,'$.cwd')=? AND json_extract(payload,'$.kind')='scratch' AND json_extract(payload,'$.threadId') IS NOT NULL AND status IN ('persisted','topic','ready')" +
+      (threadId ? " AND json_extract(payload,'$.threadId')=?" : '') + ' LIMIT 1').get(cwd, ...(threadId ? [threadId] : []));
+  }
+  workspaceLabel(cwd?: string | null): string | undefined { return cwd && this.ownsScratch(cwd) ? 'Без проекта' : undefined; }
+  private describeBinding(binding: Binding | undefined): Binding | undefined {
+    return binding ? { ...binding, ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'Без проекта' } : {}) } : undefined;
+  }
+  bindings(): Binding[] { return (this.db.prepare('SELECT * FROM bindings').all() as unknown as Binding[]).map(binding => this.describeBinding(binding)!); }
+  binding(threadId: string): Binding | undefined { return this.describeBinding(this.db.prepare('SELECT * FROM bindings WHERE threadId=?').get(threadId) as unknown as Binding | undefined); }
+  topic(topicId: number): Binding | undefined { return this.describeBinding(this.db.prepare('SELECT * FROM bindings WHERE topicId=?').get(topicId) as unknown as Binding | undefined); }
   bind(threadId: string, topicId: number, cwd: string, title: string): void {
     this.db.prepare('INSERT INTO bindings(threadId,topicId,cwd,title) VALUES(?,?,?,?)').run(threadId, topicId, cwd, title);
   }
@@ -207,6 +251,11 @@ export class State {
     this.db.prepare('UPDATE replies SET turnId=? WHERE threadId=? AND inputId=?').run(turnId, threadId, inputId);
   }
   clearReply(threadId: string, inputId: number): void { this.db.prepare('DELETE FROM replies WHERE threadId=? AND inputId=?').run(threadId, inputId); }
+  enqueueOwnerNotice(key: string, topicId: number | null, text: string, markup: Json | null = null): void {
+    if (!key.startsWith('notice/')) throw new Error('Owner notices require a notice key.');
+    this.enqueue(key, null, text, markup);
+    this.db.prepare("UPDATE outbox SET topicId=? WHERE key=? AND projectCwd IS NULL AND sourceThreadId IS NULL AND status='pending'").run(topicId, key);
+  }
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string): void {
     // A duplicate remains a no-op even while admission is full or after an uncertain send.
     if (this.db.prepare('SELECT 1 FROM outbox WHERE key=?').get(key)) return;
@@ -276,6 +325,7 @@ export class State {
       markup: row.markup === null ? null : object(JSON.parse(string(row.markup))), projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null,
       sourceThreadId: typeof row.sourceThreadId === 'string' ? row.sourceThreadId : null,
       sessionName: typeof row.sessionName === 'string' ? row.sessionName : null,
+      projectLabel: this.workspaceLabel(typeof row.projectCwd === 'string' ? row.projectCwd : null),
       ownerNotice: row.ownerNotice === 1,
       richPlan: typeof row.richPlan === 'string' ? JSON.parse(row.richPlan) as RichDeliveryPart[] : null,
       nextPart: Number(row.nextPart), messageId: row.messageId === null ? null : Number(row.messageId),

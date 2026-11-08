@@ -9,6 +9,7 @@ export type MessageMode = 'all' | 'compact';
 export type UserInput = { type: 'text'; text: string } | { type: 'localImage'; path: string };
 
 export interface Session {
+  threadSource?: string;
   id: string;
   cwd: string;
   name: string;
@@ -18,6 +19,7 @@ export interface Session {
 }
 
 export interface Binding {
+  projectLabel?: string | undefined;
   sessionName?: string | null;
   threadId: string;
   topicId: number;
@@ -36,6 +38,11 @@ export interface AgentOrigin { threadId: string; name: string; }
 export interface ModelSettings { model: string; effort?: string; serviceTier: string; }
 
 export interface Codex {
+  createThread?(cwd: string, marker: string): Promise<Json>;
+  setThreadName?(threadId: string, name: string): Promise<void>;
+  storedThreads?(cwd: string): Promise<Json[]>;
+  nonArchivedThread?(threadId: string): Promise<Json | undefined>;
+  findCreatedThread?(cwd: string, marker: string): Promise<Json | undefined>;
   rateLimits(): Promise<Json>;
   models(): Promise<Json[]>;
   updateSettings(threadId: string, settings: ModelSettings): Promise<void>;
