@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { Bridge } from '../src/bridge.js';
 import { Outbox, TelegramClient, TelegramError } from '../src/telegram.js';
 import { State } from '../src/state.js';
 import { WIDGET_HTML, widgetData } from '../src/widget-template.js';
 import { Widgets } from '../src/widgets.js';
+import { resultParts } from '../src/widget-result.js';
 import { object, string, type Json } from '../src/types.js';
 import { fixture, message, temporary } from './helpers.js';
 
@@ -134,7 +136,7 @@ test('Current step reveals the complete progress text only on an authorized card
   } finally { f.close(); }
 });
 
-test('a fast widget turn still sends one notified result and keeps its full answer across pruning and native detach', async () => {
+test('a fast widget turn sends complete result parts with one notification and retains its text copy', async () => {
   const f = await setup();
   try {
     f.state.setViewMode('thread-a', 'widgets'); await f.start();
@@ -143,9 +145,10 @@ test('a fast widget turn still sends one notified result and keeps its full answ
     const text = ('The complete final answer with code and explanation. '.repeat(45)).trim();
     const turn = { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
-    const result = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
-    assert.equal(result.disable_notification, false); assert.equal(JSON.parse(string(result.chat_data)).k, 'result');
+    const cards = f.telegram.calls.filter(call => call.method === 'sendWidget');
+    assert.ok(cards.length > 1); assert.equal(cards.filter(card => card.params.disable_notification === false).length, 1);
+    const result = cards.at(-1)!.params;
+    assert.equal(JSON.parse(string(result.chat_data)).k, 'result');
     const data = string(object((object(result.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data);
     const answer = f.state.widgetAnswer(data.slice(2))!; assert.ok(answer.text.includes(text));
     assert.equal(f.telegram.sent().some(message => string(message.text).includes(text)), false);
@@ -157,7 +160,7 @@ test('a fast widget turn still sends one notified result and keeps its full answ
     assert.ok(f.state.widgetAnswer(data.slice(2))!.text.includes(text));
     await f.bridge.update(click(823)); await f.drain(); assert.ok(f.telegram.sent().some(message => string(message.text).includes(text)));
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, cards.length);
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
@@ -187,6 +190,116 @@ test('a proven unsent result widget waits three seconds and then sends once', as
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Final result' }] } });
     await f.drain(); assert.equal(sends, 1); f.advance(2999); await f.drain(); assert.equal(sends, 1);
     f.advance(1); await f.drain(); assert.equal(sends, 2); assert.equal(f.telegram.sent().some(message => string(message.text).includes('Final result')), false);
+  } finally { f.close(); }
+});
+
+test('final widgets embed the formatted complete answer and number all parts instead of shortening it', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    const text = '# Result\n\n**Formatted explanation.**\n\n- First item\n- Second item\n\n```js\nconst value = 42;\n```\n\n' + 'A complete paragraph with details. '.repeat(70) + 'END_OF_WIDGET_ANSWER';
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
+    await f.drain();
+    const cards = f.telegram.calls.filter(call => call.method === 'sendWidget');
+    assert.ok(cards.length > 1, 'the full answer must use multiple result cards');
+    assert.ok(cards.some(card => string(card.params.html).includes('END_OF_WIDGET_ANSWER')), 'the tail must live in a widget, not only in a server cache');
+    assert.equal(f.telegram.sent().some(item => string(item.text).includes('Formatted explanation')), false);
+  } finally { f.close(); }
+});
+
+test('a multipart result retries only the unsent card and persists a middle receipt without another POST', async () => {
+  const f = await setup(); let attempts = 0; let failWrite = true;
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    const text = 'A complete section with useful details. '.repeat(65) + 'MULTIPART_TAIL';
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendWidget' && ++attempts === 2) throw new TelegramError('Pre-connect failure', 0, undefined, true); return call(method, params); };
+    const accept = f.state.acceptRichPart.bind(f.state);
+    f.state.acceptRichPart = (...args) => { if (args[1] === 1 && failWrite) { failWrite = false; throw new Error('Temporary receipt persistence failure'); } return accept(...args); };
+    assert.equal(await f.outbox.flushOne(), true); assert.equal(await f.outbox.flushOne(), true);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    f.advance(2999); assert.equal(await f.outbox.flushOne(), false);
+    f.advance(1); await f.outbox.flushOne();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 2);
+    f.advance(1000); while (await f.outbox.flushOne()) { /* Retry receipt locally, then send the unsent suffix. */ }
+    const cards = f.telegram.calls.filter(call => call.method === 'sendWidget');
+    assert.equal(new Set(cards.map(card => card.params.html)).size, cards.length);
+    assert.ok(cards.some(card => string(card.params.html).includes('MULTIPART_TAIL')));
+    assert.equal(f.telegram.sent().some(item => string(item.text).includes('A complete section')), false);
+  } finally { f.close(); }
+});
+
+test('restart resumes an acknowledged result suffix but never replays an in-flight unknown card', async () => {
+  const f = await setup(); const temp = temporary(); let state: State | undefined;
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    const saved = f.state.widgetCard('thread-a', 'live')!;
+    const text = 'Preserved complete result section. '.repeat(65) + 'RECOVERY_TAIL';
+    const parts = resultParts({ ...saved, kind: 'result', snapshot: { ...saved.snapshot, status: 'done' } }, text, 'f'.repeat(32));
+    assert.ok(parts.length > 2);
+    for (const phase of ['acknowledged', 'unknown', 'legacy']) {
+      const inFlight = phase !== 'acknowledged';
+      const home = join(temp.dir, phase); state = new State(home);
+      const binding = saved.binding; state.installTopic(binding.threadId, binding.topicId, binding.cwd, binding.title);
+      state.enqueueWidgetAnswer('final/thread-a/live', binding, text, 'f'.repeat(32), parts);
+      const delivery = state.next()!; state.sending(delivery.id); state.acceptRichPart(delivery.id, 0, 1234);
+      if (phase === 'unknown') { state.retryDelivery(delivery.id, 0); const next = state.next()!; state.sending(next.id); }
+      state.close();
+      if (phase === 'legacy') {
+        const db = new DatabaseSync(join(home, 'state.sqlite'));
+        try { db.exec('UPDATE widget_answers SET multipartSafe=0'); } finally { db.close(); }
+      }
+      state = new State(home); const before = f.telegram.calls.length;
+      const outbox = new Outbox(state, f.telegram, f.bridge.config, 0);
+      while (await outbox.flushOne()) { /* Only parts with definitely no POST are resumed. */ }
+      const calls = f.telegram.calls.slice(before); const widgets = calls.filter(call => call.method === 'sendWidget');
+      assert.equal(widgets.length, inFlight ? 0 : parts.length - 1);
+      assert.equal(widgets.some(call => call.params.html === parts[0]!.params.html), false);
+      assert.equal(calls.some(call => call.method === 'sendMessage' && string(call.params.text).includes('RECOVERY_TAIL')), inFlight);
+      state.close(); state = undefined;
+    }
+  } finally { state?.close(); temp.close(); f.close(); }
+});
+
+test('text fallback cannot mark a result delivered without a positive receipt or replay that part', async () => {
+  for (const malformed of [{}, { message_id: 0 }, { message_id: -1 }]) {
+    const f = await setup(); let unconfirmed = 0;
+    try {
+      f.state.setViewMode('thread-a', 'widgets'); await f.start();
+      await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Receipt example' }] } });
+      const delivery = f.state.next()!;
+      const markup = object(delivery.richPlan!.at(-1)!.params.reply_markup);
+      const token = string(object((markup.inline_keyboard as Json[][])[0]![0]).callback_data).slice(2);
+      const call = f.telegram.call.bind(f.telegram);
+      f.telegram.call = async (method, params) => {
+        if (method === 'sendWidget') throw new TelegramError('Unsupported widget', 400);
+        if (method === 'sendMessage' && !string(params?.text).includes('could not be confirmed')) {
+          unconfirmed++; return malformed;
+        }
+        return call(method, params);
+      };
+      await f.outbox.flushOne(); await f.outbox.flushOne();
+      assert.ok(f.state.uncertainCount() > 0); assert.equal(f.state.widgetAnswer(token)!.messageId, null);
+      while (await f.outbox.flushOne()) { /* The separate complete-reply backup may deliver, never the uncertain part again. */ }
+      assert.equal(unconfirmed, 1); assert.ok(f.telegram.sent().some(item => string(item.text).includes('Receipt example')));
+    } finally { f.close(); }
+  }
+});
+
+test('a new native question is delivered before continuing a long result series', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(90) }] } });
+    await f.outbox.flushOne(); assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    f.codex.pending.add('question');
+    await f.bridge.request({ id: 'question', method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', turnId: 'next',
+      questions: [{ id: 'q', question: 'Important pending question?', options: [{ label: 'One', description: 'First' }] }] } });
+    await f.outbox.flushOne();
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Important pending question')));
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
 
@@ -224,11 +337,12 @@ test('long cached answers preserve their tail and deduplicate late completion af
     const text = 'A full explanation. '.repeat(2500) + 'END_OF_FULL_ANSWER';
     const turn = { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
+    const cards = f.telegram.calls.filter(call => call.method === 'sendWidget').length;
     f.advance(8 * 86400_000); f.state.prune();
     // Use a different baseline so the late notification reaches durable deduplication.
     f.state.baseline('thread-a', 'other');
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, cards);
     assert.equal(f.telegram.sent().some(item => string(item.text).includes('A full explanation')), false);
     await f.readAnswer('A full explanation');
     assert.ok(f.telegram.sent().some(item => string(item.text).includes('END_OF_FULL_ANSWER')));

@@ -273,7 +273,11 @@ export class Outbox {
         try {
           while (true) {
             this.check(delivery);
-            try { messageId = integer(object(await this.telegram.call('sendMessage', params)).message_id) ?? null; break; }
+            try {
+              messageId = integer(object(await this.telegram.call('sendMessage', params)).message_id) ?? null;
+              if (delivery.key.startsWith('attention/final-widget-fallback/') && (!messageId || messageId < 1)) throw new TelegramError('Result text receipt was not confirmed.', 0);
+              break;
+            }
             catch (error) {
               if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;
               await delay(Math.min(error.retryAfter ?? 2, 60) * 1000);
@@ -303,6 +307,7 @@ export class Outbox {
   }
 
   private async richDelivery(delivery: Delivery, rich: RichPart[] | undefined, project?: string | null, approval = false): Promise<{ messageId: number | null; complete: boolean }> {
+    const result = this.state.isWidgetAnswer(delivery.key);
     const parts: RichDeliveryPart[] = delivery.richPlan ?? rich!.map(part => ({
       method: 'sendRichMessage', params: { rich_message: part.richMessage }, fallback: part.fallback,
     }));
@@ -319,11 +324,11 @@ export class Outbox {
           this.check(delivery);
           try {
             messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null;
-            if (part.method === 'sendWidget' && (!messageId || messageId < 1)) throw new TelegramError('Result widget receipt was not confirmed.', 0);
+            if (result && (!messageId || messageId < 1)) throw new TelegramError('Result part receipt was not confirmed.', 0);
             break;
           }
           catch (error) {
-            if (part.method === 'sendWidget' && error instanceof TelegramError && (error.notSent || error.status === 429)) {
+            if (result && error instanceof TelegramError && (error.notSent || error.status === 429)) {
               const retryAt = Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000;
               this.persistAnswer(delivery.id, () => this.state.retryDelivery(delivery.id, retryAt));
               return { messageId, complete: false };
@@ -337,14 +342,17 @@ export class Outbox {
           }
         }
       } catch (error) {
-        if (part.method === 'sendWidget' && part.fallback !== undefined && !isMissingTopic(error)) {
+        if (error instanceof DeliveryCancelled) throw error;
+        const unknownResult = result && (!(error instanceof TelegramError) || error.status === 0 || error.status >= 500);
+        if ((part.method === 'sendWidget' && part.fallback !== undefined || unknownResult) && !isMissingTopic(error)) {
           const rejected = error instanceof TelegramError && error.status >= 400 && error.status < 500;
           if (!rejected) {
             this.persistAnswer(delivery.id, () => this.state.fallbackWidgetAnswer(delivery.id));
             return { messageId, complete: false };
           }
           const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
-          parts.splice(index, 1, ...formatMessages(part.fallback, true, limit).map(chunk => ({ method: 'sendMessage' as const,
+          const remaining = parts.slice(index).flatMap(item => item.fallbackText ? [item.fallbackText] : formatMessages(item.fallback ?? delivery.text, true, limit));
+          parts.splice(index, parts.length - index, ...remaining.map(chunk => ({ method: 'sendMessage' as const,
             params: { ...withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true } } })));
           this.persistAnswer(delivery.id, () => {
             if (delivery.sourceThreadId) this.state.setViewMode(delivery.sourceThreadId, 'classic');
@@ -372,9 +380,13 @@ export class Outbox {
       if (approval) {
         if (messageId === null) throw new TelegramError('Approval part receipt was not confirmed.', 0);
         if (!this.state.acceptApprovalPart(delivery.id, index, messageId)) throw new DeliveryCancelled();
-      } else if (part.method === 'sendWidget' && parts.length === 1 && messageId !== null) {
+      } else if (result && messageId !== null) {
         const receipt = messageId;
-        const write = (): void => { this.state.acceptRichPart(delivery.id, index, receipt); this.state.delivered(delivery.id, receipt); };
+        const write = (): void => {
+          this.state.acceptRichPart(delivery.id, index, receipt);
+          if (index === parts.length - 1) this.state.delivered(delivery.id, receipt);
+          else this.state.retryDelivery(delivery.id, Date.now() + this.interval);
+        };
         this.persistAnswer(delivery.id, write);
         return { messageId, complete: false };
       } else this.state.acceptRichPart(delivery.id, index, messageId);

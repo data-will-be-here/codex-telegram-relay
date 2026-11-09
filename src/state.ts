@@ -5,12 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
 import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
+import { type FormattedText } from './format.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
 const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
-export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage' | 'sendWidget'; params: Json; fallback?: string; }
+export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage' | 'sendWidget'; params: Json; fallback?: string; fallbackText?: FormattedText; }
 export interface Delivery {
   projectLabel?: string | undefined;
   sessionName?: string | null;
@@ -114,6 +115,7 @@ export class State {
       this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'; CREATE INDEX IF NOT EXISTS outbox_status_id ON outbox(status,id)");
       if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'everUncertain')) this.db.exec('ALTER TABLE widget_cards ADD COLUMN everUncertain INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(widget_answers)').all().some(column => column.name === 'fallbackQueued')) this.db.exec('ALTER TABLE widget_answers ADD COLUMN fallbackQueued INTEGER NOT NULL DEFAULT 0');
+      if (!this.db.prepare('PRAGMA table_info(widget_answers)').all().some(column => column.name === 'multipartSafe')) this.db.exec('ALTER TABLE widget_answers ADD COLUMN multipartSafe INTEGER NOT NULL DEFAULT 0');
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
@@ -126,10 +128,14 @@ export class State {
         this.enqueue(`attention/widgets/${card.id}`, card.binding.topicId,
           'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
       }
-      const unsettledAnswers = this.db.prepare(`SELECT id,key,messageId,topicId,projectCwd,sourceThreadId FROM outbox
-        WHERE status='uncertain' AND key LIKE 'final/%' AND json_extract(richPlan,'$[0].method')='sendWidget'`).all();
+      const unsettledAnswers = this.db.prepare(`SELECT o.id,o.messageId,o.nextPart,a.multipartSafe,json_array_length(o.richPlan) AS parts FROM outbox o
+        JOIN widget_answers a ON a.deliveryKey=o.key WHERE o.status='uncertain'`).all();
       for (const row of unsettledAnswers) {
-        if (typeof row.messageId === 'number' && row.messageId > 0) this.delivered(Number(row.id), row.messageId);
+        if (typeof row.messageId === 'number' && row.messageId > 0) {
+          if (Number(row.nextPart) >= Number(row.parts)) this.delivered(Number(row.id), row.messageId);
+          else if (row.multipartSafe === 1) this.db.prepare("UPDATE outbox SET status='pending',retryAt=0 WHERE id=?").run(Number(row.id));
+          else this.fallbackWidgetAnswer(Number(row.id));
+        }
         else this.fallbackWidgetAnswer(Number(row.id));
       }
       this.prune();
@@ -311,14 +317,14 @@ export class State {
     this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=? AND lastTurn IS ?').run(turnId, threadId, expected);
   }
   deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=? UNION ALL SELECT 1 FROM widget_answers WHERE deliveryKey=? LIMIT 1').get(key, key); }
-  enqueueWidgetAnswer(key: string, binding: Binding, text: string, token: string, part: RichDeliveryPart): boolean {
+  enqueueWidgetAnswer(key: string, binding: Binding, text: string, token: string, part: RichDeliveryPart | RichDeliveryPart[]): boolean {
     if (this.deliveryExists(key)) return true;
     if (Number(this.db.prepare('SELECT count(*) AS n FROM widget_answers').get()?.n ?? 0) >= 10_000) return false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.enqueue(key, binding.topicId, text, null, binding.cwd, binding.threadId);
-      this.db.prepare('INSERT INTO widget_answers(deliveryKey,token,binding,text) VALUES(?,?,?,?)').run(key, token, JSON.stringify(binding), text);
-      this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify([part]), key);
+      this.db.prepare('INSERT INTO widget_answers(deliveryKey,token,binding,text,multipartSafe) VALUES(?,?,?,?,1)').run(key, token, JSON.stringify(binding), text);
+      this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(Array.isArray(part) ? part : [part]), key);
       this.db.exec('COMMIT'); return true;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -327,6 +333,7 @@ export class State {
       FROM widget_answers a LEFT JOIN outbox o ON o.key=a.deliveryKey WHERE a.token=?`).get(token);
     return row ? { binding: JSON.parse(string(row.binding)) as Binding, text: string(row.text), messageId: typeof row.receipt === 'number' ? row.receipt : null } : undefined;
   }
+  isWidgetAnswer(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM widget_answers WHERE deliveryKey=?').get(key); }
   retryDelivery(id: number, retryAt: number): void { this.db.prepare("UPDATE outbox SET status='pending',retryAt=? WHERE id=? AND status='sending'").run(retryAt, id); }
   fallbackWidgetAnswer(id: number): void {
     const row = this.db.prepare(`SELECT o.key,o.topicId,o.projectCwd,o.sourceThreadId,a.text,a.fallbackQueued
@@ -484,7 +491,7 @@ export class State {
       SELECT id FROM outbox WHERE status='deferred' ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id
       LIMIT MAX(0,${MAX_ACTIVE_DELIVERIES}-(SELECT count(*) FROM outbox WHERE status='pending'))
     )`);
-    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' AND retryAt<=? ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id LIMIT 1`).get(Date.now());
+    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' AND retryAt<=? ORDER BY CASE WHEN key LIKE 'attention/%' OR key LIKE 'prompt/%' THEN 0 ELSE 1 END,id LIMIT 1`).get(Date.now());
     if (!row) return undefined;
     return {
       id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text),
@@ -497,7 +504,10 @@ export class State {
       nextPart: Number(row.nextPart), messageId: row.messageId === null ? null : Number(row.messageId),
     };
   }
-  sending(id: number): void { this.db.prepare("UPDATE outbox SET status='sending' WHERE id=? AND status='pending'").run(id); }
+  sending(id: number): void {
+    this.db.prepare(`UPDATE outbox SET status='sending',messageId=CASE WHEN key IN (SELECT deliveryKey FROM widget_answers) THEN NULL ELSE messageId END
+      WHERE id=? AND status='pending'`).run(id);
+  }
   saveRichPlan(id: number, parts: RichDeliveryPart[]): void {
     this.db.prepare("UPDATE outbox SET richPlan=? WHERE id=? AND status='sending'").run(JSON.stringify(parts), id);
   }

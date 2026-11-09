@@ -12,7 +12,7 @@ import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
 import { PermissionPicker } from './permission-picker.js';
 import { Widgets, ViewPicker } from './widgets.js';
-import { WIDGET_HTML, widgetData } from './widget-template.js';
+import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
@@ -405,9 +405,7 @@ export class Bridge {
       const result = { ...progress, kind: 'result' as const, snapshot: { ...progress.snapshot, status: status === 'completed' ? 'done' as const : status as 'failed' | 'interrupted',
         finishedAt: progress.snapshot.finishedAt ?? (typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()),
         updatedAt: Date.now(), progressText: (text || error || 'See the terminal for details.').slice(0, 40_000), plan: null, activities: [] } };
-      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, { method: 'sendWidget', params: { html: WIDGET_HTML,
-        chat_data: widgetData(result), allow_queries: false, is_shared: false, disable_notification: false,
-        reply_markup: { inline_keyboard: [[{ text: 'Full answer', callback_data: `a:${token}` }]] } }, fallback: body });
+      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts(result, text || error || 'See the terminal for details.', token));
     }
     if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
     if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
