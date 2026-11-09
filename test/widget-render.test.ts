@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { WIDGET_HTML } from '../src/widget-template.js';
+import { widgetPreview } from '../src/widget-template.js';
 
 function renderer(initial: Record<string, unknown>) {
   let now = 1_000_000;
@@ -19,6 +20,7 @@ function renderer(initial: Record<string, unknown>) {
     TelegramWidget: widget,
     Date: { now: () => now }, getComputedStyle: () => ({ fontSize: '20px' }),
     setInterval: (callback: () => void) => { tick = callback; },
+    ResizeObserver: class { observe() {} },
   });
   return { node, advance: (ms: number) => { now += ms; tick!(); },
     update: (data: Record<string, unknown>) => { widget.chatData = JSON.stringify({ ...JSON.parse(widget.chatData), ...data }); events.get('chatDataChanged')!(); } };
@@ -40,4 +42,22 @@ test('live updates render meaningful progress even without a plan or tool rows',
   assert.equal(node('step').textContent, 'Verifying terminal state');
   update({ r: 4, s: 'done', e: 1_000_000, a: [['done', 'Read file · state.ts']] });
   assert.equal(node('status').textContent, 'Done'); assert.doesNotMatch(node('updated').textContent, /ago/u);
+});
+
+test('previews fit their JSON budget with explicit sentence or word truncation', () => {
+  const text = 'Первое предложение полностью завершено. Следующее объяснение содержит "кавычки", пути \\ и эмодзи 🧪. '.repeat(30);
+  for (const budget of [16, 64, 128, 256, 512, 700]) {
+    const value = widgetPreview(text, budget);
+    assert.ok(Buffer.byteLength(JSON.stringify(value)) <= budget); assert.ok(value.endsWith('…'));
+    assert.ok(!value.includes('\ufffd')); assert.ok(!/[\uD800-\uDBFF]…$/u.test(value));
+  }
+});
+
+test('a separate result card identifies the completed answer', () => {
+  const { node } = renderer({ k: 'result', q: 'The work has finished.' });
+  assert.equal(node('status').textContent, 'Answer ready'); assert.equal(node('updated').textContent, 'Finished');
+});
+
+test('a complete first sentence takes precedence over a long unfinished following sentence', () => {
+  assert.equal(widgetPreview('Ready. ' + 'The following sentence continues with details '.repeat(10), 128), 'Ready. …');
 });

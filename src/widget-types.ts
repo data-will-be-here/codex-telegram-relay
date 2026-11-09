@@ -7,10 +7,12 @@ export interface WidgetSnapshot {
   status: ActivityStatus; startedAt: number | null; finishedAt: number | null; updatedAt: number;
   plan: { done: number; total: number; current?: string } | null; activities: WidgetActivity[];
   summary?: string;
+  progressText?: string;
 }
 export interface WidgetCard {
   id: string; token: string; generation: string; binding: Binding; turnId: string; view: ViewMode;
   revision: number; createdAt: number; snapshot: WidgetSnapshot;
+  kind?: 'result';
 }
 export interface WidgetDelivery extends WidgetCard {
   delivery: 'new' | 'sending' | 'active' | 'editing' | 'uncertain' | 'disabled' | 'retired';

@@ -112,6 +112,12 @@ export class Outbox {
   private widgetSending = false;
   private widgetNextAt = 0;
   private widgetWrites = new Map<string, () => void>();
+  private answerWrites = new Map<number, () => void>();
+  private nextAnswerWriteAt = 0;
+  private persistAnswer(id: number, write: () => void): void {
+    try { write(); }
+    catch { this.answerWrites.set(id, write); this.nextAnswerWriteAt = Date.now() + 1000; }
+  }
   private persistWidget(id: string, write: () => void): void {
     try { write(); }
     catch { this.widgetWrites.set(id, write); }
@@ -174,7 +180,7 @@ export class Outbox {
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
             html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
-            reply_markup: { inline_keyboard: [[{ text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
+            reply_markup: { inline_keyboard: [[{ text: 'Current step', callback_data: `v:${card.token}:d` }, { text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
           this.acceptWidgetReceipt(card.id, card.revision, id);
@@ -210,6 +216,11 @@ export class Outbox {
     } finally { this.widgetSending = false; }
   }
   async flushOne(): Promise<boolean> {
+    const pending = this.answerWrites.entries().next().value;
+    if (pending && Date.now() >= this.nextAnswerWriteAt) {
+      try { pending[1](); this.answerWrites.delete(pending[0]); return true; }
+      catch { this.nextAnswerWriteAt = Date.now() + 3000; return false; }
+    }
     let cancelled = false;
     for (const context of this.state.deliveryContexts()) if (!this.allowed(context)) {
       this.state.cancelContext(context); cancelled = true;
@@ -222,6 +233,7 @@ export class Outbox {
       // Approval cards fence literal commands/diffs and escape justification text before rendering.
       const project = delivery.projectCwd ?? binding?.cwd;
       const approval = delivery.key.startsWith('prompt/approval/');
+      const response = /^(?:final|reply|assistant|attention\/widget-answer|attention\/widget-step)\//u.test(delivery.key);
       const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName, delivery.projectLabel) : undefined;
       if (review) {
         delivery.richPlan = review.map(part => ({ method: 'sendMessage', params: { ...part, link_preview_options: { is_disabled: true } } }));
@@ -238,7 +250,7 @@ export class Outbox {
         }
         if (changed) this.state.saveRichPlan(delivery.id, delivery.richPlan);
       }
-      const rich = !delivery.richPlan && /^(?:final|reply|assistant)\//u.test(delivery.key) ? richMessages(delivery.text, project, false, delivery.sessionName, delivery.projectLabel) : undefined;
+      const rich = !delivery.richPlan && response ? richMessages(delivery.text, project, false, delivery.sessionName, delivery.projectLabel) : undefined;
       if (delivery.richPlan || rich) {
         const result = await this.richDelivery(delivery, rich, project, approval);
         if (result.complete) {
@@ -248,7 +260,7 @@ export class Outbox {
         return true;
       }
       const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
-      const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, /^(?:(?:final|reply|assistant)\/|prompt\/approval\/)/u.test(delivery.key), limit);
+      const chunks: (FormattedText & { plain?: boolean })[] = formatMessages(delivery.text, response || approval, limit);
       let messageId: number | null = null;
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index]!;
@@ -305,8 +317,17 @@ export class Outbox {
         let retries = 0;
         while (true) {
           this.check(delivery);
-          try { messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null; break; }
+          try {
+            messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null;
+            if (part.method === 'sendWidget' && (!messageId || messageId < 1)) throw new TelegramError('Result widget receipt was not confirmed.', 0);
+            break;
+          }
           catch (error) {
+            if (part.method === 'sendWidget' && error instanceof TelegramError && (error.notSent || error.status === 429)) {
+              const retryAt = Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000;
+              this.persistAnswer(delivery.id, () => this.state.retryDelivery(delivery.id, retryAt));
+              return { messageId, complete: false };
+            }
             if (approval && error instanceof TelegramError && error.status === 429) {
               if (!this.state.pauseApprovalPart(delivery.id, index, Date.now() + Math.max(1, error.retryAfter ?? 2) * 1000)) throw new DeliveryCancelled();
               return { messageId, complete: false };
@@ -316,6 +337,21 @@ export class Outbox {
           }
         }
       } catch (error) {
+        if (part.method === 'sendWidget' && part.fallback !== undefined && !isMissingTopic(error)) {
+          const rejected = error instanceof TelegramError && error.status >= 400 && error.status < 500;
+          if (!rejected) {
+            this.persistAnswer(delivery.id, () => this.state.fallbackWidgetAnswer(delivery.id));
+            return { messageId, complete: false };
+          }
+          const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
+          parts.splice(index, 1, ...formatMessages(part.fallback, true, limit).map(chunk => ({ method: 'sendMessage' as const,
+            params: { ...withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true } } })));
+          this.persistAnswer(delivery.id, () => {
+            if (delivery.sourceThreadId) this.state.setViewMode(delivery.sourceThreadId, 'classic');
+            this.state.saveRichPlan(delivery.id, parts); this.state.retryDelivery(delivery.id, Date.now());
+          });
+          return { messageId, complete: false };
+        }
         if (part.method === 'sendMessage' && Array.isArray(part.params.entities) && error instanceof TelegramError && error.status === 400 &&
             /can't parse entities|entity.*(?:URL|offset|length|invalid)|wrong HTTP URL/iu.test(error.message)) {
           delete part.params.entities;
@@ -336,6 +372,11 @@ export class Outbox {
       if (approval) {
         if (messageId === null) throw new TelegramError('Approval part receipt was not confirmed.', 0);
         if (!this.state.acceptApprovalPart(delivery.id, index, messageId)) throw new DeliveryCancelled();
+      } else if (part.method === 'sendWidget' && parts.length === 1 && messageId !== null) {
+        const receipt = messageId;
+        const write = (): void => { this.state.acceptRichPart(delivery.id, index, receipt); this.state.delivered(delivery.id, receipt); };
+        this.persistAnswer(delivery.id, write);
+        return { messageId, complete: false };
       } else this.state.acceptRichPart(delivery.id, index, messageId);
       if (this.interval > 0) await delay(this.interval);
       if (approval && index < parts.length - 1) return { messageId, complete: false };

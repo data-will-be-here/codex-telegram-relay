@@ -10,7 +10,7 @@ const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
 const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
-export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage'; params: Json; fallback?: string; }
+export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage' | 'sendWidget'; params: Json; fallback?: string; }
 export interface Delivery {
   projectLabel?: string | undefined;
   sessionName?: string | null;
@@ -81,6 +81,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
           retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
+        CREATE TABLE IF NOT EXISTS widget_answers(deliveryKey TEXT PRIMARY KEY, token TEXT NOT NULL UNIQUE, binding TEXT NOT NULL, text TEXT NOT NULL, messageId INTEGER);
         CREATE INDEX IF NOT EXISTS new_sessions_status ON new_sessions(status);
         CREATE UNIQUE INDEX IF NOT EXISTS new_sessions_thread ON new_sessions(json_extract(payload,'$.threadId'));
         CREATE INDEX IF NOT EXISTS new_sessions_token ON new_sessions(json_extract(payload,'$.token'));
@@ -109,6 +110,7 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(async_answers)').all().some(column => column.name === 'status')) this.db.exec("ALTER TABLE async_answers ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
       this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'; CREATE INDEX IF NOT EXISTS outbox_status_id ON outbox(status,id)");
       if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'everUncertain')) this.db.exec('ALTER TABLE widget_cards ADD COLUMN everUncertain INTEGER NOT NULL DEFAULT 0');
+      if (!this.db.prepare('PRAGMA table_info(widget_answers)').all().some(column => column.name === 'fallbackQueued')) this.db.exec('ALTER TABLE widget_answers ADD COLUMN fallbackQueued INTEGER NOT NULL DEFAULT 0');
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
@@ -120,6 +122,12 @@ export class State {
       for (const card of this.widgetCards().filter(card => interruptedWidgets.has(card.id))) {
         this.enqueue(`attention/widgets/${card.id}`, card.binding.topicId,
           'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+      }
+      const unsettledAnswers = this.db.prepare(`SELECT id,key,messageId,topicId,projectCwd,sourceThreadId FROM outbox
+        WHERE status='uncertain' AND key LIKE 'final/%' AND json_extract(richPlan,'$[0].method')='sendWidget'`).all();
+      for (const row of unsettledAnswers) {
+        if (typeof row.messageId === 'number' && row.messageId > 0) this.delivered(Number(row.id), row.messageId);
+        else this.fallbackWidgetAnswer(Number(row.id));
       }
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
@@ -257,7 +265,39 @@ export class State {
   baselineIfCurrent(threadId: string, turnId: string, expected: string | null): void {
     this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=? AND lastTurn IS ?').run(turnId, threadId, expected);
   }
-  deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=?').get(key); }
+  deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=? UNION ALL SELECT 1 FROM widget_answers WHERE deliveryKey=? LIMIT 1').get(key, key); }
+  enqueueWidgetAnswer(key: string, binding: Binding, text: string, token: string, part: RichDeliveryPart): boolean {
+    if (this.deliveryExists(key)) return true;
+    if (Number(this.db.prepare('SELECT count(*) AS n FROM widget_answers').get()?.n ?? 0) >= 10_000) return false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.enqueue(key, binding.topicId, text, null, binding.cwd, binding.threadId);
+      this.db.prepare('INSERT INTO widget_answers(deliveryKey,token,binding,text) VALUES(?,?,?,?)').run(key, token, JSON.stringify(binding), text);
+      this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify([part]), key);
+      this.db.exec('COMMIT'); return true;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  widgetAnswer(token: string): { binding: Binding; text: string; messageId: number | null } | undefined {
+    const row = this.db.prepare(`SELECT a.binding,a.text,COALESCE(a.messageId,CASE WHEN json_extract(o.richPlan,'$[0].method')='sendWidget' THEN o.messageId END) AS receipt
+      FROM widget_answers a LEFT JOIN outbox o ON o.key=a.deliveryKey WHERE a.token=?`).get(token);
+    return row ? { binding: JSON.parse(string(row.binding)) as Binding, text: string(row.text), messageId: typeof row.receipt === 'number' ? row.receipt : null } : undefined;
+  }
+  retryDelivery(id: number, retryAt: number): void { this.db.prepare("UPDATE outbox SET status='pending',retryAt=? WHERE id=? AND status='sending'").run(retryAt, id); }
+  fallbackWidgetAnswer(id: number): void {
+    const row = this.db.prepare(`SELECT o.key,o.topicId,o.projectCwd,o.sourceThreadId,a.text,a.fallbackQueued
+      FROM outbox o JOIN widget_answers a ON a.deliveryKey=o.key WHERE o.id=?`).get(id);
+    if (!row || row.fallbackQueued) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (typeof row.sourceThreadId === 'string') this.setViewMode(row.sourceThreadId, 'classic');
+      this.uncertain(id);
+      this.enqueue(`attention/final-widget-fallback/${string(row.key)}`, typeof row.topicId === 'number' ? row.topicId : null,
+        `The result card could not be confirmed. Full reply:\n\n${string(row.text)}`, null, typeof row.projectCwd === 'string' ? row.projectCwd : undefined,
+        typeof row.sourceThreadId === 'string' ? row.sourceThreadId : undefined);
+      this.db.prepare('UPDATE widget_answers SET fallbackQueued=1 WHERE deliveryKey=?').run(row.key as string);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   asyncAnswered(threadId: string, callId: string): boolean { return !!this.db.prepare('SELECT 1 FROM async_answers WHERE threadId=? AND callId=?').get(threadId, callId); }
   asyncAnswerIds(threadId: string): string[] { return this.db.prepare('SELECT callId FROM async_answers WHERE threadId=?').all(threadId).map(row => string(row.callId)); }
   beginAsyncAnswer(threadId: string, callId: string): boolean { return Number(this.db.prepare("INSERT OR IGNORE INTO async_answers(threadId,callId,at,status) VALUES(?,?,?,'sending')").run(threadId, callId, Date.now()).changes) > 0; }
@@ -338,9 +378,10 @@ export class State {
   }
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string): void {
     // A duplicate remains a no-op even while admission is full or after an uncertain send.
-    if (this.db.prepare('SELECT 1 FROM outbox WHERE key=?').get(key)) return;
+    if (this.deliveryExists(key)) return;
     const approval = key.startsWith('prompt/approval/') && this.db.prepare('SELECT 1 FROM approval_cards WHERE deliveryKey=?').get(key);
-    if (!approval && text.length > 40_000) text = text.slice(0, 39_900) + '\n[Message shortened. See the terminal for the full answer.]';
+    const cachedAnswer = /^(?:attention\/widget-answer|attention\/final-widget-fallback)\//u.test(key);
+    if (!approval && !cachedAnswer && text.length > 40_000) text = text.slice(0, 39_900) + '\n[Message shortened. See the terminal for the full answer.]';
     const durable = key.startsWith('final/') || key.startsWith('attention/');
     if (!durable && Number(this.db.prepare("SELECT count(*) AS n FROM outbox WHERE status IN ('pending','blocked')").get()?.n ?? 0) >= MAX_ACTIVE_DELIVERIES) throw new Error('Delivery queue is full; check Telegram connectivity.');
     const binding = topicId === null ? undefined : this.topic(topicId);
@@ -436,7 +477,14 @@ export class State {
       AND nextPart=? AND messageId IS NOT NULL AND key IN (
         SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(id, parts);
   }
-  delivered(id: number, messageId: number | null): void { this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id); }
+  delivered(id: number, messageId: number | null): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id);
+      this.db.prepare(`UPDATE widget_answers SET messageId=? WHERE deliveryKey IN (SELECT key FROM outbox WHERE id=? AND json_extract(richPlan,'$[0].method')='sendWidget')`).run(messageId, id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   uncertain(id: number): void { this.db.prepare("UPDATE outbox SET status='uncertain' WHERE id=?").run(id); }
   deliveryContexts(): DeliveryContext[] {
     return this.db.prepare(`SELECT DISTINCT topicId,projectCwd,sourceThreadId,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status IN ('pending','blocked','deferred','held')`).all()

@@ -1,5 +1,13 @@
 # Verification record
 
+## Expanded previews and notified final-result widgets
+
+The screenshot's Russian paragraph reproduced a double byte truncation (160 then 128 bytes). Progress now uses the remaining 900-byte JSON budget after metadata and escaping, prefers complete sentences and shows an explicit ellipsis. Local More/Less reveals additional loaded text; Current step retrieves the saved explanation. Widget turns suppress answer drafts and send a separate notified result card with an authenticated Full answer control. The full original reply survives ordinary queue pruning; explicit reads use multipart formatting without the normal 40,000-unit shortening guard. Classic behavior is preserved.
+
+Regression coverage includes long-answer tails, eight-day queue pruning followed by late completion, message/topic/owner rejection, detached-native cached reads, failed callback acknowledgement, definite/pre-connect/unknown result sends, temporary local receipt and outcome write failures, and restarts with known or unknown receipts. A durable fallback marker prevents repeating text fallback after its queue record is pruned. Two independent review axes found truncation, deduplication and persistence-window issues; these were corrected and focused regressions passed.
+
+The official pinned WidgetHost/QuickJS validator and renderer passed 32 cases covering activity/result cards, widths 320/430, light/dark and text sizes 20/24/32/64. More/Less expanded the narrow-screen preview from 125 to 246 characters. Maximum measured height was 497.8px, with no overflow, runtime death or page errors. The preview screenshot was delivered through the standard file queue with a durable sent receipt. This is official sandbox rendering, not physical-client acceptance of the new buttons. Full local suite: 354 discovered, 350 passed, four platform/opt-in skips, zero failures. Clean install, typecheck, package checks, dry-run pack and production dependency audit passed. Topic-outage research made no new live topic-creation requests; see [the primary-source comparison](research/telegram-private-topic-regression-2026-11-09.md).
+
 ## Widget progress and terminal rendering
 
 Four red regressions established that widget commentary was neither shown in the card nor suppressed outside it, missed completion events stayed Working until reconnect, summaries without plan/tool rows were hidden, and terminal Last update continued growing. Production-state inspection found two known sent cards already Done with every revision acknowledged, so the user-visible stale footer was not treated as proof of a failed edit.

@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { type State } from './state.js';
 import { array, object, string, type Binding, type Json, type Telegram } from './types.js';
-import { widgetLabel } from './widget-template.js';
+import { widgetLabel, widgetPreview } from './widget-template.js';
 import { type WidgetActivity, type WidgetCard, type WidgetDelivery, type ViewMode } from './widget-types.js';
 
 const finalStatuses = new Map([['completed', 'done'], ['failed', 'failed'], ['interrupted', 'interrupted']] as const);
@@ -58,13 +58,20 @@ export class Widgets {
     }
     const before = JSON.stringify(card.snapshot);
     if (card.snapshot.finishedAt !== null) return;
+    if (method !== 'turn/completed' && ['unavailable', 'disconnected'].includes(card.snapshot.status)) card.snapshot.status = 'working';
     if (method === 'turn/completed') {
       const status = finalStatuses.get(string(turn.status) as 'completed'); if (!status) return;
       card.snapshot.status = status; card.snapshot.finishedAt = millis(turn.completedAt) ?? this.now();
       this.hydrate(card, array(turn.items)); this.settle(card);
     } else if (card.view === 'widgets' && method.startsWith('item/') && object(params.item).type === 'agentMessage') {
       const item = object(params.item);
-      if (['commentary', 'partial_answer'].includes(string(item.phase)) && string(item.text).trim()) card.snapshot.summary = widgetLabel(string(item.text), 160);
+      if (['commentary', 'partial_answer'].includes(string(item.phase)) && string(item.text).trim()) {
+        const text = string(item.text).trim();
+        let progress = text.slice(0, 16_000);
+        if (/[\uD800-\uDBFF]$/u.test(progress)) progress = progress.slice(0, -1);
+        card.snapshot.progressText = progress + (progress.length < text.length ? '\n\n[Progress text shortened. See Codex for the full message.]' : '');
+        card.snapshot.summary = widgetPreview(text, 512);
+      }
     } else if (card.view === 'widgets' && method === 'turn/plan/updated') {
       const raw = array(params.plan); const plan = raw.length > 512 ? [] : raw.map(object);
       card.snapshot.plan = plan.length ? { done: plan.filter(step => step.status === 'completed').length, total: plan.length,
@@ -102,10 +109,13 @@ export class Widgets {
   private settle(card: WidgetCard): void {
     card.snapshot.activities = card.snapshot.activities.map(activity => activity.status === 'running' ? { ...activity, status: 'stopped' } : activity);
   }
-  usesCard(threadId: string, turnId: string): boolean {
+  widgetTurn(threadId: string, turnId: string): WidgetDelivery | undefined {
     const card = this.state.widgetCard(threadId, turnId);
-    return !!card && card.generation === this.generation && card.view === 'widgets' &&
-      !['uncertain', 'disabled', 'retired'].includes(card.delivery) && !['unavailable', 'disconnected'].includes(card.snapshot.status);
+    return card && card.generation === this.generation && card.view === 'widgets' && !['uncertain', 'disabled', 'retired'].includes(card.delivery) ? card : undefined;
+  }
+  usesCard(threadId: string, turnId: string): boolean {
+    const card = this.widgetTurn(threadId, turnId);
+    return !!card && !['unavailable', 'disconnected'].includes(card.snapshot.status);
   }
   reconcile(saved: WidgetDelivery, turns: Json[]): void {
     const current = this.state.widgetCard(saved.binding.threadId, saved.turnId);
@@ -190,21 +200,29 @@ export class ViewPicker {
   }
   private apply(binding: Binding, view: ViewMode): void {
     this.state.setViewMode(binding.threadId, view);
-    this.notice(binding, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in this session. The current turn keeps its view.\n${view === 'widgets' ? 'Progress stays in the card. Final replies and approvals stay in the conversation.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
+    this.notice(binding, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in this session. The current turn keeps its view.\n${view === 'widgets' ? 'Progress stays in the card. A separate result card has a Full answer button. Approvals keep their normal controls.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
   }
   async callback(callback: Json, message: Json, topic: number | null): Promise<void> {
-    const match = /^v:([a-f0-9]{32}):([cw])$/u.exec(string(callback.data));
-    const menu = match ? this.menus.get(match[1]!) : undefined;
-    const fallback = match && !menu && match[2] === 'c' ? this.state.widgetCards().find(card => card.token === match[1]) : undefined;
+    const match = /^v:([a-f0-9]{32}):([cwd])$/u.exec(string(callback.data));
+    const menu = match && match[2] !== 'd' ? this.menus.get(match[1]!) : undefined;
+    const fallback = match && !menu && ['c', 'd'].includes(match[2]!) ? this.state.widgetCards().find(card => card.token === match[1]) : undefined;
     const binding = menu?.binding ?? fallback?.binding;
     const current = binding && this.state.binding(binding.threadId);
-    const validMessage = menu ? menu.expires >= Date.now() && message.message_id === this.state.promptMessage(menu.key) :
-      fallback && fallback.delivery !== 'retired' && message.message_id === fallback.messageId;
+    const messageId = typeof message.message_id === 'number' && Number.isSafeInteger(message.message_id) && message.message_id > 0 ? message.message_id : undefined;
+    const validMessage = messageId && (menu ? menu.expires >= Date.now() && messageId === this.state.promptMessage(menu.key) :
+      fallback && fallback.delivery !== 'retired' && messageId === fallback.messageId);
     const valid = binding && current?.topicId === binding.topicId && current.cwd === binding.cwd && topic === binding.topicId && validMessage;
     // Consume a menu selection before any asynchronous acknowledgement or native read.
     if (valid && menu) { this.menus.delete(match![1]!); this.state.cancelPrompt(menu.key); }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!valid ? { text: 'This view control expired. Send /view in the current session topic.' } : {}) });
     if (!valid || !await this.allowed(binding)) return;
+    if (match![2] === 'd' && fallback) {
+      const card = this.state.widgetCard(binding.threadId, fallback.turnId);
+      if (!card || card.id !== fallback.id || card.delivery === 'retired' || card.messageId !== messageId) return;
+      const text = card.snapshot.progressText || card.snapshot.summary || card.snapshot.plan?.current || 'No progress explanation is available yet.';
+      this.state.enqueue(`attention/widget-step/${card.id}/${randomUUID()}`, binding.topicId, `Current step\n\n${text}`, null, binding.cwd, binding.threadId);
+      return;
+    }
     await this.prepare(binding);
     if (!await this.allowed(binding)) return;
     this.apply(binding, match![2] === 'w' ? 'widgets' : 'classic');

@@ -12,6 +12,7 @@ import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
 import { PermissionPicker } from './permission-picker.js';
 import { Widgets, ViewPicker } from './widgets.js';
+import { WIDGET_HTML, widgetData } from './widget-template.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
@@ -146,7 +147,7 @@ export class Bridge {
         const reply = this.state.reply(binding.threadId);
         return this.state.streamingEnabled() && this.attached.has(binding.threadId) && current?.topicId === binding.topicId &&
           !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
-          !(['commentary', 'partial_answer'].includes(phase) && this.widgets.usesCard(binding.threadId, turnId)) &&
+          !(this.widgets.usesCard(binding.threadId, turnId)) &&
           (!phase || phase === 'final_answer' || this.state.messageMode() === 'all' || !!reply && (!reply.turnId || reply.turnId === turnId));
       };
       if (!eligible()) return false;
@@ -368,7 +369,19 @@ export class Bridge {
     const header = status === 'completed' ? '✅ Turn finished' : status === 'interrupted' ? '⏹ Turn interrupted' : '❌ Turn failed';
     const error = string(object(turn.error).message);
     const key = `final/${binding.threadId}/${turnId}`; const exists = this.state.deliveryExists(key);
-    this.state.enqueue(key, binding.topicId, `${header}\n\n${text || error || 'See the terminal for details.'}`, null, binding.cwd, binding.threadId);
+    const body = `${header}\n\n${text || error || 'See the terminal for details.'}`;
+    let widget = false;
+    const progress = this.widgets.widgetTurn(binding.threadId, turnId);
+    if (!exists && progress) {
+      const token = randomBytes(16).toString('hex');
+      const result = { ...progress, kind: 'result' as const, snapshot: { ...progress.snapshot, status: status === 'completed' ? 'done' as const : status as 'failed' | 'interrupted',
+        finishedAt: progress.snapshot.finishedAt ?? (typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()),
+        updatedAt: Date.now(), progressText: (text || error || 'See the terminal for details.').slice(0, 40_000), plan: null, activities: [] } };
+      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, { method: 'sendWidget', params: { html: WIDGET_HTML,
+        chat_data: widgetData(result), allow_queries: false, is_shared: false, disable_notification: false,
+        reply_markup: { inline_keyboard: [[{ text: 'Full answer', callback_data: `a:${token}` }]] } }, fallback: body });
+    }
+    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
     if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
@@ -535,6 +548,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('v:')) {
         await this.views.callback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
+        await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -669,6 +685,24 @@ export class Bridge {
     const prompt = text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
     await this.sendInput(binding, inputId, prompt);
+  }
+
+  private async answerCallback(callback: Json, message: Json, topicId: number | null): Promise<void> {
+    const token = /^a:([a-f0-9]{32})$/u.exec(string(callback.data))?.[1];
+    const answer = token ? this.state.widgetAnswer(token) : undefined;
+    const binding = answer && this.state.binding(answer.binding.threadId);
+    const valid = !this.closed && answer && answer.messageId !== null && answer.messageId === integer(message.message_id) &&
+      topicId === answer.binding.topicId && binding?.topicId === answer.binding.topicId && binding.cwd === answer.binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!valid ? { text: 'This answer is no longer available in this topic.' } : {}) }); }
+    catch { /* A read-only cached reply does not depend on Telegram accepting the acknowledgement. */ }
+    // Cached text is already authorized; reading it does not require resuming its native session.
+    const current = answer && this.state.binding(answer.binding.threadId);
+    if (valid && answer && !this.closed && current?.topicId === answer.binding.topicId && current.cwd === answer.binding.cwd &&
+        !this.config.ignoredThreadIds?.includes(current.threadId) && !this.state.topicOperation(current.threadId) && this.allowed(current.cwd, current.threadId)) {
+      const click = createHash('sha256').update(string(callback.id)).digest('hex');
+      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId);
+    }
   }
 
   private async connectionStatus(binding: Binding): Promise<string> {
