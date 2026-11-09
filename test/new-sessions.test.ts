@@ -759,6 +759,7 @@ test('historical Full answer remains readable after /clear but old permission co
     const permission = controls.flat().find(item => string(item.text).includes('Read Only'))!;
     f.state.setViewMode(old.threadId, 'widgets');
     await f.bridge.notification('turn/started', { threadId: old.threadId, turn: { id: 'result', status: 'inProgress' } });
+    f.native.histories.get(old.threadId)!.unshift({ id: 'result', status: 'completed' });
     await f.bridge.notification('turn/completed', { threadId: old.threadId, turn: { id: 'result', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Historical full reply' }] } });
     await f.drain();
     const widget = f.telegram.calls.filter(call => call.method === 'sendWidget').at(-1)!.params;
@@ -789,4 +790,33 @@ test('an interrupted preflight unlocks on disk recovery and a committed clear bi
     assert.equal(state.historicalAnswerBinding(old), true);
     state.installTopic('next', 555, temp.dir, 'Moved'); assert.equal(state.historicalAnswerBinding(old), false);
   } finally { state?.close(); temp.close(); }
+});
+
+test('/clear delivers a missed completed reply before replacing its original session', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    f.native.histories.get(old.threadId)!.unshift({ id: 'missed', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Completed before clear' }] });
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    assert.equal(f.native.starts, 0, 'a missed reply must be queued before the old binding can be retired');
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Completed before clear')));
+    await f.bridge.update(message(11, old.topicId, '/clear')); await f.bridge.workNewSession();
+    assert.equal(f.native.starts, 1);
+  } finally { f.close(); }
+});
+
+test('/clear recovery uses its validated history snapshot without importing another response', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); let reads = 0;
+    f.native.turns = async () => ++reads === 1 ? [
+      { id: 'missed', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Validated missed reply' }] },
+      { id: 'old', status: 'completed' },
+    ] : [{ id: 'unrelated', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Unrelated old history' }] }];
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.drain();
+    assert.equal(reads, 1); assert.equal(f.state.binding(old.threadId)!.lastTurn, 'missed');
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Validated missed reply')));
+    assert.equal(f.telegram.sent().some(item => string(item.text).includes('Unrelated old history')), false);
+    assert.equal(f.native.starts, 0);
+  } finally { f.close(); }
 });

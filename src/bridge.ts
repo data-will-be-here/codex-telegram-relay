@@ -117,17 +117,28 @@ export class Bridge {
   }
 
   private async clearAllowed(binding: Binding): Promise<boolean> {
-    const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.state.retiredSession(binding.threadId) &&
+    const routed = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.state.retiredSession(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
-      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId) &&
-      !this.state.reply(binding.threadId) && !this.state.sessionDeliveryBusy(binding.threadId) &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+    const eligible = (): boolean => routed() && !this.state.sessionDeliveryBusy(binding.threadId) &&
       ![...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt));
     if (!eligible()) return false;
     const thread = await this.codex.read(binding.threadId);
     if (thread.cwd !== binding.cwd || string(object(thread.status).type) !== 'idle') return false;
-    if ((await this.codex.turns(binding.threadId)).some(turn => turn.status === 'inProgress')) return false;
+    const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
+    const turns = await this.codex.turns(binding.threadId);
+    if (!eligible() || this.state.binding(binding.threadId)?.lastTurn !== baseline || turns.some(turn => turn.status === 'inProgress')) return false;
+    const latest = turns.find(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
+    if (latest && latest.id !== this.state.binding(binding.threadId)?.lastTurn) {
+      const index = baseline && baseline !== '-' ? turns.findIndex(turn => turn.id === baseline) : turns.length;
+      if (index <= turns.indexOf(latest)) return false;
+      const missed = turns.slice(0, index).filter(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
+      for (const turn of missed.reverse()) await this.complete(binding, turn, { baseline, advance: false });
+      if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
+      return false;
+    }
     if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return false;
-    return eligible();
+    return eligible() && !this.state.reply(binding.threadId);
   }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
