@@ -29,11 +29,11 @@ async function setup() {
     close: () => { Date.now = realNow; f.close(); } };
 }
 
-test('/view is per-session, defaults to classic, latches each turn and never writes native settings/input', async () => {
+test('/view applies to all sessions, defaults to classic, latches each turn and never writes native settings/input', async () => {
   const f = await setup();
   try {
     await f.start('old'); await f.bridge.update(message(1, 101, '/view widgets')); await f.drain();
-    assert.equal(f.state.viewMode('thread-a'), 'widgets'); assert.equal(f.state.viewMode('thread-b'), 'classic');
+    assert.equal(f.state.viewMode(), 'widgets');
     f.advance(); assert.equal(await f.flush(), false, 'current classic turn keeps its view');
     await f.start(); f.advance(); assert.equal(await f.flush(), true);
     await f.bridge.update(message(2, 101, '/view classic')); await f.drain();
@@ -43,6 +43,97 @@ test('/view is per-session, defaults to classic, latches each turn and never wri
     assert.equal(f.telegram.calls.filter(call => call.method === 'editMessageWidgetData').length, 1, 'current widget turn keeps its view');
     await f.start('next'); f.advance(); await f.flush();
     assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('global /view menus and direct commands work without a topic or session, with exact callback authority', async () => {
+  for (const topicId of [null, 909]) {
+    const f = await setup();
+    try {
+      f.codex.turns = async () => { throw new Error('Native session temporarily unavailable'); };
+      const command = (id: number, text: string): Json => {
+        const update = message(id, topicId ?? 909, text);
+        if (topicId === null) delete object(update.message).message_thread_id;
+        return update;
+      };
+      await f.bridge.update(command(1, '/view')); await f.drain();
+      const menu = f.telegram.sent().at(-1)!;
+      assert.ok(string(menu.text).includes('View for all topics: Classic'));
+      const data = string(object((object(menu.reply_markup).inline_keyboard as Json[][])[0]![1]).callback_data);
+      const click = (id: number, topic = topicId, owner = 42, messageId = f.telegram.message): Json => ({ update_id: id,
+        callback_query: { id: String(id), data, from: { id: owner }, message: { message_id: messageId,
+          chat: { id: owner, type: 'private' }, ...(topic !== null ? { message_thread_id: topic } : {}) } } });
+      await f.bridge.update(click(2, 101)); await f.bridge.update(click(3, topicId, 99)); await f.bridge.update(click(4, topicId, 42, 1));
+      assert.equal(f.state.viewMode(), 'classic');
+      await f.bridge.update(click(5)); assert.equal(f.state.viewMode(), 'widgets');
+      await f.bridge.update(command(6, '/status')); await f.drain();
+      assert.ok(f.telegram.sent().some(item => string(item.text).includes('View for all topics: Widgets')));
+      await f.bridge.update(command(7, '/view classic')); assert.equal(f.state.viewMode(), 'classic');
+      await f.bridge.update(click(8)); assert.equal(f.state.viewMode(), 'classic', 'an already consumed menu cannot change the global setting again');
+      assert.deepEqual(f.codex.writes, []);
+    } finally { f.close(); }
+  }
+});
+
+test('global view selection latches running turns across projects before applying to future turns', async () => {
+  const f = await setup();
+  try {
+    await f.start('old-a');
+    f.codex.histories.set('thread-b', [{ id: 'old-b', status: 'inProgress' }]);
+    await f.bridge.update(message(1, 101, '/view widgets'));
+    assert.equal(f.state.widgetCard('thread-a', 'old-a')!.view, 'classic');
+    assert.equal(f.state.widgetCard('thread-b', 'old-b')!.view, 'classic');
+    await f.bridge.notification('turn/started', { threadId: 'thread-b', turn: { id: 'new-b', status: 'inProgress' } });
+    assert.equal(f.state.widgetCard('thread-b', 'new-b')!.view, 'widgets');
+    await f.bridge.update(message(2, 102, '/view classic'));
+    assert.equal(f.state.widgetCard('thread-b', 'new-b')!.view, 'widgets');
+    await f.start('next-a');
+    assert.equal(f.state.widgetCard('thread-a', 'next-a')!.view, 'classic');
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('legacy per-session view choices migrate once into the persisted global preference', () => {
+  const temp = temporary(); const home = join(temp.dir, 'view-migration'); let state: State | undefined;
+  try {
+    state = new State(home); state.setMessageMode('compact'); state.setStreaming(false); state.close(); state = undefined;
+    const db = new DatabaseSync(join(home, 'state.sqlite'));
+    try { db.exec("DELETE FROM settings WHERE key='view'; INSERT INTO settings VALUES('view/thread-a','widgets'),('view/thread-b','classic')"); }
+    finally { db.close(); }
+    state = new State(home); assert.equal(state.viewMode(), 'widgets');
+    assert.equal(state.messageMode(), 'compact'); assert.equal(state.streamingEnabled(), false);
+    state.setViewMode('classic'); state.close(); state = new State(home);
+    assert.equal(state.viewMode(), 'classic', 'the old opt-in must not override a later global choice after restart');
+  } finally { state?.close(); temp.close(); }
+});
+
+test('global view preparation cannot recover a stale binding after an awaited native read', async () => {
+  const f = await setup();
+  try {
+    const turns = f.codex.turns.bind(f.codex);
+    f.codex.turns = async threadId => {
+      if (threadId !== 'thread-b') return turns(threadId);
+      f.state.installTopic('thread-b', 555, f.projectB, 'Moved');
+      return [{ id: 'old-route-turn', status: 'inProgress' }];
+    };
+    await f.bridge.update(message(1, 101, '/view widgets'));
+    assert.equal(f.state.viewMode(), 'widgets');
+    assert.equal(f.state.widgetCard('thread-b', 'old-route-turn'), undefined);
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('a current activity card Classic control selects the shared view while keeping the running turn latched', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); await f.flush();
+    const card = f.state.widgetCard('thread-a', 'live')!;
+    await f.bridge.update({ update_id: 1, callback_query: { id: 'global-classic', from: { id: 42 }, data: `v:${card.token}:c`,
+      message: { message_id: card.messageId, chat: { id: 42, type: 'private' }, message_thread_id: 101 } } });
+    assert.equal(f.state.viewMode(), 'classic'); assert.equal(f.state.widgetCard('thread-a', 'live')!.view, 'widgets');
+    await f.bridge.notification('turn/started', { threadId: 'thread-b', turn: { id: 'next-b', status: 'inProgress' } });
+    assert.equal(f.state.widgetCard('thread-b', 'next-b')!.view, 'classic');
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
@@ -74,7 +165,7 @@ test('a quiet activity card finishes and a separate result notifies without an a
 test('fast turns create no empty widget; failed tool calls do not fail the whole turn or invent a plan', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start('fast');
+    f.state.setViewMode('widgets'); await f.start('fast');
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'fast', status: 'completed' } });
     f.advance(); assert.equal(await f.flush(), false);
     await f.start();
@@ -89,7 +180,7 @@ test('fast turns create no empty widget; failed tool calls do not fail the whole
 test('widget progress stays in the card instead of repeating assistant steps as permanent text', async () => {
   const f = await setup();
   try {
-    f.state.setMessageMode('all'); f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setMessageMode('all'); f.state.setViewMode('widgets'); await f.start();
     const item = { id: 'progress', type: 'agentMessage', phase: 'commentary', text: 'Checking the relay update queue' };
     await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item });
     assert.equal(await f.bridge.flushDraft(), false, 'commentary previews must stay inside the card too');
@@ -105,7 +196,7 @@ test('widget progress stays in the card instead of repeating assistant steps as 
 test('Russian progress uses available data space instead of stopping halfway through a sentence', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const text = 'Тесты воспроизвели отмену «В эфир» и для гнили, и для луж. Исправление сохраняет состояние игры и позволяет продолжить ход.';
     await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text } });
     f.advance(); await f.flush();
@@ -117,7 +208,7 @@ test('Russian progress uses available data space instead of stopping halfway thr
 test('Current step reveals the complete progress text only on an authorized card click', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const text = ('Проверяю полный текст текущего шага и сохранение состояния игры после отмены. '.repeat(25)).trim();
     await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text } });
     f.advance(); await f.flush(); await f.drain();
@@ -132,14 +223,14 @@ test('Current step reveals the complete progress text only on an authorized card
     assert.equal(f.telegram.sent().some(message => string(message.text).includes(text)), false);
     await f.bridge.update(click(804)); await f.drain();
     assert.ok(f.telegram.sent().some(message => string(message.text).includes(text)));
-    assert.equal(f.state.viewMode('thread-a'), 'widgets'); assert.deepEqual(f.codex.writes, []);
+    assert.equal(f.state.viewMode(), 'widgets'); assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
 
 test('a fast widget turn sends complete result parts with one notification and retains its text copy', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'The full final answer' } });
     assert.equal(await f.bridge.flushDraft(), false);
     const text = ('The complete final answer with code and explanation. '.repeat(45)).trim();
@@ -169,14 +260,14 @@ test('a failed result widget falls back to the complete text without replaying t
   for (const status of [400, 0, 500]) {
     const f = await setup(); let sends = 0;
     try {
-      f.state.setViewMode('thread-a', 'widgets'); await f.start();
+      f.state.setViewMode('widgets'); await f.start();
       const call = f.telegram.call.bind(f.telegram);
       f.telegram.call = async (method, params) => { if (method === 'sendWidget') { sends++; throw new TelegramError('Widget failed', status); } return call(method, params); };
       const turn = { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Complete fallback reply' }] };
       await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
       assert.ok(f.telegram.sent().some(message => string(message.text).includes('Complete fallback reply')));
       await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
-      assert.equal(sends, 1); assert.equal(f.state.viewMode('thread-a'), 'classic');
+      assert.equal(sends, 1); assert.equal(f.state.viewMode(), 'classic');
     } finally { f.close(); }
   }
 });
@@ -184,7 +275,7 @@ test('a failed result widget falls back to the complete text without replaying t
 test('a large single result document falls back to bounded formatted text messages after rejection', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget') throw new TelegramError('Widget unsupported', 400); return call(method, params); };
     const text = '**A complete formatted section with useful details 🧪.**\n\n'.repeat(180) + 'FALLBACK_FINAL_TAIL';
@@ -195,14 +286,14 @@ test('a large single result document falls back to bounded formatted text messag
     assert.ok(messages.every(message => string(message.text).length <= 4096), 'a paged widget must not become an oversized Telegram text message');
     assert.ok(messages.some(message => string(message.text).includes('FALLBACK_FINAL_TAIL')));
     assert.ok(messages.some(message => Array.isArray(message.entities) && (message.entities as Json[]).some(entity => object(entity).type === 'bold')));
-    assert.equal(f.state.viewMode('thread-a'), 'classic');
+    assert.equal(f.state.viewMode(), 'classic');
   } finally { f.close(); }
 });
 
 test('a proven unsent result widget waits three seconds and then sends once', async () => {
   const f = await setup(); let sends = 0;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget' && sends++ === 0) throw new TelegramError('Connect timeout', 0, undefined, true); return call(method, params); };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Final result' }] } });
@@ -214,7 +305,7 @@ test('a proven unsent result widget waits three seconds and then sends once', as
 test('final widgets embed the formatted complete answer and number all parts instead of shortening it', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const text = '# Result\n\n**Formatted explanation.**\n\n- First item\n- Second item\n\n```js\nconst value = 42;\n```\n\n' + 'A complete paragraph with details. '.repeat(70) + 'END_OF_WIDGET_ANSWER';
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
     await f.drain();
@@ -228,7 +319,7 @@ test('final widgets embed the formatted complete answer and number all parts ins
 test('a multipart result retries only the unsent card and persists a middle receipt without another POST', async () => {
   const f = await setup(); let attempts = 0; let failWrite = true;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const text = 'A complete section with useful details. '.repeat(3000) + 'MULTIPART_TAIL';
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
     const call = f.telegram.call.bind(f.telegram);
@@ -251,7 +342,7 @@ test('a multipart result retries only the unsent card and persists a middle rece
 test('restart resumes an acknowledged result suffix but never replays an in-flight unknown card', async () => {
   const f = await setup(); const temp = temporary(); let state: State | undefined;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const saved = f.state.widgetCard('thread-a', 'live')!;
     const text = 'Preserved complete result section. '.repeat(3000) + 'RECOVERY_TAIL';
     const parts = resultParts({ ...saved, kind: 'result', snapshot: { ...saved.snapshot, status: 'done' } }, text, 'f'.repeat(32));
@@ -284,7 +375,7 @@ test('text fallback cannot mark a result delivered without a positive receipt or
   for (const malformed of [{}, { message_id: 0 }, { message_id: -1 }]) {
     const f = await setup(); let unconfirmed = 0;
     try {
-      f.state.setViewMode('thread-a', 'widgets'); await f.start();
+      f.state.setViewMode('widgets'); await f.start();
       await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Receipt example' }] } });
       const delivery = f.state.next()!;
       const markup = object(delivery.richPlan!.at(-1)!.params.reply_markup);
@@ -308,7 +399,7 @@ test('text fallback cannot mark a result delivered without a positive receipt or
 test('a new native question is delivered before continuing a long result series', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(3000) }] } });
     await f.outbox.flushOne(); assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
     f.codex.pending.add('question');
@@ -325,7 +416,7 @@ test('a result receipt survives temporary local write failures without another T
   for (const method of ['acceptRichPart', 'delivered'] as const) {
     const f = await setup();
     try {
-      f.state.setViewMode('thread-a', 'widgets'); await f.start();
+      f.state.setViewMode('widgets'); await f.start();
       await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Known result receipt' }] } });
       let failures = 1;
       const failOnce = (): void => { if (failures-- > 0) throw new Error('Temporary local write failure'); };
@@ -351,7 +442,7 @@ test('a result receipt survives temporary local write failures without another T
 test('long cached answers preserve their tail and deduplicate late completion after queue pruning', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const text = 'A full explanation. '.repeat(2500) + 'END_OF_FULL_ANSWER';
     const turn = { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
@@ -386,12 +477,12 @@ test('restart settles known result receipts and falls back once for interrupted 
       assert.equal(f.telegram.sent().length - before, known ? 0 : 1);
       assert.equal(state.widgetAnswer(token)!.messageId, known ? 1234 : null);
       // Even after the fallback text is pruned, a restart cannot send it again or undo a later view choice.
-      f.advance(8 * 86400_000); state.prune(); state.setViewMode('thread-a', 'widgets');
+      f.advance(8 * 86400_000); state.prune(); state.setViewMode('widgets');
       state.close(); state = new State(home);
       const again = new Outbox(state, f.telegram, f.bridge.config, 0);
       while (await again.flushOne()) { /* A second restart must not duplicate the fallback. */ }
       assert.equal(f.telegram.sent().length - before, known ? 0 : 1);
-      assert.equal(state.viewMode('thread-a'), 'widgets');
+      assert.equal(state.viewMode(), 'widgets');
       state.close(); state = undefined;
     }
     assert.equal(f.telegram.calls.some(call => call.method === 'sendWidget'), false);
@@ -401,7 +492,7 @@ test('restart settles known result receipts and falls back once for interrupted 
 test('a failed callback acknowledgement does not drop an authorized cached answer', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Read without acknowledgement' }] } });
     await f.drain(); const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'answerCallbackQuery') throw new TelegramError('Query expired', 400); return call(method, params); };
@@ -415,7 +506,7 @@ test('negative result transitions survive local failures while preserving POST c
   for (const notSent of [false, true]) {
     const f = await setup(); let attempts = 0;
     try {
-      f.state.setViewMode('thread-a', 'widgets'); await f.start();
+      f.state.setViewMode('widgets'); await f.start();
       await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Persisted fallback result' }] } });
       const call = f.telegram.call.bind(f.telegram);
       f.telegram.call = async (method, params) => { if (method === 'sendWidget' && attempts++ === 0) throw new TelegramError('Send failed', 0, undefined, notSent); return call(method, params); };
@@ -439,7 +530,7 @@ test('negative result transitions survive local failures while preserving POST c
 test('a lost completion notification is reconciled on the existing card without reconnecting', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'tool', type: 'commandExecution' } });
     f.advance(); await f.flush(); const messageId = f.state.widgetCard('thread-a', 'live')!.messageId;
     const turn = { id: 'live', status: 'completed', items: [{ id: 'tool', type: 'commandExecution', status: 'completed', exitCode: 0 }, { type: 'agentMessage', phase: 'final_answer', text: 'Recovered final reply' }] };
@@ -459,7 +550,7 @@ test('a lost completion notification is reconciled on the existing card without 
 test('unknown send outcomes are durable and never replayed, while ordinary output remains usable', async () => {
   const f = await setup(); let sends = 0;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const original = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget') { sends++; throw new TelegramError('Connection lost', 0); } return original(method, params); };
     await f.flush(); f.advance(); await f.flush();
@@ -475,7 +566,7 @@ test('unknown send outcomes are durable and never replayed, while ordinary outpu
 test('proven pre-connect failures retry widget delivery after three seconds without an uncertain admission', async () => {
   const f = await setup(); let attempts = 0;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const api = new TelegramClient('123456:synthetic_token', async () => {
       if (attempts++ === 0) throw new TypeError('fetch failed', { cause: Object.assign(new Error('credential-bearing URL must not be retained'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }));
@@ -492,7 +583,7 @@ test('proven pre-connect failures retry widget delivery after three seconds with
 test('safe tool details distinguish actions without exposing command arguments or tool payloads', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     for (const item of [
       { id: 'read', type: 'commandExecution', command: 'SECRET_COMMAND', commandActions: [{ type: 'read', path: 'C:\\work\\src\\state.ts', command: 'SECRET_ARGUMENT' }] },
       { id: 'test', type: 'commandExecution', command: 'npm test --token SECRET_TOKEN' },
@@ -510,21 +601,21 @@ test('safe tool details distinguish actions without exposing command arguments o
 test('an unknown initial send releases the latest suppressed progress once as a classic fallback', async () => {
   const f = await setup();
   try {
-    f.state.setMessageMode('all'); f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setMessageMode('all'); f.state.setViewMode('widgets'); await f.start();
     await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text: 'Checking the update delivery queue' } });
     await f.drain(); assert.equal(f.telegram.sent().some(message => string(message.text).includes('Checking the update delivery queue')), false);
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget') throw new TelegramError('Unknown outcome', 0); return call(method, params); };
     f.advance(); await f.flush(); await f.drain(); f.advance(); await f.flush(); await f.drain();
     assert.equal(f.telegram.sent().filter(message => string(message.text).includes('Checking the update delivery queue')).length, 1);
-    assert.equal(f.state.viewMode('thread-a'), 'classic');
+    assert.equal(f.state.viewMode(), 'classic');
   } finally { f.close(); }
 });
 
 test('a quiet running tool gets native status checks without a lost-event replay or stale completion overwrite', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance(); await f.flush();
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); await f.flush();
     f.codex.histories.set('thread-a', [{ id: 'live', status: 'inProgress' }]);
     const before = f.state.widgetCard('thread-a', 'live')!.snapshot.updatedAt;
     f.advance(16_000); await f.bridge.discover();
@@ -546,7 +637,7 @@ test('a quiet running tool gets native status checks without a lost-event replay
 test('recovering an older missed completion preserves the newer final baseline', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start('older'); f.advance(); await f.flush();
+    f.state.setViewMode('widgets'); await f.start('older'); f.advance(); await f.flush();
     await f.start('newer');
     const newer = { id: 'newer', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Newer final' }] };
     const older = { id: 'older', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Older recovered final' }] };
@@ -565,7 +656,7 @@ test('recovering an older missed completion preserves the newer final baseline',
 test('a received widget message is retained when local receipt persistence fails temporarily', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const delivered = f.state.widgetDelivered.bind(f.state); let fail = true;
     f.state.widgetDelivered = (...args) => { if (fail) { fail = false; throw new Error('Database busy'); } delivered(...args); };
     await f.flush(); f.advance(); await f.flush();
@@ -578,7 +669,7 @@ test('a received widget message is retained when local receipt persistence fails
 test('widget retry outcomes survive a temporary local state write failure', async () => {
   const f = await setup(); let attempts = 0;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const result = f.state.widgetResult.bind(f.state); let fail = true;
     f.state.widgetResult = (...args) => { if (fail) { fail = false; throw new Error('Database busy'); } result(...args); };
     const call = f.telegram.call.bind(f.telegram);
@@ -596,10 +687,10 @@ test('widget retry outcomes survive a temporary local state write failure', asyn
 test('a definite widget rejection selects classic and does not disconnect or change native permissions', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const original = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget') throw new TelegramError('Unknown method', 404); return original(method, params); };
-    await f.flush(); await f.drain(); assert.equal(f.state.viewMode('thread-a'), 'classic');
+    await f.flush(); await f.drain(); assert.equal(f.state.viewMode(), 'classic');
     assert.ok(f.telegram.sent().some(item => string(item.text).includes('Widgets are unavailable')));
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
@@ -608,7 +699,7 @@ test('a definite widget rejection selects classic and does not disconnect or cha
 test('429 delays only widget work; editing an existing message can safely retry a full snapshot', async () => {
   const f = await setup(); let attempts = 0;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     const original = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget' && !attempts++) throw new TelegramError('Rate limited', 429, 5); return original(method, params); };
     await f.flush(); f.advance(1000); assert.equal(await f.flush(), false); f.advance(5000); await f.flush();
@@ -624,7 +715,7 @@ test('429 delays only widget work; editing an existing message can safely retry 
 test('no older edit can overtake a final snapshot through the local sender', async () => {
   const f = await setup(); let release!: (value: unknown) => void;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance(); await f.flush();
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); await f.flush();
     await f.bridge.notification('turn/plan/updated', { threadId: 'thread-a', turnId: 'live', plan: [{ step: 'One', status: 'inProgress' }] }); f.advance();
     const original = f.telegram.call.bind(f.telegram); let entered!: () => void;
     const waiting = new Promise<void>(resolve => { entered = resolve; }); const held = new Promise(resolve => { release = resolve; });
@@ -641,7 +732,7 @@ test('no older edit can overtake a final snapshot through the local sender', asy
 test('reconnect reuses a confirmed message, does not import old turns and preserves view preferences on disk', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance(); await f.flush();
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); await f.flush();
     const messageId = f.state.widgetCards('thread-a')[0]!.messageId;
     f.bridge.close(); f.codex.histories.set('thread-a', [{ id: 'live', status: 'inProgress' }, { id: 'historical', status: 'completed' }]);
     const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram); await bridge.discover();
@@ -655,14 +746,14 @@ test('reconnect reuses a confirmed message, does not import old turns and preser
 test('disk recovery selects classic for interrupted sends once and preserves explicit later choices', async () => {
   const f = await setup(); const temp = temporary(); let state: State | undefined;
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
-    state = new State(join(temp.dir, 'private')); state.setViewMode('thread-a', 'widgets');
+    f.state.setViewMode('widgets'); await f.start();
+    state = new State(join(temp.dir, 'private')); state.setViewMode('widgets');
     const card = f.state.widgetCards('thread-a')[0]!; state.saveWidget(card); assert.equal(state.claimWidget(card.id, false), true);
     state.close(); state = new State(join(temp.dir, 'private'));
-    assert.equal(state.viewMode('thread-a'), 'classic'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
+    assert.equal(state.viewMode(), 'classic'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
     assert.equal(state.widgetCards()[0]!.failure, 'restart-outcome-unknown');
-    state.setViewMode('thread-a', 'widgets'); state.close(); state = new State(join(temp.dir, 'private'));
-    assert.equal(state.viewMode('thread-a'), 'widgets'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
+    state.setViewMode('widgets'); state.close(); state = new State(join(temp.dir, 'private'));
+    assert.equal(state.viewMode(), 'widgets'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
   } finally { state?.close(); temp.close(); f.close(); }
 });
 
@@ -680,7 +771,7 @@ test('widget view is independent of text previews and permanent-message verbosit
 test('pending approvals and questions change status without being answered by widget rendering', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     f.codex.pending.add('approval');
     await f.bridge.request({ id: 'approval', method: 'item/commandExecution/requestApproval', params: {
       threadId: 'thread-a', turnId: 'live', itemId: 'command', command: 'echo ok', cwd: f.projectA,
@@ -696,17 +787,17 @@ test('pending approvals and questions change status without being answered by wi
   } finally { f.close(); }
 });
 
-test('view controls require the original owner/private chat/topic/message and a current binding', async () => {
+test('global view menus require the original owner/private chat/topic/message and an unused selection', async () => {
   const f = await setup();
   try {
-    await f.bridge.update(message(1, 101, '/view widgets', 99)); assert.equal(f.state.viewMode('thread-a'), 'classic');
+    await f.bridge.update(message(1, 101, '/view widgets', 99)); assert.equal(f.state.viewMode(), 'classic');
     await f.bridge.update(message(2, 101, '/view')); await f.drain();
     const sent = f.telegram.sent().at(-1)!; const data = string(object((object(sent.reply_markup).inline_keyboard as Json[][])[0]![1]).callback_data);
     const click = (id: number, topic = 101, owner = 42, messageId = f.telegram.message) => ({ update_id: id, callback_query: { id: String(id), from: { id: owner }, data,
       message: { message_id: messageId, chat: { id: owner, type: 'private' }, message_thread_id: topic } } });
     await f.bridge.update(click(3, 102)); await f.bridge.update(click(4, 101, 99)); await f.bridge.update(click(5, 101, 42, 1));
-    assert.equal(f.state.viewMode('thread-a'), 'classic');
-    await f.bridge.update(click(6)); await f.bridge.update(click(7)); assert.equal(f.state.viewMode('thread-a'), 'widgets');
+    assert.equal(f.state.viewMode(), 'classic');
+    await f.bridge.update(click(6)); await f.bridge.update(click(7)); assert.equal(f.state.viewMode(), 'widgets');
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
@@ -714,7 +805,7 @@ test('view controls require the original owner/private chat/topic/message and a 
 test('rebound or excluded sessions cannot leak queued widget data or use old fallback buttons', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    f.state.setViewMode('widgets'); await f.start(); f.advance();
     f.state.installTopic('thread-a', 555, f.projectA, 'Moved');
     assert.equal(await f.flush(), false); assert.equal(f.telegram.calls.some(call => call.method === 'sendWidget'), false);
   } finally { f.close(); }
@@ -723,7 +814,7 @@ test('rebound or excluded sessions cannot leak queued widget data or use old fal
 test('template and Unicode snapshots fit server byte limits and use Telegram theme/text/safe-area tokens', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    f.state.setViewMode('widgets'); await f.start();
     const card = f.state.widgetCards('thread-a')[0]!;
     card.binding.sessionName = '😀Русский заголовок<script>bad()</script>'.repeat(100);
     card.snapshot.activities = Array.from({ length: 3 }, (_, i) => ({ id: String(i), label: '😀'.repeat(100), status: 'done' }));
@@ -742,7 +833,7 @@ test('history pruning never evicts a live receipt or an uncertain admission iden
   for (const uncertain of [false, true]) {
     const f = await setup();
     try {
-      f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+      f.state.setViewMode('widgets'); await f.start(); f.advance();
       if (uncertain) {
         const card = f.state.widgetCard('thread-a', 'live')!;
         f.state.claimWidget(card.id, false); f.state.widgetResult(card.id, 'uncertain');
@@ -770,7 +861,7 @@ test('history pruning never evicts a live receipt or an uncertain admission iden
 test('bounded storage pauses new widget admission instead of evicting unresolved sends', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start(); const base = f.state.widgetCard('thread-a', 'live')!;
+    f.state.setViewMode('widgets'); await f.start(); const base = f.state.widgetCard('thread-a', 'live')!;
     for (let index = 0; index < 511; index++) {
       const card = { ...base, id: `unresolved-${index}`, turnId: `unresolved-${index}` };
       assert.equal(f.state.saveWidget(card), true); f.state.widgetResult(card.id, 'uncertain');
@@ -785,7 +876,7 @@ test('bounded storage pauses new widget admission instead of evicting unresolved
 test('recovery retains terminal history and reconciles missed tool completions on an existing card', async () => {
   const f = await setup();
   try {
-    f.state.setViewMode('thread-a', 'widgets'); await f.start('done'); f.advance(); await f.flush();
+    f.state.setViewMode('widgets'); await f.start('done'); f.advance(); await f.flush();
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'done', status: 'completed' } });
     f.advance(); await f.flush(); const terminal = f.state.widgetCard('thread-a', 'done')!;
     await f.start();

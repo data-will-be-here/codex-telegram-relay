@@ -9,7 +9,7 @@ const commands = [
   { command: 'clear', args: '', en: 'Start a fresh conversation in this topic; keep Telegram history' },
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed' },
   { command: 'permissions', args: '', en: 'Choose this session’s access and approval review mode' },
-  { command: 'view', args: 'classic|widgets', en: 'Choose Classic or experimental Widgets for this session' },
+  { command: 'view', args: 'classic|widgets', en: 'Choose Classic or experimental Widgets for all topics' },
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews' },
   { command: 'questions', args: '', en: 'Show pending questions with answer buttons' },

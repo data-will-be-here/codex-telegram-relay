@@ -180,7 +180,7 @@ export class Outbox {
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
             html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
-            reply_markup: { inline_keyboard: [[{ text: 'Current step', callback_data: `v:${card.token}:d` }, { text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
+            reply_markup: { inline_keyboard: [[{ text: 'Current step', callback_data: `v:${card.token}:d` }, { text: 'Classic for all topics', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
           this.acceptWidgetReceipt(card.id, card.revision, id);
@@ -203,10 +203,10 @@ export class Outbox {
             error.status === 0 ? 'transport-outcome-unknown' : `http-${error.status}`) : 'unexpected-failure';
           this.persistWidget(card.id, () => {
             this.state.widgetResult(card!.id, definite ? 'disabled' : 'uncertain', 0, failure);
-            this.state.setViewMode(card!.binding.threadId, 'classic');
+            this.state.setViewMode('classic');
             this.state.enqueue(`attention/widgets/${card!.id}`, card!.binding.topicId, definite ?
-            'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again when widget support is available.' :
-            'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+            'Widgets are unavailable. Classic view selected for following turns in all topics; replies and approvals continue normally. Use /view widgets to try again when widget support is available.' :
+            'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns in all topics; replies and approvals continue normally. Use /view widgets to enable cards again.');
             const progress = this.state.widgetCard(card!.binding.threadId, card!.turnId)?.snapshot.summary;
             if (progress) this.state.enqueue(`attention/widget-progress/${card!.id}`, card!.binding.topicId, `Latest progress: ${progress}`, null, card!.binding.cwd, card!.binding.threadId);
           });
@@ -355,7 +355,7 @@ export class Outbox {
           parts.splice(index, parts.length - index, ...remaining.map(chunk => ({ method: 'sendMessage' as const,
             params: { ...withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true } } })));
           this.persistAnswer(delivery.id, () => {
-            if (delivery.sourceThreadId) this.state.setViewMode(delivery.sourceThreadId, 'classic');
+            if (delivery.sourceThreadId) this.state.setViewMode('classic');
             this.state.saveRichPlan(delivery.id, parts); this.state.retryDelivery(delivery.id, Date.now());
           });
           return { messageId, complete: false };

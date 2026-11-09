@@ -599,7 +599,7 @@ async function originalSession(f: ReturnType<typeof setup>) {
 test('/clear switches the same topic to one empty conversation and keeps the old native history', async () => {
   const f = setup();
   try {
-    const old = await originalSession(f); f.state.setViewMode(old.threadId, 'widgets');
+    const old = await originalSession(f); f.state.setViewMode('widgets');
     const topics = f.telegram.calls.filter(call => call.method === 'createForumTopic').length;
     await f.bridge.update(message(10, old.topicId, '/clear'));
     await f.bridge.update(message(11, old.topicId, '/clear'));
@@ -610,7 +610,7 @@ test('/clear switches the same topic to one empty conversation and keeps the old
     await f.bridge.workNewSession(); await f.drain();
     const next = f.state.topic(old.topicId)!;
     assert.equal(next.threadId, 'new-thread-1'); assert.equal(next.cwd, old.cwd); assert.equal(next.lastTurn, '-');
-    assert.equal(f.state.viewMode(next.threadId), 'widgets'); assert.equal(f.state.retiredSession(old.threadId), true);
+    assert.equal(f.state.viewMode(), 'widgets'); assert.equal(f.state.retiredSession(old.threadId), true);
     assert.equal(f.state.historicalAnswerBinding(old), true);
     assert.equal(f.native.starts, 1); assert.equal(f.state.binding(old.threadId), undefined);
     assert.equal((await f.native.turns('original'))[0]!.id, 'old'); assert.deepEqual(await f.native.turns(next.threadId), []);
@@ -757,7 +757,7 @@ test('historical Full answer remains readable after /clear but old permission co
     const menu = f.telegram.sent().at(-1)!; const menuId = f.telegram.message;
     const controls = object(menu.reply_markup).inline_keyboard as Json[][];
     const permission = controls.flat().find(item => string(item.text).includes('Read Only'))!;
-    f.state.setViewMode(old.threadId, 'widgets');
+    f.state.setViewMode('widgets');
     await f.bridge.notification('turn/started', { threadId: old.threadId, turn: { id: 'result', status: 'inProgress' } });
     f.native.histories.get(old.threadId)!.unshift({ id: 'result', status: 'completed' });
     await f.bridge.notification('turn/completed', { threadId: old.threadId, turn: { id: 'result', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Historical full reply' }] } });

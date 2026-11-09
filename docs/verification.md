@@ -1,5 +1,11 @@
 # Verification record
 
+## Shared view preference for all topics
+
+A red regression showed that `/view widgets` in one topic left other sessions in Classic. `/view` now stores one relay-wide preference, available from any owner-private topic or the root chat; `/status` and command/card labels name that scope. First-time migration preserves a legacy Widgets opt-in and later explicit global choices survive restart. Existing running turns retain their captured view, including active turns recovered in other attached projects before a switch. Unavailable native reads do not block the preference, and binding/scope is rechecked after awaited preparation.
+
+Regression tests cover root/unbound-topic menus and direct commands, wrong owner/topic/message and consumed controls, cross-project turn latching, migration/persistence without changing message/stream settings, rebind during preparation, the global Classic card action and unchanged native settings/input. Full local suite: 382 discovered, 378 passed, four skips, zero failures. Clean install/build, typecheck, package/dry-run checks and production dependency audit passed. Historical per-session verification below describes the former behavior.
+
 ## Swipeable complete result reader
 
 A focused red regression showed that a fitting formatted answer was split into ten documents. The reader now tries the whole reply in one immutable document and splits only when measured source/compressed budgets require it. Local pages use the available bubble height, with horizontal pointer gestures, arrow controls, current/total page counts and a green circular completion check. Future pages are measured in a separate hidden section, one per animation frame, so intermediate text never replaces the visible page. A second red regression caught oversized text conversion after widget rejection; the existing entity-aware splitting logic now also bounds that fallback.

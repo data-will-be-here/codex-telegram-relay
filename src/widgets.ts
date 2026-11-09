@@ -42,7 +42,7 @@ export class Widgets {
     if (previous) return { ...previous, binding, generation: this.generation };
     const now = this.now();
     return { id: randomUUID(), token: randomBytes(16).toString('hex'), generation: this.generation,
-      binding, turnId, view: this.state.viewMode(binding.threadId), revision: 1, createdAt: now,
+      binding, turnId, view: this.state.viewMode(), revision: 1, createdAt: now,
       snapshot: { status: 'working', startedAt, finishedAt: null, updatedAt: now, plan: null, activities: [] } };
   }
   observe(binding: Binding, method: string, params: Json): void {
@@ -176,46 +176,46 @@ export class Widgets {
   }
 }
 
-interface ViewMenu { binding: Binding; key: string; expires: number; }
+interface ViewMenu { topicId: number | null; key: string; expires: number; }
 export class ViewPicker {
   private menus = new Map<string, ViewMenu>();
   constructor(private readonly state: State, private readonly telegram: Telegram,
-    private readonly allowed: (binding: Binding) => Promise<boolean>, private readonly prepare: (binding: Binding) => Promise<void>) {}
+    private readonly allowed: (binding: Binding) => Promise<boolean>, private readonly prepare: () => Promise<void>) {}
 
-  private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/view/${randomUUID()}`, binding.topicId, text); }
-  async open(binding: Binding, choice?: ViewMode): Promise<void> {
-    if (!await this.allowed(binding)) { this.notice(binding, 'This session is unavailable. Open it in Codex and retry /view.'); return; }
-    await this.prepare(binding);
-    if (!await this.allowed(binding)) return;
-    if (choice) { this.apply(binding, choice); return; }
-    for (const [token, menu] of this.menus) if (menu.expires < Date.now() || menu.binding.threadId === binding.threadId) {
+  private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/view/${randomUUID()}`, topicId, text); }
+  async open(topicId: number | null, choice?: ViewMode): Promise<void> {
+    if (choice) { await this.apply(topicId, choice); return; }
+    for (const [token, menu] of this.menus) if (menu.expires < Date.now() || menu.topicId === topicId) {
       this.state.cancelPrompt(menu.key); this.menus.delete(token);
     }
-    if (this.menus.size >= 64) { this.notice(binding, 'Close an open view menu and retry /view.'); return; }
-    const token = randomBytes(16).toString('hex'); const key = `prompt/view/${token}`;
-    this.menus.set(token, { binding, key, expires: Date.now() + 10 * 60_000 });
-    this.state.enqueue(key, binding.topicId, `Session view: ${this.state.viewMode(binding.threadId) === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns. Widgets keep progress in the card; final replies and approvals stay in the conversation.`, {
+    if (this.menus.size >= 64) { this.notice(topicId, 'Close an open view menu and retry /view.'); return; }
+    const token = randomBytes(16).toString('hex'); const key = `notice/view/${token}`;
+    this.menus.set(token, { topicId, key, expires: Date.now() + 10 * 60_000 });
+    this.state.enqueue(key, topicId, `View for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns in all current and new sessions. Running turns keep their view.`, {
       inline_keyboard: [[{ text: 'Classic', callback_data: `v:${token}:c` }, { text: 'Widgets · experimental', callback_data: `v:${token}:w` }]],
     });
   }
-  private apply(binding: Binding, view: ViewMode): void {
-    this.state.setViewMode(binding.threadId, view);
-    this.notice(binding, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in this session. The current turn keeps its view.\n${view === 'widgets' ? 'Progress stays in the card. A separate result card has a Full answer button. Approvals keep their normal controls.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
+  private async apply(topicId: number | null, view: ViewMode): Promise<void> {
+    if (this.state.viewMode() !== view) await this.prepare();
+    this.state.setViewMode(view);
+    this.notice(topicId, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in all current and new sessions. Running turns keep their view.\n${view === 'widgets' ? 'Progress stays in the card. Complete final replies use a separate swipeable reader. Approvals keep their normal controls.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
   }
   async callback(callback: Json, message: Json, topic: number | null): Promise<void> {
     const match = /^v:([a-f0-9]{32}):([cwd])$/u.exec(string(callback.data));
     const menu = match && match[2] !== 'd' ? this.menus.get(match[1]!) : undefined;
     const fallback = match && !menu && ['c', 'd'].includes(match[2]!) ? this.state.widgetCards().find(card => card.token === match[1]) : undefined;
-    const binding = menu?.binding ?? fallback?.binding;
+    const binding = fallback?.binding;
     const current = binding && this.state.binding(binding.threadId);
     const messageId = typeof message.message_id === 'number' && Number.isSafeInteger(message.message_id) && message.message_id > 0 ? message.message_id : undefined;
     const validMessage = messageId && (menu ? menu.expires >= Date.now() && messageId === this.state.promptMessage(menu.key) :
       fallback && fallback.delivery !== 'retired' && messageId === fallback.messageId);
-    const valid = binding && current?.topicId === binding.topicId && current.cwd === binding.cwd && topic === binding.topicId && validMessage;
+    const valid = validMessage && (menu ? topic === menu.topicId : binding && current?.topicId === binding.topicId && current.cwd === binding.cwd && topic === binding.topicId);
     // Consume a menu selection before any asynchronous acknowledgement or native read.
     if (valid && menu) { this.menus.delete(match![1]!); this.state.cancelPrompt(menu.key); }
-    await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!valid ? { text: 'This view control expired. Send /view in the current session topic.' } : {}) });
-    if (!valid || !await this.allowed(binding)) return;
+    await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!valid ? { text: 'This view control expired. Send /view again.' } : {}) });
+    if (!valid) return;
+    if (menu) { await this.apply(topic, match![2] === 'w' ? 'widgets' : 'classic'); return; }
+    if (!binding || !await this.allowed(binding)) return;
     if (match![2] === 'd' && fallback) {
       const card = this.state.widgetCard(binding.threadId, fallback.turnId);
       if (!card || card.id !== fallback.id || card.delivery === 'retired' || card.messageId !== messageId) return;
@@ -223,8 +223,9 @@ export class ViewPicker {
       this.state.enqueue(`attention/widget-step/${card.id}/${randomUUID()}`, binding.topicId, `Current step\n\n${text}`, null, binding.cwd, binding.threadId);
       return;
     }
-    await this.prepare(binding);
+    await this.prepare();
     if (!await this.allowed(binding)) return;
-    this.apply(binding, match![2] === 'w' ? 'widgets' : 'classic');
+    this.state.setViewMode('classic');
+    this.notice(topic, 'Classic selected for following turns in all current and new sessions. Running turns keep their view.');
   }
 }

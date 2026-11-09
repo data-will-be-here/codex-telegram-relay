@@ -232,7 +232,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
 | `/model` | Choose this session's model, reasoning effort and speed |
 | `/permissions` | Show and change this session's native permissions (main/dev after v0.1.19) |
-| `/view`, `/view classic`, `/view widgets` | Choose Classic or experimental Widgets for this session (dev) |
+| `/view`, `/view classic`, `/view widgets` | Choose Classic or experimental Widgets for all topics (dev) |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
@@ -246,7 +246,7 @@ In v0.1.17, `/model` in a connected session topic fetches the current native mod
 
 ## Experimental activity widgets (dev)
 
-Send `/view` in an attached session topic and choose `Classic` or `Widgets · experimental`, or use `/view widgets` directly. Classic is the default. The preference belongs to this native session and survives relay restarts. It applies to following turns; an already-running turn keeps its original view. `/view classic` restores the classic view for following turns. No local opt-in, separate web server or Telegram Mini App setup is needed.
+Send `/view` in any topic or directly in the bot chat and choose `Classic` or `Widgets · experimental`, or use `/view widgets` directly. Classic is the default. One relay-wide preference applies to all current and future sessions and survives restarts. It applies to following turns; running turns keep their original view. `/view classic` restores the classic view for all topics. On first upgrade from per-session preferences, Widgets is retained if any saved session had it enabled; later global choices take precedence. `/status` shows the shared view. No local opt-in, separate web server or Telegram Mini App setup is needed.
 
 A turn lasting more than about a second can produce one activity card. It updates in place with the project/task, status, elapsed time, structured-plan counters, a brief assistant progress summary and up to three recent actions. Safe details distinguish file basenames, known command runners and tool names; raw command arguments, tool payload/output and reasoning are excluded. Failed commands do not automatically label the whole turn failed. No iteration budget, ETA or overall percentage is invented. Native task/plan text keeps its language; service labels are English.
 
@@ -258,9 +258,9 @@ The last result part offers Text version as an optional formatted text copy; exi
 
 Full-answer caches are private local state retained independently of the seven-day delivery queue, so old buttons remain usable while their exact topic/project binding remains eligible. Up to 10,000 replies are retained; at capacity new results use ordinary text instead of discarding old answers. Removing the local state removes this archive and its buttons' content.
 
-The implementation targets production Bot API 10.4/private topics. New activity cards have a Classic mode button and no explanatory caption beneath them. Rendering depends on the Telegram client. Quiet active cards are checked against recent native history, at most four per discovery pass and no more often than every 15 seconds per card, with bounded RPC timeouts. A missed completion settles the existing card and delivers the final reply once without regressing a newer baseline. Successful checks refresh live status; finished cards show a stable Finished footer. Unknown initial sends are never replayed, and uncertain receipts remain protected from pruning. Existing sent HTML is immutable: the new footer/layout applies to new cards; editing data cannot upgrade the old template. [Protocol and validation](docs/architecture.md#activity-widgets).
+The implementation targets production Bot API 10.4/private topics. New activity cards have a Classic for all topics button and no explanatory caption beneath them. Rendering depends on the Telegram client. Quiet active cards are checked against recent native history, at most four per discovery pass and no more often than every 15 seconds per card, with bounded RPC timeouts. A missed completion settles the existing card and delivers the final reply once without regressing a newer baseline. Successful checks refresh live status; finished cards show a stable Finished footer. Unknown initial sends are never replayed, and uncertain receipts remain protected from pruning. Existing sent HTML is immutable: the new footer/layout applies to new cards; editing data cannot upgrade the old template. [Protocol and validation](docs/architecture.md#activity-widgets).
 
-Proven connection failures before a widget request is sent are retried after three seconds. If an initial send has an unknown outcome, it is never replayed automatically and Classic is selected for following turns. `/view widgets` enables future cards. Safe diagnostic categories are retained locally; raw transport errors and bot URLs are not stored.
+Proven connection failures before a widget request is sent are retried after three seconds. If an initial send has an unknown outcome, it is never replayed automatically and Classic is selected for following turns in all topics. `/view widgets` enables future cards. Safe diagnostic categories are retained locally; raw transport errors and bot URLs are not stored.
 
 ## Session permissions with /permissions (main/dev after v0.1.19)
 

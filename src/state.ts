@@ -119,14 +119,16 @@ export class State {
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
-      this.db.prepare("UPDATE settings SET value='classic' WHERE key IN (SELECT 'view/' || threadId FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain'))").run(Number(legacyWidgets));
+      // Preserve an existing opt-in once when migrating per-session preferences to the relay-wide setting.
+      this.db.exec("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END; DELETE FROM settings WHERE key LIKE 'view/%'");
+      if (interruptedWidgets.size) this.setViewMode('classic');
       this.db.exec("UPDATE widget_cards SET delivery='uncertain',failure='restart-outcome-unknown' WHERE delivery='sending'; UPDATE widget_cards SET delivery='active' WHERE delivery='editing'; UPDATE widget_cards SET failure='legacy-outcome-unknown' WHERE delivery='uncertain' AND failure IS NULL");
       if (!this.db.prepare('PRAGMA table_info(topic_operations)').all().some(column => column.name === 'error')) this.db.exec('ALTER TABLE topic_operations ADD COLUMN error TEXT');
       this.db.exec("UPDATE topic_operations SET status='uncertain' WHERE status='failed' AND error LIKE '%BOT_TOPIC_WRONG_HOME%'");
       this.db.exec("UPDATE widget_cards SET everUncertain=1 WHERE delivery='uncertain'");
       for (const card of this.widgetCards().filter(card => interruptedWidgets.has(card.id))) {
         this.enqueue(`attention/widgets/${card.id}`, card.binding.topicId,
-          'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+          'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns in all topics; replies and approvals continue normally. Use /view widgets to enable cards again.');
       }
       const unsettledAnswers = this.db.prepare(`SELECT o.id,o.messageId,o.nextPart,a.multipartSafe,json_array_length(o.richPlan) AS parts FROM outbox o
         JOIN widget_answers a ON a.deliveryKey=o.key WHERE o.status='uncertain'`).all();
@@ -145,10 +147,10 @@ export class State {
     this.db.close();
     if (existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
   }
-  viewMode(threadId: string): ViewMode { return this.db.prepare('SELECT value FROM settings WHERE key=?').get('view/' + threadId)?.value === 'widgets' ? 'widgets' : 'classic'; }
-  setViewMode(threadId: string, view: ViewMode): void {
-    if (!threadId || !['classic', 'widgets'].includes(view)) throw new Error('Invalid session view.');
-    this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('view/' + threadId, view);
+  viewMode(): ViewMode { return this.db.prepare("SELECT value FROM settings WHERE key='view'").get()?.value === 'widgets' ? 'widgets' : 'classic'; }
+  setViewMode(view: ViewMode): void {
+    if (!['classic', 'widgets'].includes(view)) throw new Error('Invalid relay view.');
+    this.db.prepare("INSERT INTO settings VALUES('view',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(view);
   }
   widgetCards(threadId?: string): WidgetDelivery[] {
     return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => this.decodeWidget(row)!);
@@ -261,7 +263,6 @@ export class State {
       this.db.prepare("UPDATE widget_cards SET delivery='retired' WHERE threadId=?").run(old.threadId);
       this.db.prepare('DELETE FROM bindings WHERE threadId=?').run(old.threadId);
       this.db.prepare("INSERT INTO bindings(threadId,topicId,cwd,title,lastTurn,sessionName) VALUES(?,?,?,?,'-',?)").run(id, old.topicId, old.cwd, old.title, operation.name ?? null);
-      this.db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').run('view/' + id, this.viewMode(old.threadId));
       this.db.prepare('DELETE FROM topic_operations WHERE threadId IN (?,?)').run(old.threadId, id);
       this.db.prepare('DELETE FROM replies WHERE threadId=?').run(old.threadId);
       this.db.exec('COMMIT'); return this.binding(id)!;
@@ -341,7 +342,7 @@ export class State {
     if (!row || row.fallbackQueued) return;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      if (typeof row.sourceThreadId === 'string') this.setViewMode(row.sourceThreadId, 'classic');
+      if (typeof row.sourceThreadId === 'string') this.setViewMode('classic');
       this.uncertain(id);
       this.enqueue(`attention/final-widget-fallback/${string(row.key)}`, typeof row.topicId === 'number' ? row.topicId : null,
         `The result card could not be confirmed. Full reply:\n\n${string(row.text)}`, null, typeof row.projectCwd === 'string' ? row.projectCwd : undefined,

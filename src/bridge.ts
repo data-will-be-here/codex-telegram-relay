@@ -70,8 +70,16 @@ export class Bridge {
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.widgets = new Widgets(state, this.generation);
-    this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async binding => {
-      this.widgets.recover(binding, await this.codex.turns(binding.threadId));
+    this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async () => {
+      for (const binding of this.state.bindings()) {
+        if (!this.attached.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId)) continue;
+        let turns: Json[];
+        try { turns = await this.codex.turns(binding.threadId); }
+        catch { continue; } // A temporarily unavailable session must not block this relay-wide preference.
+        const current = this.state.binding(binding.threadId);
+        if (current?.topicId !== binding.topicId || current.cwd !== binding.cwd || !this.attached.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId)) continue;
+        this.widgets.recover(current, turns);
+      }
     });
   }
 
@@ -613,7 +621,7 @@ export class Bridge {
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
+    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nView for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
@@ -681,13 +689,11 @@ export class Bridge {
       return;
     }
     if (/^\/view(?:\s|$)/u.test(text)) {
-      const binding = topicId === null ? undefined : this.state.topic(topicId);
-      if (!binding) { this.notice(topicId, 'Open an attached session topic and send /view.'); return; }
       const choice = text.split(/\s+/u);
       if (choice.length > 2 || choice[1] !== undefined && !['classic', 'widgets'].includes(choice[1])) {
         this.notice(topicId, 'Use /view, /view classic or /view widgets.'); return;
       }
-      await this.views.open(binding, choice[1] as 'classic' | 'widgets' | undefined); return;
+      await this.views.open(topicId, choice[1] as 'classic' | 'widgets' | undefined); return;
     }
     if (/^\/permissions(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
