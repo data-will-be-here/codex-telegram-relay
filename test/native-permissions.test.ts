@@ -49,7 +49,7 @@ test('native /permissions: confirmed profiles and reviewer persist across restar
   };
   const stop = async () => {
     if (!child || child.exitCode !== null) return;
-    const running = child; const exited = new Promise<void>(resolve => running.once('exit', () => resolve()));
+    const running = child; const exited = new Promise<void>(resolve => running.once('close', () => resolve()));
     running.stdin.end(); const timer = setTimeout(() => running.kill(), 3000); await exited; clearTimeout(timer);
   };
   try {

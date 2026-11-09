@@ -13,6 +13,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 - **Start a separate conversation (main/dev after v0.1.19).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
+- **Optional live activity cards (dev).** `/view widgets` adds a compact, updating Codex activity card to this session. Its colors and text size follow the Telegram client's theme; final replies and approvals remain ordinary messages.
 - **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
 - **Keep a searchable conversation archive.** Messages forwarded under your chosen mode and your Telegram replies stay in the topic, so you can return to earlier discussions and results whenever you need them.
@@ -230,6 +231,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
 | `/model` | Choose this session's model, reasoning effort and speed |
 | `/permissions` | Show and change this session's native permissions (main/dev after v0.1.19) |
+| `/view`, `/view classic`, `/view widgets` | Choose Classic or experimental Widgets for this session (dev) |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
@@ -240,6 +242,18 @@ Since v0.1.18, the main command menu is simplified. Ordinary text answers a pend
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
+
+## Experimental activity widgets (dev)
+
+Send `/view` in an attached session topic and choose `Classic` or `Widgets · experimental`, or use `/view widgets` directly. Classic is the default. The preference belongs to this native session and survives relay restarts. It applies to following turns; an already-running turn keeps its original view. `/view classic` restores the classic view for following turns. No local opt-in, separate web server or Telegram Mini App setup is needed.
+
+A turn lasting more than about a second can produce one activity card. It updates in place with the project/task, status, elapsed time, actual structured-plan progress/current step when supplied, and up to three recent tool categories. Failed commands do not automatically label the whole turn failed. No iteration budget, completion estimate or overall percentage is invented. Raw commands, tool arguments/output and reasoning are excluded. Native task/plan text keeps its original language; service labels are English.
+
+The card uses Telegram's message-bubble palette and native text tokens, including live theme/font changes and safe-area insets. Larger fonts reduce detail; very large text shows status/time. It is a fixed, sandboxed mini-HTML template with bounded private `chat_data`, no external assets, shared state or widget-origin requests. Final answers, files, questions and full approvals use the existing delivery path. The card does not approve, change permissions or interrupt work.
+
+`/view` does not change `/mode` or `/stream`: `/mode` still controls permanent-message detail for all sessions, and `/stream` still controls live answer-text previews for all sessions. A widget can be used alongside text previews, or with previews disabled. Progress cards and text drafts share a paced, alternating low-priority sender; questions, approvals and final messages take priority.
+
+The implementation targets production Bot API 10.4/private topics. Actual rendering depends on the Telegram client. Every card includes a caption and an ordinary `Classic mode` button for fallback. A definite widget rejection selects Classic for that session; normal replies remain usable. Unknown initial sends are not repeated. Reconnect updates known cards only after checking their session route. Previously observed terminal states stay terminal; an unavailable structured plan is hidden until a fresh native plan event arrives. Uncertain receipts remain protected from pruning; at 512 unresolved/live records, new card admission pauses with a notice rather than evicting receipt identities. [Protocol and validation](docs/architecture.md#activity-widgets).
 
 ## Session permissions with /permissions (main/dev after v0.1.19)
 

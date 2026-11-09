@@ -6,6 +6,7 @@ import { Bridge } from '../src/bridge.js';
 import { Outbox, TelegramError } from '../src/telegram.js';
 import { State } from '../src/state.js';
 import { WIDGET_HTML, widgetData } from '../src/widget-template.js';
+import { Widgets } from '../src/widgets.js';
 import { object, string, type Json } from '../src/types.js';
 import { fixture, message, temporary } from './helpers.js';
 
@@ -220,8 +221,80 @@ test('template and Unicode snapshots fit server byte limits and use Telegram the
     card.binding.sessionName = '😀Русский заголовок<script>bad()</script>'.repeat(100);
     card.snapshot.activities = Array.from({ length: 3 }, (_, i) => ({ id: String(i), label: '😀'.repeat(100), status: 'done' }));
     const data = widgetData(card); assert.ok(Buffer.byteLength(data) <= 900); assert.ok(!data.includes('\ufffd'));
+    card.binding.sessionName = '"\\'.repeat(100); card.binding.projectLabel = '"\\'.repeat(100);
+    card.snapshot.plan = { done: 2, total: 4, current: '"\\'.repeat(100) };
+    card.snapshot.activities = Array.from({ length: 3 }, (_, i) => ({ id: String(i), label: '"\\'.repeat(100), status: 'done' }));
+    assert.ok(Buffer.byteLength(widgetData(card)) <= 900, 'JSON escaping must fit the byte budget too');
     assert.ok(Buffer.byteLength(WIDGET_HTML) <= 32768); assert.ok(deflateSync(WIDGET_HTML, { level: 9 }).length < 3800);
     assert.match(WIDGET_HTML, /--tg-theme-text-color/u); assert.match(WIDGET_HTML, /--tg-text-font-size/u); assert.match(WIDGET_HTML, /safe-area-inset-bottom/u);
     assert.match(WIDGET_HTML, /textContent/u); assert.doesNotMatch(WIDGET_HTML, /innerHTML|fetch\(|WebSocket|#[0-9a-f]{3,8}\b/iu);
+  } finally { f.close(); }
+});
+
+test('history pruning never evicts a live receipt or an uncertain admission identity', async () => {
+  for (const uncertain of [false, true]) {
+    const f = await setup();
+    try {
+      f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+      if (uncertain) {
+        const card = f.state.widgetCard('thread-a', 'live')!;
+        f.state.claimWidget(card.id, false); f.state.widgetResult(card.id, 'uncertain');
+      } else await f.flush();
+      const original = f.state.widgetCard('thread-a', 'live')!;
+      const widgets = new Widgets(f.state, f.bridge.widgetDelivery().generation); const binding = f.state.binding('thread-b')!;
+      for (let index = 0; index < 520; index++) {
+        widgets.observe(binding, 'turn/started', { turn: { id: `other-${index}` } });
+        widgets.observe(binding, 'turn/completed', { turn: { id: `other-${index}`, status: 'completed' } });
+      }
+      await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'late', type: 'commandExecution' } });
+      const retained = f.state.widgetCard('thread-a', 'live')!;
+      assert.equal(retained.id, original.id); assert.equal(retained.messageId, original.messageId);
+      assert.equal(retained.delivery, original.delivery); assert.ok(f.state.widgetCards().length <= 512);
+      f.advance(); await f.flush(); assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, uncertain ? 0 : 1);
+      if (uncertain) {
+        f.state.widgetResult(retained.id, 'retired'); f.advance(8 * 86400_000);
+        widgets.observe(binding, 'turn/started', { turn: { id: 'after-retention' } });
+        assert.equal(f.state.widgetCard('thread-a', 'live')!.id, original.id, 'retiring a route must retain an uncertain tombstone');
+      }
+    } finally { f.close(); }
+  }
+});
+
+test('bounded storage pauses new widget admission instead of evicting unresolved sends', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start(); const base = f.state.widgetCard('thread-a', 'live')!;
+    for (let index = 0; index < 511; index++) {
+      const card = { ...base, id: `unresolved-${index}`, turnId: `unresolved-${index}` };
+      assert.equal(f.state.saveWidget(card), true); f.state.widgetResult(card.id, 'uncertain');
+    }
+    await f.start('over-capacity'); assert.equal(f.state.widgetCard('thread-a', 'over-capacity'), undefined);
+    await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'over-capacity', item: { id: 'late', type: 'commandExecution' } });
+    assert.equal(f.state.widgetCard('thread-a', 'over-capacity'), undefined); assert.equal(f.state.widgetCards().length, 512);
+    await f.drain(); assert.ok(f.telegram.sent().some(item => string(item.text).includes('unresolved deliveries')));
+  } finally { f.close(); }
+});
+
+test('recovery retains terminal history and reconciles missed tool completions on an existing card', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start('done'); f.advance(); await f.flush();
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'done', status: 'completed' } });
+    f.advance(); await f.flush(); const terminal = f.state.widgetCard('thread-a', 'done')!;
+    await f.start();
+    await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'tool', type: 'commandExecution' } });
+    await f.bridge.notification('turn/plan/updated', { threadId: 'thread-a', turnId: 'live', plan: [{ step: 'Unknown after restart', status: 'inProgress' }] });
+    f.advance(); await f.flush(); const active = f.state.widgetCard('thread-a', 'live')!;
+    f.bridge.close();
+    f.codex.histories.set('thread-a', [{ id: 'live', status: 'inProgress', items: [{ id: 'tool', type: 'commandExecution', status: 'completed', exitCode: 0 }] }]);
+    const next = new Bridge(f.bridge.config, f.state, f.codex, f.telegram); await next.discover();
+    const restoredTerminal = f.state.widgetCard('thread-a', 'done')!;
+    assert.equal(restoredTerminal.snapshot.status, 'done'); assert.equal(restoredTerminal.revision, terminal.revision);
+    assert.equal(restoredTerminal.messageId, terminal.messageId);
+    const restored = f.state.widgetCard('thread-a', 'live')!;
+    assert.equal(restored.messageId, active.messageId); assert.equal(restored.snapshot.activities[0]!.status, 'done');
+    assert.equal(restored.snapshot.plan, null, 'missing structured plan events cannot be inferred from history');
+    f.advance(); await f.outbox.flushWidget(next.widgetDelivery()); next.close();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 2);
   } finally { f.close(); }
 });

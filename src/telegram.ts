@@ -118,10 +118,7 @@ export class Outbox {
   async flushWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
     const now = Date.now();
     if (this.widgetSending || now < this.widgetNextAt) return false;
-    let card = this.state.widgetCards().filter(card => card.view === 'widgets' && card.generation === guard.generation &&
-      now >= card.retryAt && (card.delivery === 'new' ? card.snapshot.finishedAt === null && now - card.createdAt >= 1000 :
-        card.delivery === 'active' && card.revision > card.sentRevision && now - card.lastSentAt >= 2500))
-      .sort((left, right) => left.lastSentAt - right.lastSentAt || left.createdAt - right.createdAt)[0];
+    let card = this.state.nextWidgetDelivery(guard.generation, now);
     if (!card) return false;
     this.widgetSending = true;
     try {
@@ -169,7 +166,7 @@ export class Outbox {
           this.state.widgetResult(card.id, definite ? 'disabled' : 'uncertain');
           if (definite) this.state.setViewMode(card.binding.threadId, 'classic');
           this.state.enqueue(`attention/widgets/${card.id}`, card.binding.topicId, definite ?
-            'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again after updating Telegram.' :
+            'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again when widget support is available.' :
             'Widget delivery could not be confirmed and will not be repeated. Replies and approvals continue normally. Use /view classic for the classic view.');
         }
       }

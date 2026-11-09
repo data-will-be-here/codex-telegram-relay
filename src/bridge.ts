@@ -77,14 +77,17 @@ export class Bridge {
   workNewSession(): Promise<void> { return this.newSessions.tick(); }
   close(): void { this.closed = true; this.widgets.close(); this.newSessions.close(); }
   widgetDelivery(): WidgetDeliveryGuard {
-    for (const id of this.attached) {
-      const turnId = this.state.widgetCards(id).filter(card => card.generation === this.generation && card.snapshot.finishedAt === null).at(-1)?.turnId;
+    for (const card of this.state.activeWidgets(this.generation)) {
+      const id = card.binding.threadId; const turnId = card.turnId;
       const prompts = [...this.prompts.values()].filter(prompt => prompt.binding.threadId === id && prompt.request.params.threadId === id &&
         (!prompt.request.params.turnId || prompt.request.params.turnId === turnId) && this.pending(prompt));
       this.widgets.waiting(id, prompts.filter(prompt => prompt.request.method.endsWith('/requestApproval')).length,
         prompts.filter(prompt => prompt.questions.length > 0).length);
     }
-    return { generation: this.generation, allowed: async card => !this.closed && card.generation === this.generation && !!await this.settingsThread(card.binding) };
+    return { generation: this.generation, allowed: async card => {
+      if (this.closed || card.generation !== this.generation) return false;
+      try { return !!await this.settingsThread(card.binding) && !this.closed; } catch { return false; }
+    } };
   }
   private async connectCreated(binding: Binding): Promise<void> {
     if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);

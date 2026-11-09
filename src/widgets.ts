@@ -21,7 +21,7 @@ export class Widgets {
   constructor(private readonly state: State, readonly generation: string, private readonly now = Date.now) {}
 
   private card(binding: Binding, turnId: string, startedAt: number | null = null): WidgetCard {
-    const previous = this.state.widgetCards(binding.threadId).find(card => card.turnId === turnId);
+    const previous = this.state.widgetCard(binding.threadId, turnId);
     if (previous) return { ...previous, binding, generation: this.generation };
     const now = this.now();
     return { id: randomUUID(), token: randomBytes(16).toString('hex'), generation: this.generation,
@@ -32,10 +32,9 @@ export class Widgets {
     if (!['turn/started', 'turn/plan/updated', 'turn/completed', 'item/started', 'item/completed'].includes(method)) return;
     const turn = object(params.turn); const turnId = string(params.turnId) || string(turn.id);
     if (!turnId || turnId.length > 256) return;
-    const previous = this.state.widgetCards(binding.threadId).find(card => card.turnId === turnId);
+    const previous = this.state.widgetCard(binding.threadId, turnId);
     // No historical cards: completion can only finish work observed while it was running.
-    if (!previous && method === 'turn/completed') return;
-    if (!previous && method === 'item/completed') return;
+    if (!previous && method !== 'turn/started') return;
     const card = this.card(binding, turnId, millis(turn.startedAt));
     if (previous && (previous.binding.topicId !== binding.topicId || previous.binding.cwd !== binding.cwd)) {
       this.state.widgetResult(previous.id, 'retired'); return;
@@ -63,7 +62,21 @@ export class Widgets {
     if (!previous || before !== JSON.stringify(card.snapshot) || previous.generation !== this.generation) this.save(card);
   }
   private save(card: WidgetCard): void {
-    card.revision++; card.snapshot.updatedAt = this.now(); this.state.saveWidget(card);
+    card.revision++; card.snapshot.updatedAt = this.now();
+    if (!this.state.saveWidget(card)) this.state.enqueue(`attention/widget-capacity/${card.binding.threadId}`, card.binding.topicId,
+      'Activity cards are paused because the widget history is full of unresolved deliveries. Replies and approvals continue normally.');
+  }
+  private hydrate(card: WidgetCard, items: unknown[]): void {
+    for (const value of items.slice(-16)) {
+      const item = object(value); const label = activityLabel(item); const id = string(item.id);
+      if (!label || !id) continue;
+      const key = createHash('sha256').update(id.slice(0, 2048)).digest('hex').slice(0, 24);
+      const running = item.status === 'inProgress';
+      if (!running && !['completed', 'failed', 'declined'].includes(string(item.status)) && typeof item.completedAtMs !== 'number') continue;
+      const status: WidgetActivity['status'] = running ? 'running' : ['failed', 'declined'].includes(string(item.status)) ||
+        typeof item.exitCode === 'number' && item.exitCode !== 0 ? 'failed' : 'done';
+      card.snapshot.activities = [...card.snapshot.activities.filter(activity => activity.id !== key), { id: key, label, status }].slice(-3);
+    }
   }
   recover(binding: Binding, turns: Json[]): void {
     const active = turns.find(turn => turn.status === 'inProgress');
@@ -72,28 +85,30 @@ export class Widgets {
       if (saved.generation === this.generation) continue;
       const turn = turns.find(turn => turn.id === saved.turnId);
       const card: WidgetCard = { ...saved, generation: this.generation, binding };
+      if (saved.snapshot.finishedAt !== null) {
+        // Bounded native history omits older turns; an observed terminal snapshot stays terminal.
+        card.binding = saved.binding; this.state.saveWidget(card); continue;
+      }
       if (turn?.status === 'inProgress') {
         card.snapshot.status = 'working'; card.snapshot.startedAt ??= millis(turn.startedAt);
+        // Structured plan notifications are not returned by turns/list. Wait for a fresh plan event.
+        card.snapshot.plan = null; this.hydrate(card, array(turn.items));
       } else {
         const status = finalStatuses.get(string(turn?.status) as 'completed');
-        if (status) { card.snapshot.status = status; card.snapshot.finishedAt ??= millis(turn?.completedAt) ?? this.now(); }
+        if (status) { card.snapshot.status = status; card.snapshot.finishedAt ??= millis(turn?.completedAt) ?? this.now(); this.hydrate(card, array(turn?.items)); }
         else card.snapshot.status = 'unavailable';
         if (saved.messageId === null) this.state.widgetResult(saved.id, 'retired');
       }
       this.save(card);
     }
-    if (active && !this.state.widgetCards(binding.threadId).some(card => card.turnId === active.id)) {
+    if (active && !this.state.widgetCard(binding.threadId, string(active.id))) {
       const card = this.card(binding, string(active.id), millis(active.startedAt));
-      this.save(card);
       // Recovery only uses safe activity categories, never historical reply/tool output.
-      for (const value of array(active.items).slice(-16)) {
-        const item = object(value);
-        this.observe(binding, item.status === 'inProgress' ? 'item/started' : 'item/completed', { turnId: active.id, item });
-      }
+      this.hydrate(card, array(active.items)); this.save(card);
     }
   }
   waiting(threadId: string, approvals: number, questions: number): void {
-    const saved = this.state.widgetCards(threadId).filter(card => card.generation === this.generation && card.snapshot.finishedAt === null).at(-1);
+    const saved = this.state.activeWidget(threadId, this.generation);
     if (!saved || saved.view !== 'widgets') return;
     const status = approvals ? 'approval' : questions ? 'answer' : 'working';
     if (saved.snapshot.status !== status && ['working', 'approval', 'answer'].includes(saved.snapshot.status)) {

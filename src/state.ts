@@ -8,6 +8,7 @@ import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-ty
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
+const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
 export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage'; params: Json; fallback?: string; }
 export interface Delivery {
@@ -75,7 +76,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
-          retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
+          retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
         UPDATE widget_cards SET delivery='uncertain' WHERE delivery='sending';
         UPDATE widget_cards SET delivery='active' WHERE delivery='editing';
         CREATE INDEX IF NOT EXISTS new_sessions_status ON new_sessions(status);
@@ -105,6 +106,8 @@ export class State {
       }
       if (!this.db.prepare('PRAGMA table_info(async_answers)').all().some(column => column.name === 'status')) this.db.exec("ALTER TABLE async_answers ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
       this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'; CREATE INDEX IF NOT EXISTS outbox_status_id ON outbox(status,id)");
+      if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'everUncertain')) this.db.exec('ALTER TABLE widget_cards ADD COLUMN everUncertain INTEGER NOT NULL DEFAULT 0');
+      this.db.exec("UPDATE widget_cards SET everUncertain=1 WHERE delivery='uncertain'");
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
   }
@@ -118,17 +121,43 @@ export class State {
     this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('view/' + threadId, view);
   }
   widgetCards(threadId?: string): WidgetDelivery[] {
-    return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => ({
-      ...JSON.parse(string(row.payload)), delivery: row.delivery, messageId: row.messageId, sentRevision: row.sentRevision,
-      retryAt: row.retryAt, lastSentAt: row.lastSentAt,
-    }) as WidgetDelivery);
+    return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => this.decodeWidget(row)!);
   }
-  saveWidget(card: WidgetCard): void {
+  private decodeWidget(value: unknown): WidgetDelivery | undefined {
+    if (!value) return;
+    const row = object(value);
+    return { ...JSON.parse(string(row.payload)), delivery: row.delivery, messageId: row.messageId, sentRevision: row.sentRevision,
+      retryAt: row.retryAt, lastSentAt: row.lastSentAt } as WidgetDelivery;
+  }
+  widgetCard(threadId: string, turnId: string): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare('SELECT * FROM widget_cards WHERE threadId=? AND turnId=?').get(threadId, turnId));
+  }
+  activeWidget(threadId: string, generation: string): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare("SELECT * FROM widget_cards WHERE threadId=? AND json_extract(payload,'$.generation')=? AND json_extract(payload,'$.snapshot.finishedAt') IS NULL ORDER BY rowid DESC LIMIT 1").get(threadId, generation));
+  }
+  activeWidgets(generation: string): WidgetDelivery[] {
+    return this.db.prepare("SELECT * FROM widget_cards WHERE json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL AND json_extract(payload,'$.snapshot.status') IN ('working','approval','answer')")
+      .all(generation).map(row => this.decodeWidget(row)!);
+  }
+  nextWidgetDelivery(generation: string, now: number): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare(`SELECT * FROM widget_cards WHERE json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' AND retryAt<=? AND
+      ((delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL AND CAST(json_extract(payload,'$.createdAt') AS INTEGER)<=?) OR
+       (delivery='active' AND CAST(json_extract(payload,'$.revision') AS INTEGER)>sentRevision AND lastSentAt<=?))
+      ORDER BY lastSentAt,CAST(json_extract(payload,'$.createdAt') AS INTEGER) LIMIT 1`).get(generation, now, now - 1000, now - 2500));
+  }
+  saveWidget(card: WidgetCard): boolean {
+    // Never evict a live, in-flight or uncertain receipt to admit new work.
+    this.db.prepare(`DELETE FROM widget_cards WHERE id<>? AND ${SETTLED_WIDGET_SQL} AND CAST(json_extract(payload,'$.snapshot.updatedAt') AS INTEGER)<?`).run(card.id, Date.now() - 7 * 86400_000);
+    if (!this.widgetCard(card.binding.threadId, card.turnId)) {
+      const size = Number(this.db.prepare('SELECT count(*) AS n FROM widget_cards').get()?.n ?? 0);
+      if (size >= 512) this.db.prepare(`DELETE FROM widget_cards WHERE rowid IN (SELECT rowid FROM widget_cards WHERE ${SETTLED_WIDGET_SQL} ORDER BY rowid LIMIT ?)`).run(size - 511);
+      if (Number(this.db.prepare('SELECT count(*) AS n FROM widget_cards').get()?.n ?? 0) >= 512) return false;
+    }
+    const payload: WidgetCard = { id: card.id, token: card.token, generation: card.generation, binding: card.binding, turnId: card.turnId,
+      view: card.view, revision: card.revision, createdAt: card.createdAt, snapshot: card.snapshot };
     this.db.prepare('INSERT INTO widget_cards(id,threadId,turnId,payload) VALUES(?,?,?,?) ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload')
-      .run(card.id, card.binding.threadId, card.turnId, JSON.stringify(card));
-    // Bounded local summaries, never full transcripts. Retain recent controls for seven days.
-    this.db.prepare("DELETE FROM widget_cards WHERE rowid IN (SELECT rowid FROM widget_cards WHERE delivery NOT IN ('sending','editing') AND CAST(json_extract(payload,'$.snapshot.updatedAt') AS INTEGER)<?)").run(Date.now() - 7 * 86400_000);
-    this.db.exec("DELETE FROM widget_cards WHERE rowid IN (SELECT rowid FROM widget_cards WHERE delivery NOT IN ('sending','editing') ORDER BY rowid DESC LIMIT -1 OFFSET 512)");
+      .run(card.id, card.binding.threadId, card.turnId, JSON.stringify(payload));
+    return true;
   }
   claimWidget(id: string, editing: boolean): boolean {
     return !!this.db.prepare('UPDATE widget_cards SET delivery=? WHERE id=? AND delivery=?').run(editing ? 'editing' : 'sending', id, editing ? 'active' : 'new').changes;
@@ -138,7 +167,7 @@ export class State {
       .run(messageId, revision, now, id);
   }
   widgetResult(id: string, delivery: WidgetDelivery['delivery'], retryAt = 0): void {
-    this.db.prepare('UPDATE widget_cards SET delivery=?,retryAt=? WHERE id=?').run(delivery, retryAt, id);
+    this.db.prepare("UPDATE widget_cards SET delivery=?,retryAt=?,everUncertain=MAX(everUncertain,CASE WHEN ?='uncertain' THEN 1 ELSE 0 END) WHERE id=?").run(delivery, retryAt, delivery, id);
   }
   newSessions(phases?: readonly NewSessionPhase[]): NewSessionOperation[] {
     const rows = phases ? this.db.prepare(`SELECT * FROM new_sessions WHERE status IN (${phases.map(() => '?').join(',')})`).all(...phases) : this.db.prepare('SELECT * FROM new_sessions').all();
@@ -413,7 +442,7 @@ export class State {
   uncertainCount(): number {
     const files = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_jobs'").get()
       ? Number(this.db.prepare("SELECT count(*) AS n FROM file_jobs WHERE status='uncertain'").get()?.n ?? 0) : 0;
-    return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain')+(SELECT count(*) FROM widget_cards WHERE delivery='uncertain') AS n").get()?.n ?? 0);
+    return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain')+(SELECT count(*) FROM widget_cards WHERE everUncertain=1) AS n").get()?.n ?? 0);
   }
   prune(): void {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;

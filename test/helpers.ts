@@ -25,7 +25,7 @@ export function temporary(): { dir: string; close: () => void } {
   return { dir, close: () => {
     const target = realpathSync(dir);
     if (dirname(target) !== resolve(base) || !basename(target).startsWith('codex-relay-test-')) throw new Error('Unsafe test cleanup path.');
-    rmSync(target, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } };
 }
 

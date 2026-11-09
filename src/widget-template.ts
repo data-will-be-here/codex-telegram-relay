@@ -12,10 +12,10 @@ export function widgetLabel(value: string, bytes: number): string {
 
 export function widgetData(card: WidgetCard): string {
   const s = card.snapshot;
-  const result = JSON.stringify({ v: 1, r: card.revision, p: widgetLabel(card.binding.projectLabel || basename(card.binding.cwd), 48),
-    t: widgetLabel(card.binding.sessionName || card.binding.threadId.slice(0, 8), 96), s: s.status,
-    b: s.startedAt, e: s.finishedAt, u: s.updatedAt, n: s.plan ? [s.plan.done, s.plan.total] : null, q: widgetLabel(s.plan?.current || '', 96),
-    a: s.activities.slice(-3).map(item => [item.status, widgetLabel(item.label, 64)]) });
+  const result = JSON.stringify({ v: 1, r: card.revision, p: widgetLabel(card.binding.projectLabel || basename(card.binding.cwd), 32),
+    t: widgetLabel(card.binding.sessionName || card.binding.threadId.slice(0, 8), 64), s: s.status,
+    b: s.startedAt, e: s.finishedAt, u: s.updatedAt, n: s.plan ? [s.plan.done, s.plan.total] : null, q: widgetLabel(s.plan?.current || '', 64),
+    a: s.activities.slice(-3).map(item => [item.status, widgetLabel(item.label, 40)]) });
   if (Buffer.byteLength(result) > 900) throw new Error('Widget state exceeded its bounded preview budget.');
   return result;
 }
