@@ -1,5 +1,11 @@
 # Verification record
 
+## Swipeable complete result reader
+
+A focused red regression showed that a fitting formatted answer was split into ten documents. The reader now tries the whole reply in one immutable document and splits only when measured source/compressed budgets require it. Local pages use the available bubble height, with horizontal pointer gestures, arrow controls, current/total page counts and a green circular completion check. Future pages are measured in a separate hidden section, one per animation frame, so intermediate text never replaces the visible page. A second red regression caught oversized text conversion after widget rejection; the existing entity-aware splitting logic now also bounds that fallback.
+
+The official pinned WidgetHost/QuickJS/renderer passed 24 width/theme/font combinations with exact full-text reconstruction and no clipped content or runtime errors, including the large-font and unchanged-width RTL safe-area cases. Actual phone gesture arbitration passed in light/dark: horizontal next/back, vertical chat scrolling/cancellation, desktop/tap arrows, readable green completion colors and zero bot queries. Preview screenshots were inspected. This is official sandbox qualification, not physical Telegram-client acceptance. Final local suite: 377 discovered, 373 passed, four skips, zero failures. Typecheck, distribution checks and the production dependency audit passed.
+
 ## Complete formatted multipart result widgets
 
 A red integration regression proved that final replies were only a shortened live-state preview and their tail existed only in the relay cache. Final replies now use independent numbered documents containing the complete Markdown-rendered text/entities. Formatting, Unicode, large-code fragments and the final tail survive partitioning; raw HTML/script text stays inert data. Source/compressed budgets are measured before queue admission. The last Text version button is an optional copy, and legacy controls remain valid under their original authorization rules.

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { deflateSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { resultParts } from '../src/widget-result.js';
 import { renderMarkdown } from '../src/format.js';
 import { type WidgetCard } from '../src/widget-types.js';
@@ -15,7 +16,7 @@ const card: WidgetCard = { id: 'test', token: 'test', generation: 'test', kind: 
 export function resultPayload(html: string): Json {
   const nodes = new Map<string, Json>();
   const node = (id: string): Json => {
-    if (!nodes.has(id)) nodes.set(id, { textContent: '', style: {}, appendChild() {}, setAttribute() {}, clientWidth: 0 });
+    if (!nodes.has(id)) nodes.set(id, { textContent: '', style: {}, appendChild() {}, setAttribute() {}, addEventListener() {}, clientWidth: 0 });
     return nodes.get(id)!;
   };
   const context: Json = { document: { getElementById: node, createElement: () => ({ textContent: '', style: {}, appendChild() {}, setAttribute() {} }), body: {} },
@@ -25,9 +26,9 @@ export function resultPayload(html: string): Json {
   return object(context.D);
 }
 
-test('numbered result documents contain every Markdown-rendered character, Unicode and formatting', () => {
+test('a complete formatted answer stays in one locally paged document when it fits the payload budget', () => {
   const source = '# Heading\n\n**Bold** and *italic*.\n\n- Item one\n- Item two\n\n```ts\nconst value = "🧪";\n```\n\n' + 'Русский абзац с полным окончанием предложения. '.repeat(60) + 'FINAL_TAIL';
-  const parts = resultParts(card, source, 'a'.repeat(32)); assert.ok(parts.length > 1);
+  const parts = resultParts(card, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
   const data = parts.map(part => resultPayload(string(part.params.html)));
   assert.equal(data.map(item => item.text).join(''), renderMarkdown(source).text);
   assert.ok(data.some(item => JSON.stringify(item.entities).includes('bold')));
@@ -59,4 +60,18 @@ test('unsupported or long link targets remain readable without exceeding a docum
   assert.ok(text.includes('http://example.com/a')); assert.ok(text.includes('mailto:a@example.com'));
   assert.ok(text.includes('https://example.com/' + 'x'.repeat(6000)));
   parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 3800));
+});
+
+test('only real payload limits split an oversized answer, with no missing text or repeated completion heading', () => {
+  const source = Array.from({ length: 1200 }, (_, index) => `Section ${index}: ${createHash('sha256').update(String(index)).digest('hex')} 🧪.\n`).join('');
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.ok(parts.length > 1);
+  assert.equal(parts.map(part => resultPayload(string(part.params.html)).text).join(''), renderMarkdown(source).text);
+  assert.match(string(parts[0]!.params.html), /class="badge done">✓/u);
+  for (const [index, part] of parts.entries()) {
+    const html = string(part.params.html);
+    assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 3800);
+    assert.equal(html.includes('<h3 id="status">'), index === 0);
+    assert.equal(part.params.disable_notification, index !== 0);
+  }
 });

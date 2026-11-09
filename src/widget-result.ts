@@ -4,7 +4,6 @@ import { widgetData } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
 
-const MAX_TEXT = 400;
 const payload = (value: unknown): string => JSON.stringify(value).replace(/</gu, '\\u003c').replace(/>/gu, '\\u003e')
   .replace(/&/gu, '\\u0026').replace(/\u2028/gu, '\\u2028').replace(/\u2029/gu, '\\u2029');
 
@@ -16,14 +15,6 @@ function clip(message: FormattedText, start: number, end: number): FormattedText
 }
 
 function cut(text: string, limit: number): number {
-  let lines = 1; let column = 0; let offset = 0;
-  for (const char of text.slice(0, limit)) {
-    const cost = /[\u2e80-\u9fff\uac00-\ud7af]/u.test(char) || char.length > 1 ? 2 : 1;
-    if (char === '\n') { lines++; column = 0; }
-    else if ((column += cost) > 30) { lines++; column = cost; }
-    if (lines > 12) { limit = offset; break; }
-    offset += char.length;
-  }
   if (text.length <= limit) return text.length;
   const prefix = text.slice(0, limit);
   const paragraph = prefix.lastIndexOf('\n\n');
@@ -32,7 +23,7 @@ function cut(text: string, limit: number): number {
     sentence.index + sentence[0].length : Math.max(prefix.lastIndexOf('\n'), prefix.lastIndexOf(' '));
   if (end < limit / 2) end = limit;
   if (/[\uD800-\uDBFF]$/u.test(text.slice(0, end))) end--;
-  return Math.max(1, end);
+  return end || (text.codePointAt(0)! > 0xffff ? 2 : 1);
 }
 
 function formatted(source: string): FormattedText {
@@ -52,13 +43,19 @@ function formatted(source: string): FormattedText {
   return message;
 }
 
-/** Fixed reader code; model text is a safely serialized data literal and enters DOM through textContent. */
-const READER = String.raw`var points=[0],at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)});var start=0,end=0,trail=[],width=0;
+/** Fixed reader code; model text is a safely serialized data literal and enters DOM through textContent.
+ * Future pages are measured offscreen, one per frame, without replacing the visible page. */
+const READER = String.raw`var points=[0],at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)});var pages=[0],page=0,done=false,width=0,epoch=0,target=-1;
 function el(id){return document.getElementById(id)}
-el('context').textContent=D.context;if(D.part===1)el('status').textContent=D.status;el('part').textContent=D.total>1?D.part+'/'+D.total:'';
-function draw(a,b){var body=el('content');body.textContent='';var head=(D.text.match(/^\n+/)||[''])[0].length,tail=D.text.length-(D.text.match(/\n+$/)||[''])[0].length;var marks=[a,b];if(head>a&&head<b)marks.push(head);if(tail>a&&tail<b)marks.push(tail);D.entities.forEach(function(e){var l=Math.max(a,e.offset),r=Math.min(b,e.offset+e.length);if(r>l){marks.push(l);marks.push(r)}});marks=Array.from(new Set(marks)).sort(function(x,y){return x-y});for(var i=0;i<marks.length-1;i++){var l=marks[i],r=marks[i+1],active=D.entities.filter(function(e){return e.offset<=l&&e.offset+e.length>=r});var node=document.createElement('span');node.textContent=D.text.slice(l,r);active.forEach(function(e){var tag={bold:'strong',italic:'em',strikethrough:'del',code:'code',pre:'code',text_link:'a'}[e.type];if(!tag)return;var wrap=document.createElement(tag);if(e.type==='pre')wrap.className='pre';if(e.type==='text_link'&&e.url&&e.url.indexOf('https://')===0)wrap.setAttribute('href',e.url);wrap.appendChild(node);node=wrap});if(r<=head||l>=tail)node.style.display='none';body.appendChild(node)}}
-function fit(){var body=el('content'),nav=el('nav');body.setAttribute('aria-busy','true');body.style.visibility='hidden';body.style.maxHeight='';nav.style.display='flex';el('back').disabled=!trail.length;el('next').disabled=false;el('page').textContent='Page '+(trail.length+1);var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className=font>=40?'large':'';draw(points[start],points[points.length-1]);width=body.clientWidth;if(!width)return;var room=Math.max(48,560-el('card').getBoundingClientRect().height+body.clientHeight);body.style.maxHeight=room+'px';var low=start+1,high=points.length-1,best=start;while(low<=high){var mid=Math.floor((low+high)/2);draw(points[start],points[mid]);if(body.scrollHeight<=body.clientHeight+1){best=mid;low=mid+1}else high=mid-1}end=Math.max(start+1,best);if(end<points.length-1){var a=points[start],b=points[end],text=D.text.slice(a,b),boundary=Math.max(text.lastIndexOf('\n\n')+1,text.lastIndexOf(' '));if(boundary>text.length/2){var target=a+boundary;while(end>start+1&&points[end]>target)end--}}draw(points[start],points[end]);while(end>start+1&&body.scrollHeight>body.clientHeight+1){end=start+Math.floor((end-start)/2);draw(points[start],points[end])}el('next').disabled=end>=points.length-1;if(!trail.length&&end>=points.length-1)nav.style.display='none';body.style.visibility='visible';body.setAttribute('aria-busy','false')}
-el('back').onclick=function(){if(trail.length){start=trail.pop();fit()}};el('next').onclick=function(){if(end<points.length-1){trail.push(start);start=end;fit()}};
+el('context').textContent=D.context;if(D.part===1)el('status').textContent=D.status;el('part').textContent=D.total>1?'Part '+D.part+'/'+D.total:'';
+function draw(a,b,body){body=body||el('content');body.textContent='';var head=(D.text.match(/^\n+/)||[''])[0].length,tail=D.text.length-(D.text.match(/\n+$/)||[''])[0].length;var marks=[a,b];if(head>a&&head<b)marks.push(head);if(tail>a&&tail<b)marks.push(tail);D.entities.forEach(function(e){var l=Math.max(a,e.offset),r=Math.min(b,e.offset+e.length);if(r>l){marks.push(l);marks.push(r)}});marks=Array.from(new Set(marks)).sort(function(x,y){return x-y});for(var i=0;i<marks.length-1;i++){var l=marks[i],r=marks[i+1],active=D.entities.filter(function(e){return e.offset<=l&&e.offset+e.length>=r});var node=document.createElement('span');node.textContent=D.text.slice(l,r);active.forEach(function(e){var tag={bold:'strong',italic:'em',strikethrough:'del',code:'code',pre:'code',text_link:'a'}[e.type];if(!tag)return;var wrap=document.createElement(tag);if(e.type==='pre')wrap.className='pre';if(e.type==='text_link'&&e.url&&e.url.indexOf('https://')===0)wrap.setAttribute('href',e.url);wrap.appendChild(node);node=wrap});if(r<=head||l>=tail)node.style.display='none';body.appendChild(node)}}
+function append(){var body=el('measure'),start=pages[pages.length-1],low=start+1,high=points.length-1,best=start;if(start>=points.length-1){pages.push(start);done=true;return}while(low<=high){var mid=Math.floor((low+high)/2);draw(points[start],points[mid],body);if(body.scrollHeight<=body.clientHeight+1){best=mid;low=mid+1}else high=mid-1}var end=Math.max(start+1,best);if(end<points.length-1){var text=D.text.slice(points[start],points[end]),matches=Array.from(text.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s)/g)),sentence=matches.length?matches[matches.length-1]:null,boundary=text.lastIndexOf('\n\n')+2;if(boundary<text.length*.7)boundary=sentence?sentence.index+sentence[0].length:0;if(boundary<text.length*.7)boundary=Math.max(text.lastIndexOf('\n')+1,text.lastIndexOf(' ')+1);if(boundary>text.length*.7){var offset=points[start]+boundary;while(end>start+1&&points[end]>offset)end--}}draw(points[start],points[end],body);while(end>start+1&&body.scrollHeight>body.clientHeight+1){end=start+Math.floor((end-start)/2);draw(points[start],points[end],body)}pages.push(end);done=end>=points.length-1;if(target>=start&&target<end){page=pages.length-2;target=-1}}
+function paint(){draw(points[pages[page]],points[pages[page+1]]);el('back').disabled=page===0;el('next').disabled=done&&page===pages.length-2;el('page').textContent=(page+1)+'/'+(done?pages.length-1:'…');el('nav').style.display=done&&pages.length===2?'none':'flex';el('content').setAttribute('aria-busy','false')}
+function build(ticket){if(ticket!==epoch||done)return;append();paint();if(!done)requestAnimationFrame(function(){build(ticket)})}
+function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var ticket=++epoch;target=pages[page]||0;pages=[0];page=0;done=false;body.style.maxHeight='';el('nav').style.display='flex';el('page').textContent='1/…';var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className=font>=40?'large':'';draw(0,0);body.style.maxHeight=Math.max(48,580-el('card').getBoundingClientRect().height)+'px';el('measure').style.width=width+'px';el('measure').style.maxHeight=body.style.maxHeight;append();paint();if(!done)requestAnimationFrame(function(){build(ticket)})}
+function move(step){if(step<0&&page>0)page--;else if(step>0){if(page===pages.length-2&&!done)append();if(page<pages.length-2)page++}target=-1;paint()}
+el('back').onclick=function(){move(-1)};el('next').onclick=function(){move(1)};
+var drag=null,swiped=false;el('content').addEventListener('pointerdown',function(e){swiped=false;drag=e.button===0?{id:e.pointerId,x:e.clientX,y:e.clientY,time:Date.now()}:null});el('content').addEventListener('pointercancel',function(){drag=null});el('content').addEventListener('pointerup',function(e){var d=drag;drag=null;if(!d||d.id!==e.pointerId)return;var x=e.clientX-d.x,y=e.clientY-d.y;if(Math.abs(x)>=40&&Math.abs(x)>Math.abs(y)*1.3&&Date.now()-d.time<1500){swiped=true;move(x<0?1:-1);e.preventDefault()}});el('content').addEventListener('click',function(e){if(swiped){e.preventDefault();e.stopPropagation();swiped=false}},true);
 TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAreaChanged',fit);new ResizeObserver(function(){if(el('content').clientWidth!==width)fit()}).observe(document.body);fit();TelegramWidget.ready();`;
 
 export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number): string {
@@ -68,25 +65,21 @@ export function resultDocument(card: WidgetCard, message: FormattedText, part: n
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font:var(--tg-text-font-size)/var(--tg-text-line-height) system-ui;color:var(--tg-theme-text-color)}
 main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-bottom))}.context{color:var(--tg-theme-hint-color);font-size:.8em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-header{display:flex;align-items:center;gap:.6em;margin:.65em 0}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:.85em}
-#content{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
-nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large .context{display:none}.large header{display:block;margin:.3em 0}.large h3{font-size:.7em}.large #part{font-size:.45em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
-</style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? '<h3 id="status"></h3>' : ''}<span id="part"></span></header><section id="content"></section><nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav></main><script>var D=${payload(data)};${READER}</script></body></html>`;
+header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:.85em}
+#content,#measure{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text;touch-action:pan-y}#measure{position:absolute;left:0;top:0;visibility:hidden;pointer-events:none}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
+nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large .context{display:none}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large #part{font-size:.45em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
+</style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? `<span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3>` : ''}<span id="part"></span></header><section id="content"></section><nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav></main><section id="measure" aria-hidden="true"></section><script>var D=${payload(data)};${READER}</script></body></html>`;
 }
 
 /** Every rendered character is preserved; fixed document/code and independent local paging survive relay shutdown. */
 export function resultParts(card: WidgetCard, source: string, token: string): RichDeliveryPart[] {
-  const message = formatted(source); const chunks: FormattedText[] = [];
-  for (let offset = 0; offset < message.text.length;) {
-    const end = offset + cut(message.text.slice(offset), MAX_TEXT);
-    chunks.push(clip(message, offset, end)); offset = end;
-  }
-  if (!chunks.length) chunks.push({ text: '', entities: [] });
+  const chunks: FormattedText[] = [formatted(source)];
   for (let index = 0; index < chunks.length; index++) {
     const chunk = chunks[index]!; const html = resultDocument(card, chunk, index + 1, chunks.length);
     if (Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= 3800) continue;
     if (chunk.text.length < 2) throw new Error('A result widget exceeded its safe document budget.');
     const middle = cut(chunk.text, Math.floor(chunk.text.length / 2));
+    if (middle >= chunk.text.length) throw new Error('A result widget exceeded its safe document budget.');
     chunks.splice(index, 1, clip(chunk, 0, middle), clip(chunk, middle, chunk.text.length)); index = -1;
   }
   return chunks.map((chunk, index) => ({ method: 'sendWidget', params: { html: resultDocument(card, chunk, index + 1, chunks.length),

@@ -146,7 +146,7 @@ test('a fast widget turn sends complete result parts with one notification and r
     const turn = { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn }); await f.drain();
     const cards = f.telegram.calls.filter(call => call.method === 'sendWidget');
-    assert.ok(cards.length > 1); assert.equal(cards.filter(card => card.params.disable_notification === false).length, 1);
+    assert.equal(cards.length, 1); assert.equal(cards.filter(card => card.params.disable_notification === false).length, 1);
     const result = cards.at(-1)!.params;
     assert.equal(JSON.parse(string(result.chat_data)).k, 'result');
     const data = string(object((object(result.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data);
@@ -181,6 +181,24 @@ test('a failed result widget falls back to the complete text without replaying t
   }
 });
 
+test('a large single result document falls back to bounded formatted text messages after rejection', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start();
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendWidget') throw new TelegramError('Widget unsupported', 400); return call(method, params); };
+    const text = '**A complete formatted section with useful details 🧪.**\n\n'.repeat(180) + 'FALLBACK_FINAL_TAIL';
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
+    await f.drain();
+    const messages = f.telegram.sent();
+    assert.ok(messages.length > 1);
+    assert.ok(messages.every(message => string(message.text).length <= 4096), 'a paged widget must not become an oversized Telegram text message');
+    assert.ok(messages.some(message => string(message.text).includes('FALLBACK_FINAL_TAIL')));
+    assert.ok(messages.some(message => Array.isArray(message.entities) && (message.entities as Json[]).some(entity => object(entity).type === 'bold')));
+    assert.equal(f.state.viewMode('thread-a'), 'classic');
+  } finally { f.close(); }
+});
+
 test('a proven unsent result widget waits three seconds and then sends once', async () => {
   const f = await setup(); let sends = 0;
   try {
@@ -201,7 +219,7 @@ test('final widgets embed the formatted complete answer and number all parts ins
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
     await f.drain();
     const cards = f.telegram.calls.filter(call => call.method === 'sendWidget');
-    assert.ok(cards.length > 1, 'the full answer must use multiple result cards');
+    assert.equal(cards.length, 1, 'a fitting full answer must use one locally paged result card');
     assert.ok(cards.some(card => string(card.params.html).includes('END_OF_WIDGET_ANSWER')), 'the tail must live in a widget, not only in a server cache');
     assert.equal(f.telegram.sent().some(item => string(item.text).includes('Formatted explanation')), false);
   } finally { f.close(); }
@@ -211,7 +229,7 @@ test('a multipart result retries only the unsent card and persists a middle rece
   const f = await setup(); let attempts = 0; let failWrite = true;
   try {
     f.state.setViewMode('thread-a', 'widgets'); await f.start();
-    const text = 'A complete section with useful details. '.repeat(65) + 'MULTIPART_TAIL';
+    const text = 'A complete section with useful details. '.repeat(3000) + 'MULTIPART_TAIL';
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget' && ++attempts === 2) throw new TelegramError('Pre-connect failure', 0, undefined, true); return call(method, params); };
@@ -235,7 +253,7 @@ test('restart resumes an acknowledged result suffix but never replays an in-flig
   try {
     f.state.setViewMode('thread-a', 'widgets'); await f.start();
     const saved = f.state.widgetCard('thread-a', 'live')!;
-    const text = 'Preserved complete result section. '.repeat(65) + 'RECOVERY_TAIL';
+    const text = 'Preserved complete result section. '.repeat(3000) + 'RECOVERY_TAIL';
     const parts = resultParts({ ...saved, kind: 'result', snapshot: { ...saved.snapshot, status: 'done' } }, text, 'f'.repeat(32));
     assert.ok(parts.length > 2);
     for (const phase of ['acknowledged', 'unknown', 'legacy']) {
@@ -291,7 +309,7 @@ test('a new native question is delivered before continuing a long result series'
   const f = await setup();
   try {
     f.state.setViewMode('thread-a', 'widgets'); await f.start();
-    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(90) }] } });
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(3000) }] } });
     await f.outbox.flushOne(); assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
     f.codex.pending.add('question');
     await f.bridge.request({ id: 'question', method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', turnId: 'next',

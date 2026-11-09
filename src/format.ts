@@ -153,6 +153,10 @@ export function splitMessage(text: string, limit = 3500): string[] {
 
 export function formatMessages(source: string, markdown: boolean, limit = 3500): FormattedText[] {
   const rendered = markdown ? renderMarkdown(source) : { text: source, entities: [] };
+  return splitFormatted(rendered, limit);
+}
+
+export function splitFormatted(rendered: FormattedText, limit = 3500): FormattedText[] {
   let offset = 0;
   return splitMessage(rendered.text, limit).map(text => {
     const start = offset; offset += text.length;

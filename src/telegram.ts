@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { integer, object, string, type Json, type Telegram } from './types.js';
 import { type State, type Delivery, type DeliveryContext, type RichDeliveryPart } from './state.js';
 import { allowedSessionDirectory, type Config } from './config.js';
-import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
+import { formatMessages, splitFormatted, withoutFormatting, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 import { approvalParts } from './approvals.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
@@ -351,7 +351,7 @@ export class Outbox {
             return { messageId, complete: false };
           }
           const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
-          const remaining = parts.slice(index).flatMap(item => item.fallbackText ? [item.fallbackText] : formatMessages(item.fallback ?? delivery.text, true, limit));
+          const remaining = parts.slice(index).flatMap(item => item.fallbackText ? splitFormatted(item.fallbackText, limit) : formatMessages(item.fallback ?? delivery.text, true, limit));
           parts.splice(index, parts.length - index, ...remaining.map(chunk => ({ method: 'sendMessage' as const,
             params: { ...withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true } } })));
           this.persistAnswer(delivery.id, () => {
