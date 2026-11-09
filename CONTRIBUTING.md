@@ -10,4 +10,6 @@ Do not introduce policy overrides, shell fallbacks, automatic replay of uncertai
 
 The explicitly owner-selected `/model` flow is permitted to update only `model`, `effort` and `serviceTier` through `thread/settings/update` for its attached session. Resume/start/steer retain inherited settings; the picker must not change approval/sandbox policies, global configuration or create a turn to apply a selection. Catalog values and callback authority must remain separate, and uncertain settings writes must not be automatically replayed.
 
+The explicitly owner-selected `/permissions` flow may update only `permissions`, `approvalPolicy` and `approvalsReviewer` on that same attached root through `thread/settings/update`. It must honor live native profiles and managed requirements, confirm Full Access before writing, and keep reviewer selection separate from filesystem access. Opening a menu, ordinary attachment and model selection must not change permissions. Uncertain permission writes are never retried automatically; qualification uses an isolated native profile and starts no model turn.
+
 Changes should preserve one owner/private chat and one topic per native session. Product changes to tenancy, automatic history imports, attachments, remote permissions or distribution require discussion before implementation.

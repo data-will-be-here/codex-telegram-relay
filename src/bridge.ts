@@ -10,6 +10,7 @@ import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
+import { PermissionPicker } from './permission-picker.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
@@ -50,6 +51,7 @@ export class Bridge {
   private startedAt = Date.now();
   private topics: Topics;
   private models: ModelPicker;
+  private permissions: PermissionPicker;
   private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
@@ -58,7 +60,8 @@ export class Bridge {
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
-    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.modelThread(binding));
+    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
+    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
   }
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
@@ -77,7 +80,7 @@ export class Bridge {
     catch (error) { this.attached.delete(binding.threadId); throw error; }
   }
 
-  private async modelThread(binding: Binding): Promise<Json | undefined> {
+  private async settingsThread(binding: Binding): Promise<Json | undefined> {
     const eligible = (): boolean => this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
     if (!eligible()) return;
@@ -458,6 +461,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('p:')) {
+        this.state.finish(id, await this.permissions.callback(callback, message, topic)); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -489,7 +495,7 @@ export class Bridge {
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
@@ -553,6 +559,12 @@ export class Bridge {
       }
       if (!count) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
+    }
+    if (/^\/permissions(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (!binding) { this.notice(topicId, 'Откройте топик подключённой сессии и отправьте /permissions.'); return; }
+      if (text !== '/permissions') { this.notice(topicId, 'Используйте /permissions и выберите режим кнопками.'); return; }
+      await this.permissions.open(binding); return;
     }
     if (/^\/model(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);

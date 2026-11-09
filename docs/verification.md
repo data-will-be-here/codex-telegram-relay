@@ -212,6 +212,14 @@ Verified:
 
 The native server offered `accept` and `cancel` for the tested approval, rather than `decline`. The relay now renders the advertised choices and has a regression test for this case. A blank native context cannot be resumed before its first input; discovery waits for materialization instead of creating replacement sessions.
 
+## Session permission selection (development)
+
+The `/permissions` regression suite checks a live/custom/paginated catalog, owner/private-chat/message/topic binding, expiry, reconnect/rebind, cancellation, changed settings and managed restrictions. Full Access requires a second confirmation. Reviewer-only changes preserve the profile; profile changes preserve the reviewer. Duplicate/concurrent callbacks and uncertain writes cannot repeat the native change. Proxy transport tests assert exact field whitelists, external-settings invalidation, bounded catalog parsing and an uncertain outcome when the applied notification is absent.
+
+Local Windows validation: 302 tests, 298 passed, four platform/opt-in skips, zero failures. The separate native permission test also passed. Clean dependency installation, typecheck/build, runtime audit (zero known vulnerabilities), package allowlist check, `npm pack --dry-run` and whitespace checks passed. Cross-platform CI and actual Telegram presentation remain separate acceptance checks.
+
+Run `CODEX_RELAY_NATIVE_PERMISSIONS=1 node --test dist/test/native-permissions.test.js` after building (PowerShell: `$env:CODEX_RELAY_NATIVE_PERMISSIONS='1'`). This opt-in test starts its own native App Server with a temporary `CODEX_HOME`; it never changes the user's daemon or sessions. With Codex CLI 0.166.0, the real native test passed: Full Access needed its separate Telegram-adapter confirmation, profile/reviewer settings survived an App Server restart, no model turn was created and the temporary global config remained byte-for-byte unchanged. Telegram delivery/appearance uses an adapter in this test; a real-client check remains separate.
+
 ## Installation acceptance checklist
 
 - Configure a dedicated BotFather bot with private topics and complete owner pairing (performed for one local installation; repeat for each installation).

@@ -16,12 +16,43 @@ let modelPages = [{ cursor: null, response: { data: [], nextCursor: null } }];
 let rateLimits = {};
 let rateLimitsError;
 const modelSettings = new Map();
+const permissionSettings = new Map();
+let permissionPages = [{ cursor: null, response: { data: [':read-only', ':workspace', ':danger-full-access'].map(id => ({ id, allowed: true, description: null })), nextCursor: null } }];
+let permissionRequirements = null;
+let permissionFeatures = [{ name: 'guardian_approval', enabled: true }];
+let permissionAcknowledgementOnly = false;
+function currentPermissions(id) {
+  if (!permissionSettings.has(id)) permissionSettings.set(id, { cwd: process.cwd(), sandboxPolicy: { type: 'workspaceWrite' },
+    activePermissionProfile: { id: ':workspace' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', model: 'test-model', modelProvider: 'openai' });
+  return permissionSettings.get(id);
+}
 wss.on('connection', ws => ws.on('message', bytes => {
   const message = JSON.parse(bytes.toString());
   if (!message.method) { records.push(message); pendingRequests.delete(message.id); return; }
   if (message.id === undefined) return;
   records.push(message);
   let result = {};
+  if (message.method === 'test/permissions') {
+    if (message.params.pages) permissionPages = message.params.pages;
+    if ('requirements' in message.params) permissionRequirements = message.params.requirements;
+    if (message.params.features) permissionFeatures = message.params.features;
+    permissionAcknowledgementOnly = message.params.acknowledgementOnly === true;
+  }
+  if (message.method === 'permissionProfile/list') result = permissionPages.find(page => page.cursor === (message.params.cursor ?? null))?.response ?? { data: [], nextCursor: null };
+  if (message.method === 'configRequirements/read') result = { requirements: permissionRequirements };
+  if (message.method === 'experimentalFeature/list') result = { data: permissionFeatures, nextCursor: null };
+  if (message.method === 'thread/settings/update' && ('permissions' in message.params || 'approvalsReviewer' in message.params)) {
+    if (!permissionAcknowledgementOnly) {
+      const settings = currentPermissions(message.params.threadId);
+      if (message.params.permissions) {
+        settings.activePermissionProfile = { id: message.params.permissions };
+        settings.sandboxPolicy = { type: message.params.permissions === ':danger-full-access' ? 'dangerFullAccess' : 'workspaceWrite' };
+      }
+      if (message.params.approvalPolicy) settings.approvalPolicy = message.params.approvalPolicy;
+      if (message.params.approvalsReviewer) settings.approvalsReviewer = message.params.approvalsReviewer;
+      ws.send(JSON.stringify({ method: 'thread/settings/updated', params: { threadId: message.params.threadId, threadSettings: settings } }));
+    }
+  }
   if (message.method === 'test/rateLimits') { rateLimits = message.params.response ?? {}; rateLimitsError = message.params.error; }
   if (message.method === 'account/rateLimits/read') {
     if (rateLimitsError) { ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: rateLimitsError } })); return; }
@@ -29,7 +60,7 @@ wss.on('connection', ws => ws.on('message', bytes => {
   }
   if (message.method === 'test/models') modelPages = message.params.pages;
   if (message.method === 'model/list') result = modelPages.find(p => p.cursor === (message.params.cursor ?? null))?.response ?? { data: [], nextCursor: null };
-  if (message.method === 'thread/settings/update') modelSettings.set(message.params.threadId, message.params);
+  if (message.method === 'thread/settings/update' && message.params.model) modelSettings.set(message.params.threadId, message.params);
   if (message.method === 'test/discovery') discoveryThreads = message.params.threads;
   if (message.method === 'test/waiting') waitingThreads.add(message.params.threadId);
   if (message.method === 'test/historyError') historyErrors.set(message.params.threadId, message.params.message);
@@ -45,7 +76,10 @@ wss.on('connection', ws => ws.on('message', bytes => {
     const settings = modelSettings.get(message.params.threadId);
     result.thread = { ...result.thread, model: settings.model, reasoningEffort: settings.effort };
   }
-  if (message.method === 'thread/resume') result = { thread: { id: message.params.threadId } };
+  if (message.method === 'thread/resume') {
+    const settings = currentPermissions(message.params.threadId);
+    result = { ...settings, sandbox: settings.sandboxPolicy, thread: { id: message.params.threadId } };
+  }
   if (message.method === 'thread/turns/list') result = { data: [] };
   if (message.method === 'thread/turns/list' && histories.has(message.params.threadId)) result = { data: histories.get(message.params.threadId) };
   if (message.method === 'thread/turns/list' && message.params.threadId === 'large') result = { data: [{ id: 'large-turn', status: 'completed', items: message.params.itemsView === 'full' ? [{ type: 'commandExecution', aggregatedOutput: 'x'.repeat(17 * 1024 * 1024) }] : [{ type: 'agentMessage', phase: 'final_answer', text: 'Display summary' }] }] };

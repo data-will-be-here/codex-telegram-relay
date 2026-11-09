@@ -7,7 +7,9 @@ import { lstat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
-import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings } from './types.js';
+import { permissionSignature, validPermissionSettings } from './permission-settings.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings, type PermissionPatch, type PermissionSnapshot } from './types.js';
 
 const MAX_DISCOVERED_SESSIONS = 64;
 const METADATA_READ_CONCURRENCY = 8;
@@ -29,6 +31,22 @@ export class CodexClient extends EventEmitter implements Codex {
   private closed = false;
   private failure?: Error;
   private questionReaders = new Map<string, AsyncQuestionReader>();
+  private permissionSettings = new Map<string, { settings: Json; version: number }>();
+
+  constructor() {
+    super();
+    this.on('notification', (method: string, params: Json) => {
+      if (method === 'thread/settings/updated' && this.permissionSettings.has(string(params.threadId))) {
+        this.cachePermissions(string(params.threadId), object(params.threadSettings));
+      }
+    });
+  }
+  private cachePermissions(threadId: string, settings: Json): void {
+    const selected = { cwd: settings.cwd, sandboxPolicy: settings.sandboxPolicy, approvalPolicy: settings.approvalPolicy,
+      approvalsReviewer: settings.approvalsReviewer, activePermissionProfile: settings.activePermissionProfile,
+      model: settings.model, modelProvider: settings.modelProvider };
+    this.permissionSettings.set(threadId, { settings: structuredClone(selected), version: (this.permissionSettings.get(threadId)?.version ?? 0) + 1 });
+  }
 
   async connect(binary: string, args = ['app-server', 'proxy']): Promise<void> {
     const env = { ...process.env };
@@ -118,6 +136,7 @@ export class CodexClient extends EventEmitter implements Codex {
     const loaded = await this.loaded();
     const loadedSet = new Set(loaded);
     for (const id of this.questionReaders.keys()) if (!loadedSet.has(id)) this.questionReaders.delete(id);
+    for (const id of this.permissionSettings.keys()) if (!loadedSet.has(id)) this.permissionSettings.delete(id);
     const result: Session[] = [];
     // Bound concurrent metadata reads, not the number of ineligible contexts we can skip.
     for (let offset = 0; offset < loaded.length; offset += METADATA_READ_CONCURRENCY) {
@@ -211,6 +230,65 @@ export class CodexClient extends EventEmitter implements Codex {
     await this.call('thread/settings/update', { threadId, model: settings.model,
       ...(settings.effort === undefined ? {} : { effort: settings.effort }), serviceTier: settings.serviceTier });
   }
+  private async catalogPages(method: string, params: Json): Promise<Json[]> {
+    const items: Json[] = []; const cursors = new Set<string>(); let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const response = object(await this.call(method, { ...params, limit: 100, ...(cursor ? { cursor } : {}) }, 8_000));
+      if (!Array.isArray(response.data)) throw new RpcError('Invalid native permissions catalog.', false);
+      items.push(...response.data.map(object));
+      if (items.length > 512) throw new RpcError('Native permissions catalog is too large.', false);
+      if (response.nextCursor == null) return items;
+      cursor = string(response.nextCursor);
+      if (!cursor || cursors.has(cursor)) throw new RpcError('Invalid permissions catalog cursor.', false);
+      cursors.add(cursor);
+    }
+    throw new RpcError('Permissions catalog scan was incomplete.', false);
+  }
+  async permissionCatalog(threadId: string, cwd: string): Promise<PermissionSnapshot> {
+    const results = await Promise.all([
+      this.catalogPages('permissionProfile/list', { cwd }),
+      this.call('configRequirements/read', {}, 8_000),
+      this.catalogPages('experimentalFeature/list', { threadId }),
+    ]);
+    const requirements = object(results[1]);
+    if (!('requirements' in requirements) || requirements.requirements !== null &&
+        (typeof requirements.requirements !== 'object' || Array.isArray(requirements.requirements))) throw new RpcError('Native requirements could not be verified.', false);
+    const cached = this.permissionSettings.get(threadId)?.settings;
+    if (!cached || cached.cwd !== cwd || !validPermissionSettings(cached)) throw new RpcError('Current native session permissions are unavailable. Reconnect the relay.', false);
+    return { settings: structuredClone(cached), profiles: results[0], requirements: object(requirements.requirements),
+      autoReview: results[2].some(feature => feature.name === 'guardian_approval' && feature.enabled === true) };
+  }
+  async updatePermissions(threadId: string, patch: PermissionPatch, expected: string): Promise<void> {
+    const before = this.permissionSettings.get(threadId);
+    if (!before || !validPermissionSettings(before.settings) || permissionSignature(before.settings) !== expected) throw new RpcError('Session permissions changed. Reopen /permissions.', false);
+    const params: Json = { threadId };
+    if (patch.permissions !== undefined) {
+      if (!patch.permissions || patch.permissions.length > 256 || /[\x00-\x1f\x7f]/u.test(patch.permissions)) throw new RpcError('Invalid permissions profile.', false);
+      params.permissions = patch.permissions;
+    }
+    if (patch.approvalPolicy !== undefined) {
+      if (!['on-request', 'never'].includes(patch.approvalPolicy)) throw new RpcError('Invalid approval policy.', false);
+      params.approvalPolicy = patch.approvalPolicy;
+    }
+    if (patch.approvalsReviewer !== undefined) {
+      if (!['user', 'auto_review'].includes(patch.approvalsReviewer)) throw new RpcError('Invalid approval reviewer.', false);
+      params.approvalsReviewer = patch.approvalsReviewer;
+    }
+    if (Object.keys(params).length === 1) throw new RpcError('No permission setting was selected.', false);
+    await this.call('thread/settings/update', params);
+    const deadline = Date.now() + 2_000;
+    do {
+      const current = this.permissionSettings.get(threadId);
+      if (current && current.version > before.version) {
+        const matches = (patch.permissions === undefined || object(current.settings.activePermissionProfile).id === patch.permissions) &&
+          (patch.approvalPolicy === undefined || current.settings.approvalPolicy === patch.approvalPolicy) &&
+          (patch.approvalsReviewer === undefined || current.settings.approvalsReviewer === patch.approvalsReviewer);
+        if (matches) return;
+      }
+      await delay(20);
+    } while (Date.now() < deadline);
+    throw new RpcError('The permission update was acknowledged but its applied settings could not be confirmed.', true);
+  }
   async asyncQuestions(threadId: string, historySinceMs?: number, answeredCallIds: readonly string[] = []): Promise<AsyncQuestion[]> {
     const thread = await this.read(threadId);
     const path = string(thread.path);
@@ -227,7 +305,10 @@ export class CodexClient extends EventEmitter implements Codex {
   }
   async attach(threadId: string): Promise<Json> {
     // Deliberately omit cwd/model/instructions/approval/sandbox/permissions overrides.
-    return object(object(await this.call('thread/resume', { threadId, excludeTurns: true })).thread);
+    const result = object(await this.call('thread/resume', { threadId, excludeTurns: true }));
+    const thread = object(result.thread);
+    if (thread.id === threadId) this.cachePermissions(threadId, { ...result, sandboxPolicy: result.sandbox });
+    return thread;
   }
   async turns(threadId: string): Promise<Json[]> {
     try {
@@ -256,7 +337,7 @@ export class CodexClient extends EventEmitter implements Codex {
   private disconnect(error: Error): void {
     this.failure ??= error;
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
-    this.pending.clear(); this.requests.clear();
+    this.pending.clear(); this.requests.clear(); this.permissionSettings.clear();
     if (!this.closed) { this.closed = true; this.child?.kill(); this.emit('disconnected', this.failure); }
   }
 }

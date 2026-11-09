@@ -64,7 +64,7 @@ Your Telegram bot / private project topics
 - Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
   Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
-- Native sandbox, network, approval and instruction settings are inherited. In v0.1.17, `/model` explicitly changes the current session's model, reasoning effort and speed for following requests.
+- Native sandbox, network, approval and instruction settings are inherited. `/model` explicitly changes this session's model settings; `/permissions` (dev) explicitly changes its permission profile or approval reviewer for following requests.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 Previews share roughly one update per second across the private chat; simultaneous sessions and network delays can slow individual topics. Incomplete formatting may change layout while text arrives. Very long previews show their latest part, while permanent answers retain all parts within the existing 40,000 UTF-16-unit source limit. Drafts are temporary; permanent sends retain the existing uncertainty/recovery rules. [Streaming details](docs/architecture.md#live-answer-previews).
@@ -227,16 +227,27 @@ Setup and each relay start synchronize the command menu with `setMyCommands` for
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
 | `/model` | Choose this session's model, reasoning effort and speed |
+| `/permissions` | Show and change this session's native permissions (dev) |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
-The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, bot commands for `/sandbox`, `/approval` or `/login`, or automatic history imports. New conversations use an automatically prepared workspace or known projects within the current discovery scope. Instructions sent to your session follow its existing Codex permissions.
+The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, account-login commands or automatic history imports. New conversations use an automatically prepared workspace or known projects within the current discovery scope. Instructions follow the session's effective native Codex permissions; only an explicit `/permissions` selection changes them.
 
 Since v0.1.18, the main command menu is simplified. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
 
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
+
+## Session permissions with /permissions (development)
+
+Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. Typical profiles are Read-only, Workspace and Full Access; custom profiles appear automatically. Managed restrictions remain authoritative.
+
+An ordinary profile applies on selection. Full Access first shows a warning and requires separate confirmation: local commands may modify files outside the project and access the network without approval prompts. Custom profiles also require confirmation with their native description. Changes persist for following requests in this same session, including local requests. An active turn or pending approval, other sessions and global configuration are unaffected.
+
+The separate approval-reviewer screen offers manual or native automatic review when Codex enables and permits it. Automatic review keeps the sandbox. Profile changes preserve the selected reviewer. Full Access uses no approval prompts, so the reviewer screen is hidden until an interactive profile is selected again. Codex rejects choices forbidden by its effective policy.
+
+Opening, paging and cancelling never change settings. Buttons expire after ten minutes and belong only to the original message, topic and connection. A local settings change invalidates an earlier selection. Unknown write outcomes are never automatically repeated: check permissions in Codex before another selection. [Protocol and verification](docs/architecture.md#session-permission-selection).
 
 ## New conversations with /new (development)
 
