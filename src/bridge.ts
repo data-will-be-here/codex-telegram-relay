@@ -66,7 +66,7 @@ export class Bridge {
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
-    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearAllowed(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.widgets = new Widgets(state, this.generation);
@@ -92,6 +92,9 @@ export class Bridge {
     } };
   }
   private async connectCreated(binding: Binding): Promise<void> {
+    for (const id of this.attached) if (this.state.retiredSession(id)) {
+      this.attached.delete(id); this.drafts.finish(id); await this.retireTopicPrompts(id);
+    }
     if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
     if (binding.lastTurn === null) this.state.baseline(binding.threadId, '-');
     this.attached.add(binding.threadId);
@@ -106,11 +109,25 @@ export class Bridge {
 
   private async settingsThread(binding: Binding): Promise<Json | undefined> {
     const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
-      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId) && !this.state.resettingTopic(binding.topicId);
     if (!eligible()) return;
     const thread = await this.codex.read(binding.threadId, 1000);
     if (eligible() && string(thread.cwd) === binding.cwd && this.allowed(binding.cwd, binding.threadId) &&
         ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
+  }
+
+  private async clearAllowed(binding: Binding): Promise<boolean> {
+    const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.state.retiredSession(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId) &&
+      !this.state.reply(binding.threadId) && !this.state.sessionDeliveryBusy(binding.threadId) &&
+      ![...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt));
+    if (!eligible()) return false;
+    const thread = await this.codex.read(binding.threadId);
+    if (thread.cwd !== binding.cwd || string(object(thread.status).type) !== 'idle') return false;
+    if ((await this.codex.turns(binding.threadId)).some(turn => turn.status === 'inProgress')) return false;
+    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return false;
+    return eligible();
   }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
@@ -172,7 +189,7 @@ export class Bridge {
     this.discovering = true;
     try {
       const nameVersions = new Map(this.nameVersions);
-      const readSessions = () => this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      const readSessions = () => this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
       let sessions = await readSessions();
       if (await this.newSessions.restore(sessions.map(session => session.id))) sessions = await readSessions();
       const loaded = new Set(sessions.map(s => s.id));
@@ -573,6 +590,11 @@ export class Bridge {
       this.notice(topicId, commandHelp()); return;
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
+    if (/^\/clear(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (text !== '/clear' || !binding) { this.notice(topicId, 'Send /clear without arguments inside an attached session topic.'); return; }
+      await this.newSessions.clear(binding); return;
+    }
     if (/^\/limits(?:\s|$)/u.test(text)) {
       if (text !== '/limits') { this.notice(topicId, 'Use /limits without arguments.'); return; }
       try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
@@ -690,16 +712,18 @@ export class Bridge {
   private async answerCallback(callback: Json, message: Json, topicId: number | null): Promise<void> {
     const token = /^a:([a-f0-9]{32})$/u.exec(string(callback.data))?.[1];
     const answer = token ? this.state.widgetAnswer(token) : undefined;
-    const binding = answer && this.state.binding(answer.binding.threadId);
-    const valid = !this.closed && answer && answer.messageId !== null && answer.messageId === integer(message.message_id) &&
-      topicId === answer.binding.topicId && binding?.topicId === answer.binding.topicId && binding.cwd === answer.binding.cwd &&
-      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
-    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!valid ? { text: 'This answer is no longer available in this topic.' } : {}) }); }
+    const valid = (): boolean => {
+      const current = topicId === null ? undefined : this.state.topic(topicId);
+      return !!answer && !!current && !this.closed && answer.messageId !== null && answer.messageId === integer(message.message_id) &&
+        topicId === answer.binding.topicId && this.state.historicalAnswerBinding(answer.binding) &&
+        !this.config.ignoredThreadIds?.includes(answer.binding.threadId) && this.allowed(answer.binding.cwd, answer.binding.threadId) &&
+        !this.config.ignoredThreadIds?.includes(current.threadId) && !this.state.topicOperation(current.threadId) && this.allowed(current.cwd, current.threadId);
+    };
+    const authorized = valid();
+    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!authorized ? { text: 'This answer is no longer available in this topic.' } : {}) }); }
     catch { /* A read-only cached reply does not depend on Telegram accepting the acknowledgement. */ }
-    // Cached text is already authorized; reading it does not require resuming its native session.
-    const current = answer && this.state.binding(answer.binding.threadId);
-    if (valid && answer && !this.closed && current?.topicId === answer.binding.topicId && current.cwd === answer.binding.cwd &&
-        !this.config.ignoredThreadIds?.includes(current.threadId) && !this.state.topicOperation(current.threadId) && this.allowed(current.cwd, current.threadId)) {
+    if (authorized && valid() && answer) {
+      const current = this.state.topic(topicId!)!;
       const click = createHash('sha256').update(string(callback.id)).digest('hex');
       this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId);
     }
@@ -932,11 +956,17 @@ export class Bridge {
     prompt.index = missing >= 0 ? missing : prompt.questions.length - 1;
   }
   private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
+    const current = (): boolean => !this.closed && !this.state.resettingTopic(binding.topicId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId);
+    if (!current()) throw new RpcError('This topic is switching conversations. Wait for completion; no instruction was sent.', false);
     const thread = await this.codex.read(binding.threadId);
     if (!this.allowed(string(thread.cwd), binding.threadId)) throw new RpcError('Native session moved outside configured roots.', false);
+    if (!current() || thread.cwd !== binding.cwd) throw new RpcError('Native session or topic changed. No instruction was sent.', false);
     const status = string(object(thread.status).type);
     if (status === 'active') {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
+      if (!current()) throw new RpcError('The topic changed. No instruction was sent.', false);
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
       await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt));
     } else if (status === 'idle') {

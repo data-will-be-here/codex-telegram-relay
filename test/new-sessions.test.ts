@@ -20,7 +20,7 @@ class Native extends FakeCodex {
     const id = `new-thread-${this.starts}`;
     const thread = { id, cwd, threadSource: marker, source: 'cli', ephemeral: false, name: '', status: { type: 'idle' } };
     this.threads.set(id, thread);
-    this.sessions.push({ id, cwd, name: '', status: 'idle' });
+    this.sessions.push({ id, cwd, name: '', status: 'idle', threadSource: marker });
     if (this.loseStart) throw new RpcError('Response lost', true);
     return thread;
   }
@@ -588,4 +588,205 @@ test('a known home-directory session cannot hide the general conversation option
     await f.choose(0); await f.bridge.workNewSession();
     assert.equal(f.state.newSession(op.id)!.status, 'ready');
   } finally { f.close(); }
+});
+
+async function originalSession(f: ReturnType<typeof setup>) {
+  f.native.sessions.push({ id: 'original', cwd: f.project, name: 'Previous task', status: 'idle' });
+  f.native.histories.set('original', [{ id: 'old', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Previous history' }] }]);
+  await f.bridge.discover(); await f.drain(); return f.state.binding('original')!;
+}
+
+test('/clear switches the same topic to one empty conversation and keeps the old native history', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); f.state.setViewMode(old.threadId, 'widgets');
+    const topics = f.telegram.calls.filter(call => call.method === 'createForumTopic').length;
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.update(message(11, old.topicId, '/clear'));
+    assert.equal(f.native.starts, 0); assert.equal(f.state.newSessions().length, 1);
+    await f.bridge.update(message(12, old.topicId, 'Do not send during reset')).catch(() => undefined);
+    assert.equal(f.native.writes.length, 0);
+    await f.drain();
+    await f.bridge.workNewSession(); await f.drain();
+    const next = f.state.topic(old.topicId)!;
+    assert.equal(next.threadId, 'new-thread-1'); assert.equal(next.cwd, old.cwd); assert.equal(next.lastTurn, '-');
+    assert.equal(f.state.viewMode(next.threadId), 'widgets'); assert.equal(f.state.retiredSession(old.threadId), true);
+    assert.equal(f.state.historicalAnswerBinding(old), true);
+    assert.equal(f.native.starts, 1); assert.equal(f.state.binding(old.threadId), undefined);
+    assert.equal((await f.native.turns('original'))[0]!.id, 'old'); assert.deepEqual(await f.native.turns(next.threadId), []);
+    await f.bridge.discover(); await f.drain();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, topics);
+    assert.equal(f.state.bindings().length, 1); assert.equal(f.native.starts, 1);
+    await f.bridge.update(message(13, next.topicId, 'Fresh task'));
+    assert.deepEqual(f.native.writes, [{ method: 'start', params: { threadId: next.threadId, text: 'Fresh task' } }]);
+    await f.bridge.notification('turn/completed', { threadId: old.threadId, turn: { id: 'late-old', status: 'completed', items: [{ type: 'agentMessage', text: 'Must not leak' }] } });
+    await f.drain(); assert.equal(f.telegram.sent().some(item => string(item.text).includes('Must not leak')), false);
+  } finally { f.close(); }
+});
+
+test('/clear refuses active turns, pending approvals, delivery work and unavailable native sessions', async () => {
+  for (const busy of ['active', 'turn', 'approval', 'delivery', 'read']) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      if (busy === 'active') f.native.sessions[0]!.status = 'active';
+      if (busy === 'turn') f.native.histories.set(old.threadId, [{ id: 'running', status: 'inProgress' }]);
+      if (busy === 'approval') {
+        f.native.pending.add('pending');
+        await f.bridge.request({ id: 'pending', method: 'item/commandExecution/requestApproval', params: { threadId: old.threadId, turnId: 'old', itemId: 'command', command: 'echo ok' } });
+        await f.drain();
+      }
+      if (busy === 'delivery') f.state.enqueue('final/original/queued', old.topicId, 'Pending final');
+      if (busy === 'read') f.native.read = async () => { throw new RpcError('Offline', true); };
+      await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession();
+      assert.equal(f.native.starts, 0, busy); assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+      assert.equal(f.state.resettingTopic(old.topicId), false); assert.equal(f.native.writes.length, 0);
+    } finally { f.close(); }
+  }
+});
+
+test('/clear requires the paired owner and an existing eligible topic; invalid arguments never create', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.bridge.update(message(10, old.topicId, '/clear', 99));
+    await f.bridge.update(message(11, 999, '/clear'));
+    await f.bridge.update(message(12, old.topicId, '/clear extra'));
+    const root = message(13, old.topicId, '/clear'); delete object(root.message).message_thread_id; await f.bridge.update(root);
+    f.config.ignoredThreadIds = [old.threadId]; await f.bridge.update(message(14, old.topicId, '/clear'));
+    await f.bridge.workNewSession(); assert.equal(f.native.starts, 0);
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+  } finally { f.close(); }
+});
+
+test('unknown /clear creation recovers the same marked thread after reconnect without a repeated start', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); f.native.loseStart = true;
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession();
+    const op = f.state.newSessions().at(-1)!;
+    assert.equal(op.status, 'uncertain'); assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    f.bridge.close(); const next = new Bridge(f.config, f.state, f.native, f.telegram);
+    await next.discover(); f.state.changeNewSession(op.id, 'uncertain', { retryAt: 0 });
+    await next.workNewSession(); await f.drain();
+    assert.equal(f.native.starts, 1); assert.equal(f.state.topic(old.topicId)!.threadId, 'new-thread-1');
+    assert.equal(f.state.newSession(op.id)!.status, 'ready');
+    next.close();
+  } finally { f.close(); }
+});
+
+test('a busy old session after creation pauses the handoff and never creates another thread', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); const create = f.native.createThread.bind(f.native);
+    f.native.createThread = async (...args) => { const result = await create(...args); f.native.sessions[0]!.status = 'active'; return result; };
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    const op = f.state.newSessions().at(-1)!; assert.equal(op.status, 'topic');
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId); assert.equal(f.native.starts, 1);
+    f.native.sessions[0]!.status = 'idle'; f.state.changeNewSession(op.id, 'topic', { retryAt: 0 });
+    await f.bridge.workNewSession(); assert.equal(f.state.topic(old.topicId)!.threadId, 'new-thread-1');
+    assert.equal(f.native.starts, 1);
+  } finally { f.close(); }
+});
+
+test('/clear retains scratch ownership and does not create another directory or Telegram topic', async () => {
+  const f = setup();
+  try {
+    const op = await f.open(); await f.choose(0); await f.bridge.workNewSession(); await f.drain();
+    const old = f.state.binding(f.state.newSession(op.id)!.threadId!)!;
+    await f.bridge.update(message(300, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    const next = f.state.topic(old.topicId)!;
+    assert.equal(next.threadId, 'new-thread-2'); assert.equal(next.cwd, old.cwd); assert.equal(next.projectLabel, 'No project');
+    assert.equal(f.state.ownsScratch(next.cwd, next.threadId), true);
+    await f.bridge.discover(); assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+  } finally { f.close(); }
+});
+
+test('a definite /clear creation rejection unlocks the original topic without repeated creation', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); f.native.rejectStart = true;
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    assert.equal(f.state.newSessions().at(-1)!.status, 'failed'); assert.equal(f.state.resettingTopic(old.topicId), false);
+    await f.bridge.workNewSession(); assert.equal(f.native.starts, 1);
+    await f.bridge.update(message(11, old.topicId, 'Continue original'));
+    assert.equal(f.native.writes[0]!.params.threadId, old.threadId);
+  } finally { f.close(); }
+});
+
+test('revoked scope during pre-creation metadata reads cannot create a /clear replacement', async () => {
+  for (const revoke of ['scope', 'disabled', 'ignored']) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      await f.bridge.update(message(10, old.topicId, '/clear'));
+      const list = f.native.list.bind(f.native);
+      f.native.list = async (...args) => {
+        const result = await list(...args);
+        if (revoke === 'scope') f.config.roots = [];
+        if (revoke === 'disabled') f.config.newSessions!.enabled = false;
+        if (revoke === 'ignored') f.config.ignoredThreadIds = [old.threadId];
+        return result;
+      };
+      await f.bridge.workNewSession(); await f.bridge.workNewSession();
+      assert.equal(f.native.starts, 0, revoke); assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    } finally { f.close(); }
+  }
+});
+
+test('the creation worker cannot start while /clear preflight is awaiting native state', async () => {
+  const f = setup(); let release: (() => void) | undefined;
+  try {
+    const old = await originalSession(f); const read = f.native.read.bind(f.native);
+    let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+    const waiting = new Promise<void>(resolve => { release = resolve; }); let first = true;
+    f.native.read = async id => { if (id === old.threadId && first) { first = false; entered(); await waiting; } return read(id); };
+    const pending = f.bridge.update(message(10, old.topicId, '/clear')); await started;
+    assert.equal(f.state.newSessions().at(-1)!.status, 'checking');
+    await f.bridge.workNewSession(); assert.equal(f.native.starts, 0);
+    release!(); await pending; await f.bridge.workNewSession();
+    assert.equal(f.native.starts, 1); assert.equal(f.state.topic(old.topicId)!.threadId, 'new-thread-1');
+  } finally { release?.(); f.close(); }
+});
+
+test('historical Full answer remains readable after /clear but old permission controls cannot change sessions', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.bridge.update(message(10, old.topicId, '/permissions')); await f.drain();
+    const menu = f.telegram.sent().at(-1)!; const menuId = f.telegram.message;
+    const controls = object(menu.reply_markup).inline_keyboard as Json[][];
+    const permission = controls.flat().find(item => string(item.text).includes('Read Only'))!;
+    f.state.setViewMode(old.threadId, 'widgets');
+    await f.bridge.notification('turn/started', { threadId: old.threadId, turn: { id: 'result', status: 'inProgress' } });
+    await f.bridge.notification('turn/completed', { threadId: old.threadId, turn: { id: 'result', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Historical full reply' }] } });
+    await f.drain();
+    const widget = f.telegram.calls.filter(call => call.method === 'sendWidget').at(-1)!.params;
+    const answer = (object(widget.reply_markup).inline_keyboard as Json[][])[0]![0]!;
+    const receipt = f.state.widgetAnswer(string(answer.callback_data).slice(2))!;
+    await f.bridge.update(message(11, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    const click = (id: number, data: unknown, messageId: number) => ({ update_id: id, callback_query: { id: String(id), from: { id: 42 }, data,
+      message: { message_id: messageId, chat: { id: 42, type: 'private' }, message_thread_id: old.topicId } } });
+    await f.bridge.update(click(12, permission.callback_data, menuId)); assert.equal(f.native.writes.length, 0);
+    f.native.read = async () => { throw new Error('A cached answer must not require native state'); };
+    await f.bridge.update(click(13, answer.callback_data, receipt.messageId!)); await f.drain();
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Historical full reply')));
+    assert.equal(f.native.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('an interrupted preflight unlocks on disk recovery and a committed clear binding survives restart', () => {
+  const temp = temporary(); let state: State | undefined;
+  try {
+    const home = join(temp.dir, 'private'); state = new State(home);
+    state.bind('old', 101, temp.dir, 'Old'); const old = state.binding('old')!;
+    const op = { id: 'clear-op', status: 'checking' as const, topicId: 101, reset: old, menuKey: 'notice/clear/clear-op', token: '', expires: 1, choices: [], page: 0 };
+    state.createNewSession(op); state.close(); state = new State(home);
+    assert.equal(state.newSession(op.id)!.status, 'failed'); assert.equal(state.resettingTopic(101), false);
+    const ready = state.changeNewSession(op.id, 'failed', { status: 'topic', threadId: 'next' })!;
+    state.resetTopic(ready); state.close(); state = new State(home);
+    assert.equal(state.topic(101)!.threadId, 'next'); assert.equal(state.retiredSession('old'), true);
+    assert.equal(state.historicalAnswerBinding(old), true);
+    state.installTopic('next', 555, temp.dir, 'Moved'); assert.equal(state.historicalAnswerBinding(old), false);
+  } finally { state?.close(); temp.close(); }
 });

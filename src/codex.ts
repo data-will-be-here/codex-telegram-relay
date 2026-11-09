@@ -163,8 +163,8 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
-  async createThread(cwd: string, marker: string): Promise<Json> {
-    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker })).thread);
+  async createThread(cwd: string, marker: string, source?: 'clear'): Promise<Json> {
+    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker, ...(source ? { sessionStartSource: source } : {}) })).thread);
   }
   async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
   async nonArchivedThread(threadId: string): Promise<Json | undefined> {

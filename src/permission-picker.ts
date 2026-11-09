@@ -7,14 +7,14 @@ import { integer, object, string, type Binding, type Codex, type Json, type Keyb
 
 const PAGE_SIZE = 7;
 const LIFETIME = 10 * 60_000;
-const NAMES = new Map([[':read-only', 'Read-only'], [':workspace', 'Workspace'], [':danger-full-access', 'Full Access']]);
+const NAMES = new Map([[':read-only', 'Read Only'], [':workspace', 'Ask for approval'], [':danger-full-access', 'Full Access']]);
 const label = (value: string): string => Array.from(value.replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim()).slice(0, 100).join('');
 interface Choice { patch: PermissionPatch; text: string; confirm: boolean; description: string; }
-type Action = { kind: 'choice'; choice: Choice } | { kind: 'confirm' } | { kind: 'reviewers' } | { kind: 'back' } | { kind: 'close' } | { kind: 'page'; page: number };
+type Action = { kind: 'choice'; choice: Choice } | { kind: 'confirm' } | { kind: 'back' } | { kind: 'close' } | { kind: 'page'; page: number };
 interface Menu {
   binding: Binding; key: string; token: string; expires: number; busy: boolean;
   snapshot: PermissionSnapshot; signature: string; actions: Map<string, Action>; page: number;
-  reviewers: boolean; confirmation?: Choice;
+  confirmation?: Choice;
 }
 
 function policyAllowed(snapshot: PermissionSnapshot, value: string): boolean {
@@ -30,16 +30,20 @@ function profileChoice(profile: Json, snapshot: PermissionSnapshot): Choice | un
   if (profile.allowed !== true) return;
   const policy = id === ':danger-full-access' ? 'never' : NAMES.has(id) ? 'on-request' : undefined;
   if (policy && !policyAllowed(snapshot, policy)) return;
+  if (policy && !reviewerAllowed(snapshot, 'user')) return;
   return { patch: { permissions: id, ...(policy ? { approvalPolicy: policy } : {}) },
     text: NAMES.get(id) ?? label(id), confirm: id === ':danger-full-access' || !NAMES.has(id), description: label(string(profile.description)) };
 }
-function reviewers(snapshot: PermissionSnapshot): Choice[] {
-  const policy = snapshot.settings.approvalPolicy;
-  if (policy !== 'on-request' && !Object.values(object(object(policy).granular)).some(value => value === true)) return [];
-  return [
-    ...(reviewerAllowed(snapshot, 'user') ? [{ patch: { approvalsReviewer: 'user' as const }, text: 'Ask me', confirm: false, description: '' }] : []),
-    ...(snapshot.autoReview && reviewerAllowed(snapshot, 'auto_review') ? [{ patch: { approvalsReviewer: 'auto_review' as const }, text: 'Automatic review', confirm: false, description: '' }] : []),
-  ];
+function choices(snapshot: PermissionSnapshot): Choice[] {
+  const available = snapshot.profiles.map(profile => profileChoice(profile, snapshot)).filter((item): item is Choice => !!item);
+  const ordered: Choice[] = [':workspace', ':danger-full-access', ':read-only'].flatMap(id => available.filter(item => item.patch.permissions === id)
+    .map(item => ({ ...item, patch: { ...item.patch, approvalsReviewer: 'user' as const } })));
+  if (snapshot.profiles.some(profile => profile.id === ':workspace' && profile.allowed) && snapshot.autoReview &&
+      policyAllowed(snapshot, 'on-request') && reviewerAllowed(snapshot, 'auto_review')) {
+    ordered.splice(ordered[0]?.patch.permissions === ':workspace' ? 1 : 0, 0, { text: 'Approve for me', confirm: false, description: '',
+      patch: { permissions: ':workspace', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' } });
+  }
+  return [...ordered, ...available.filter(item => !NAMES.has(item.patch.permissions!))];
 }
 
 /** Only explicit, topic-scoped owner selections may change native session permissions. */
@@ -67,7 +71,7 @@ export class PermissionPicker {
       const snapshot = await this.catalog(binding);
       if (!await this.allowed(binding)) { this.notice(binding, 'The session is no longer available for this topic.'); return; }
       const menu: Menu = { binding, key: `prompt/permissions/${randomUUID()}`, token: '', expires: Date.now() + LIFETIME,
-        busy: false, snapshot, signature: permissionSignature(snapshot.settings), actions: new Map(), page: 0, reviewers: false };
+        busy: false, snapshot, signature: permissionSignature(snapshot.settings), actions: new Map(), page: 0 };
       this.menus.set(binding.threadId, menu);
       const screen = this.screen(menu); this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
     } catch { this.notice(binding, 'Could not load Codex permissions. Check the connection and retry /permissions.'); }
@@ -115,8 +119,7 @@ export class PermissionPicker {
         return 'done';
       }
       delete menu.confirmation;
-      if (action.kind === 'reviewers') menu.reviewers = true;
-      else if (action.kind === 'back') { menu.reviewers = false; menu.page = 0; }
+      if (action.kind === 'back') menu.page = 0;
       else menu.page = action.page;
       const screen = this.screen(menu); await this.edit(menu, screen.text, screen.markup); return 'done';
     } catch (error) {
@@ -129,7 +132,7 @@ export class PermissionPicker {
   }
 
   private currentChoice(snapshot: PermissionSnapshot, choice: Choice): Choice | undefined {
-    const options = choice.patch.permissions === undefined ? reviewers(snapshot) : snapshot.profiles.map(profile => profileChoice(profile, snapshot)).filter((item): item is Choice => !!item);
+    const options = choices(snapshot);
     return options.find(item => JSON.stringify(item.patch) === JSON.stringify(choice.patch));
   }
   private current(menu: Menu): boolean { return this.menus.get(menu.binding.threadId) === menu && menu.expires >= Date.now(); }
@@ -144,22 +147,23 @@ export class PermissionPicker {
         [button('Back', { kind: 'back' }), button('Cancel', { kind: 'close' })]] } };
     }
     const settings = menu.snapshot.settings; const active = string(object(settings.activePermissionProfile).id);
-    const legacyNames = new Map([['readOnly', 'Read-only'], ['workspaceWrite', 'Workspace'], ['dangerFullAccess', 'Full Access']]);
-    const name = NAMES.get(active) ?? (active ? label(active) : legacyNames.get(string(object(settings.sandboxPolicy).type)) ?? 'Custom Codex settings');
-    const reviewer = settings.approvalPolicy === 'never' ? 'not requested' : settings.approvalsReviewer === 'user' ? 'ask me' : 'automatic review';
-    const choices = menu.reviewers ? reviewers(menu.snapshot) : menu.snapshot.profiles.map(profile => profileChoice(profile, menu.snapshot)).filter((item): item is Choice => !!item);
-    const pages = Math.max(1, Math.ceil(choices.length / PAGE_SIZE)); menu.page = Math.max(0, Math.min(menu.page, pages - 1));
-    const rows: Keyboard['inline_keyboard'] = choices.slice(menu.page * PAGE_SIZE, (menu.page + 1) * PAGE_SIZE).map(choice => {
-      const selected = choice.patch.permissions ? choice.patch.permissions === active : choice.patch.approvalsReviewer === settings.approvalsReviewer;
-      return [button((selected ? '✓ ' : '') + choice.text, { kind: 'choice', choice })];
-    });
+    const legacyIds = new Map([['readOnly', ':read-only'], ['workspaceWrite', ':workspace'], ['dangerFullAccess', ':danger-full-access']]);
+    const profile = active || legacyIds.get(string(object(settings.sandboxPolicy).type));
+    const options = choices(menu.snapshot);
+    const selected = (choice: Choice): boolean => choice.patch.permissions === profile &&
+      (choice.patch.approvalPolicy === undefined || choice.patch.approvalPolicy === settings.approvalPolicy) &&
+      (choice.patch.approvalsReviewer === undefined || choice.patch.approvalsReviewer === settings.approvalsReviewer);
+    const name = options.find(selected)?.text ?? (profile && !NAMES.has(profile) ? label(profile) : 'Custom Codex settings');
+    const pages = Math.max(1, Math.ceil(options.length / PAGE_SIZE)); menu.page = Math.max(0, Math.min(menu.page, pages - 1));
+    const rows: Keyboard['inline_keyboard'] = options.slice(menu.page * PAGE_SIZE, (menu.page + 1) * PAGE_SIZE).map(choice =>
+      [button((selected(choice) ? '✓ ' : '') + choice.text, { kind: 'choice', choice })]);
     const nav = []; if (menu.page) nav.push(button('←', { kind: 'page', page: menu.page - 1 }));
     if (menu.page + 1 < pages) nav.push(button('→', { kind: 'page', page: menu.page + 1 })); if (nav.length) rows.push(nav);
-    if (!menu.reviewers && reviewers(menu.snapshot).length) rows.push([button('Approval reviewer', { kind: 'reviewers' })]);
-    rows.push([...(menu.reviewers ? [button('Back', { kind: 'back' })] : []), button('Close', { kind: 'close' })]);
-    return { text: `Session permissions\nCurrent: ${name}\nApprovals: ${reviewer}\n\n${menu.reviewers ? 'Who reviews approval requests?' : 'Choose an access profile.'}` +
-      (!choices.length ? '\nNo options are currently available.' : '') + (pages > 1 ? `\nPage ${menu.page + 1}/${pages}` : ''), markup: { inline_keyboard: rows } };
+    rows.push([button('Close', { kind: 'close' })]);
+    return { text: `Session permissions\nCurrent: ${name}\n\nChoose a mode. Approve for me uses automatic approval review within the workspace profile.` +
+      (!options.length ? '\nNo options are currently available.' : '') + (pages > 1 ? `\nPage ${menu.page + 1}/${pages}` : ''), markup: { inline_keyboard: rows } };
   }
+
   private async ack(callback: Json, text?: string): Promise<void> { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(text ? { text } : {}) }); }
   private async edit(menu: Menu, text: string, markup: Keyboard): Promise<void> {
     const id = this.state.promptMessage(menu.key); if (!id) throw new Error('Menu delivery is not confirmed.');

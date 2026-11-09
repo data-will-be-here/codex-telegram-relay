@@ -6,6 +6,7 @@ const commands = [
   { command: 'limits', args: '', en: 'Show remaining Codex account limits and reset times' },
   { command: 'sessions', args: '', en: 'List attached Codex sessions and their IDs' },
   { command: 'new', args: '', en: 'Start a new conversation or project session' },
+  { command: 'clear', args: '', en: 'Start a fresh conversation in this topic; keep Telegram history' },
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed' },
   { command: 'permissions', args: '', en: 'Choose this session’s access and approval review mode' },
   { command: 'view', args: 'classic|widgets', en: 'Choose Classic or experimental Widgets for this session' },

@@ -19,6 +19,7 @@ export class Topics {
   constructor(private readonly config: Config, private readonly state: State, private readonly telegram: Telegram) {}
 
   async ensure(session: TopicSession): Promise<Binding | undefined> {
+    if (this.state.retiredSession(session.id)) return;
     session = { ...session, projectLabel: this.state.workspaceLabel(session.cwd) };
     const binding = this.state.binding(session.id);
     const previous = this.state.topicOperation(session.id);

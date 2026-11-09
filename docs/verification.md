@@ -1,5 +1,11 @@
 # Verification record
 
+## Same-topic /clear and native permission presets
+
+Owner-approved `/clear` starts one empty conversation in the current topic and cwd, preserving Telegram/native history and the previous terminal session. Tests cover duplicate requests, input fencing, active turns and pending approvals, queued deliveries, unknown-create recovery, definite rejection/unlock, scope revocation during metadata reads, a worker racing preflight, delayed handoff, scratch ownership, old-event isolation, historical Full answer reads, rejection of old permission controls, disk recovery and moved-topic lineage rejection. Wire tests verify that clear creation adds only `sessionStartSource=clear` to the existing minimal creation request; it does not copy model/permission overrides or submit input. No production topic or native conversation was reset for qualification.
+
+`/permissions` now uses the CLI's four complete presets and compares profile/policy/reviewer for the current marker. Catalog/feature/managed gates remain authoritative; custom profiles retain policy/reviewer and Full Access retains confirmation. A real isolated temporary Codex profile exercised Full Access confirmation, Ask for approval and Approve for me through the picker, then verified persistence across restart without model turns or global configuration edits. Independent spec/standards reviews found a pre-creation scope race and a definite-rejection lock; both were fixed with regressions. Final local suite: 365 discovered, 361 passed, four platform/opt-in skips, zero failures; the separately enabled native permissions check passed. Typecheck, package checks and production dependency audit passed.
+
 ## Expanded previews and notified final-result widgets
 
 The screenshot's Russian paragraph reproduced a double byte truncation (160 then 128 bytes). Progress now uses the remaining 900-byte JSON budget after metadata and escaping, prefers complete sentences and shows an explicit ellipsis. Local More/Less reveals additional loaded text; Current step retrieves the saved explanation. Widget turns suppress answer drafts and send a separate notified result card with an authenticated Full answer control. The full original reply survives ordinary queue pruning; explicit reads use multipart formatting without the normal 40,000-unit shortening guard. Classic behavior is preserved.

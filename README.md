@@ -222,6 +222,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
 | `/new` | Create a conversation without a project, or in a connected project (main/dev after v0.1.19) |
+| `/clear` | Start a fresh conversation in this topic, preserving Telegram history (dev) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -261,13 +262,19 @@ Proven connection failures before a widget request is sent are retried after thr
 
 ## Session permissions with /permissions (main/dev after v0.1.19)
 
-Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. Typical profiles are Read-only, Workspace and Full Access; custom profiles appear automatically. Managed restrictions remain authoritative.
+Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. In dev, the menu matches the CLI: Ask for approval, Approve for me, Full Access and Read Only, followed by custom profiles. Only choices allowed by the native catalog, feature flags and managed requirements are offered.
 
 An ordinary profile applies on selection. Full Access first shows a warning and requires separate confirmation: local commands may modify files outside the project and access the network without approval prompts. Custom profiles also require confirmation with their native description. Changes persist for following requests in this same session, including local requests. An active turn or pending approval, other sessions and global configuration are unaffected.
 
-The separate approval-reviewer screen offers manual or native automatic review when Codex enables and permits it. Automatic review keeps the sandbox. Profile changes preserve the selected reviewer. Full Access uses no approval prompts, so the reviewer screen is hidden until an interactive profile is selected again. Codex rejects choices forbidden by its effective policy.
+Ask for approval selects the workspace profile with user approval review. Approve for me selects the same workspace profile with native automatic review; it does not grant Full Access. Both use on-request approval policy. Full Access selects unrestricted access with no approval prompts; Read Only selects the read-only profile with on-request user review. Each standard choice applies the complete profile/policy/reviewer preset, and the current marker compares all three. Custom profiles preserve the existing policy and reviewer. Codex remains authoritative.
 
 Opening, paging and cancelling never change settings. Buttons expire after ten minutes and belong only to the original message, topic and connection. A local settings change invalidates an earlier selection. Unknown write outcomes are never automatically repeated: check permissions in Codex before another selection. [Protocol and verification](docs/architecture.md#session-permission-selection).
+
+## Fresh conversation in the current topic: /clear (dev)
+
+Send `/clear` without arguments in an attached topic to start a new empty conversation in the same canonical directory. Telegram messages and the previous native transcript remain available. No new Telegram topic is created and no model task is started. An open terminal stays on the previous native session; the bot reports the new session ID. The new conversation uses Codex's project/default model and permissions, while the session's Classic/Widgets view is copied.
+
+The current session must be idle, with no pending questions/approvals or queued deliveries/uploads. During the switch new input and settings controls are blocked. A definite creation rejection keeps the original topic usable. Unknown creation outcomes are reconciled by an operation marker without replaying creation; known IDs survive attachment or local persistence failures. After the atomic handoff the old session is excluded from automatic relay discovery and its old controls cannot change the new session. Saved Full answer buttons remain readable in the same eligible topic/project lineage. Native files/history are not deleted, archived or reverted. Explicitly moved or unrelated topic bindings invalidate the historical read route.
 
 ## New conversations with /new (main/dev after v0.1.19)
 

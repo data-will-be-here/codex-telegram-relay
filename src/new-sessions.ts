@@ -12,7 +12,7 @@ import { integer, object, string, type Binding, type Codex, type Json, type Keyb
 const LIFETIME = 10 * 60_000;
 const PAGE = 7;
 const MARKER = 'codex-telegram-relay:new:';
-const active: NewSessionPhase[] = ['preparing', 'starting', 'uncertain', 'known', 'persisted', 'topic'];
+const active: NewSessionPhase[] = ['checking', 'preparing', 'starting', 'uncertain', 'known', 'persisted', 'topic'];
 const clean = (text: string): string => Array.from(text.replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim()).slice(0, 70).join('');
 const inside = (child: string, root: string): boolean => {
   const diff = relative(root, child);
@@ -27,10 +27,42 @@ export class NewSessions {
   private pendingTopicBind: { id: string; attempt: number; expires: number } | undefined;
   constructor(private readonly config: Config, private readonly state: State, private readonly codex: Codex,
     private readonly telegram: Telegram, private readonly topics: Topics,
-    private readonly connected: (binding: Binding) => Promise<void>) { newSessionDefaults(config, state.home); }
+    private readonly connected: (binding: Binding) => Promise<void>, private readonly clearAllowed: (binding: Binding) => Promise<boolean> = async () => false) { newSessionDefaults(config, state.home); }
 
   close(): void { this.closed = true; }
   clearPendingBind(): void { this.pendingTopicBind = undefined; }
+  async clear(binding: Binding): Promise<void> {
+    if (!this.creationEnabled() || !this.codex.createThread || !this.codex.setThreadName || !this.codex.nonArchivedThread || !this.codex.findCreatedThread) {
+      this.notice(binding.topicId, 'Session creation is unavailable. Check Codex and local relay settings.'); return;
+    }
+    if (this.state.newSessions(active).some(op => op.topicId === binding.topicId)) {
+      this.notice(binding.topicId, 'A session operation is already pending in this topic. Creation will not be repeated.'); return;
+    }
+    const saved = this.state.newSessions(['failed']).find(op => op.threadId && op.reset?.threadId === binding.threadId &&
+      op.reset.topicId === binding.topicId && op.reset.cwd === binding.cwd);
+    if (saved) {
+      if (!this.operationAllowed(saved)) { this.notice(binding.topicId, 'A replacement conversation is already saved, but its directory is unavailable. Restore local access before retrying /clear.'); return; }
+      this.state.changeNewSession(saved.id, 'failed', { status: 'known', retryAt: 0 });
+      this.notice(binding.topicId, 'Resuming the saved conversation switch. No additional conversation will be created.'); return;
+    }
+    if (this.state.newSessions(active).length >= 64) { this.notice(binding.topicId, 'Too many pending session operations. Finish them before using /clear.'); return; }
+    const id = randomUUID();
+    const op: NewSessionOperation = { id, status: 'checking', reset: binding, topicId: binding.topicId, targetTopic: binding.topicId,
+      topicFirst: false, topicTitle: binding.title, menuKey: `notice/clear/${id}`, token: '', choices: [], page: 0,
+      expires: Date.now() + LIFETIME, cwd: binding.cwd, root: binding.cwd, kind: this.state.ownsScratch(binding.cwd, binding.threadId) ? 'scratch' : 'project' };
+    this.state.createNewSession(op);
+    try {
+      if (!this.operationAllowed(op) || !await this.clearAllowed(binding)) {
+        this.state.changeNewSession(id, 'checking', { status: 'failed' });
+        this.notice(binding.topicId, 'Cannot clear this session now. Finish the running task, answer pending questions/approvals and wait for queued deliveries, then retry /clear.'); return;
+      }
+      this.state.changeNewSession(id, 'checking', { status: 'preparing' });
+      this.notice(binding.topicId, 'Starting a fresh conversation in this topic. Telegram history and the previous Codex session are preserved.');
+    } catch {
+      this.state.changeNewSession(id, 'checking', { status: 'failed' });
+      this.notice(binding.topicId, 'Could not verify the current session. No new conversation was created; retry /clear when Codex is available.');
+    }
+  }
   async recoverOwned(threadId: string): Promise<boolean> {
     const op = this.state.findNewSession('threadId', threadId);
     if (!op || !['persisted', 'topic', 'ready'].includes(op.status)) return false;
@@ -272,6 +304,9 @@ export class NewSessions {
     return (kind === 'scratch' ? this.config.newSessions?.scratchRoot === root : this.projectPaths().includes(root)) === true && this.validRoot(root, kind === 'scratch');
   }
   private operationAllowed(op: NewSessionOperation): boolean {
+    if (op.reset) return !!op.cwd && op.cwd === op.reset.cwd && this.validRoot(op.cwd, false) &&
+      !this.config.ignoredThreadIds?.includes(op.reset.threadId) && (!op.threadId || !this.config.ignoredThreadIds?.includes(op.threadId)) &&
+      allowedSessionDirectory(op.cwd, this.config, this.state.ownsScratch(op.cwd, op.reset.threadId));
     if (!op.root || !op.cwd || !op.kind || !this.choiceAllowed(op.root, op.kind)) return false;
     if (op.threadId && this.config.ignoredThreadIds?.includes(op.threadId)) return false;
     if (op.kind === 'project') return op.cwd === op.root && allowedSessionDirectory(op.cwd, this.config);
@@ -289,7 +324,7 @@ export class NewSessions {
 
   async tick(): Promise<void> {
     if (this.working || this.closed) return;
-    const op = this.state.newSessions(active).find(item => (item.retryAt ?? 0) <= Date.now());
+    const op = this.state.newSessions(active).find(item => item.status !== 'checking' && (item.retryAt ?? 0) <= Date.now());
     if (!op) return;
     this.working = true;
     try { await this.advance(op); }
@@ -305,25 +340,30 @@ export class NewSessions {
     try {
       if (!this.creationEnabled() || !this.operationAllowed(op)) throw new Error('The directory was removed, changed or is no longer allowed. Check settings locally.');
       if (op.status === 'preparing') {
+        if (op.reset && !await this.clearAllowed(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
         if (op.topicFirst === undefined) save({ topicFirst: true });
-        const loaded = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) &&
+        const loaded = await this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) &&
           allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)));
         if (loaded.length >= 64) throw new Error('The limit of 64 attached sessions has been reached. Free a slot before using /new.');
-        if (op.kind === 'scratch') { if (!existsSync(op.cwd!)) mkdirSync(op.cwd!, { mode: 0o700 }); if (!this.operationAllowed(op)) throw new Error('The working directory changed.'); }
+        if (op.kind === 'scratch' && !op.reset) { if (!existsSync(op.cwd!)) mkdirSync(op.cwd!, { mode: 0o700 }); if (!this.operationAllowed(op)) throw new Error('The working directory changed.'); }
         if (this.closed) return;
-        if (op.topicFirst) {
+        if (op.topicFirst && !op.reset) {
           const prepared = await this.prepareTopic(op);
           if (!prepared) return;
           op = prepared;
           if (this.closed || this.config.newSessions?.enabled === false || !this.operationAllowed(op)) throw new Error('The directory is no longer allowed. No Codex session was created.');
           if (this.topicOccupied(op.targetTopic!, op.id)) throw new Error('The selected topic is already bound or reserved. No Codex session was created.');
         }
+        if (op.reset && !await this.clearAllowed(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
+        if (this.closed || !this.creationEnabled() || !this.operationAllowed(op)) throw new Error('Session creation or its directory is no longer allowed. No Codex session was created.');
         save({ status: 'starting' });
         let thread: Json;
-        try { thread = await this.codex.createThread!(op.cwd!, MARKER + op.id); }
+        try { thread = await this.codex.createThread!(op.cwd!, MARKER + op.id, op.reset ? 'clear' : undefined); }
         catch (error) {
-          if (!(error instanceof RpcError) || error.uncertain) { save({ status: 'uncertain', retryAt: Date.now() + 15_000 }); await this.reportUnknown(op); return; }
-          throw error;
+          if (error instanceof RpcError && !error.uncertain && !this.state.newSession(op.id)?.threadId) {
+            save({ status: 'failed', error: 'Codex rejected session creation.' }); throw error;
+          }
+          save({ status: 'uncertain', retryAt: Date.now() + 15_000 }); await this.reportUnknown(op); return;
         }
         // Record the acknowledged ID before validating any other returned metadata.
         if (string(thread.id)) save({ threadId: string(thread.id), status: 'known' });
@@ -356,27 +396,36 @@ export class NewSessions {
         this.verify(saved, op);
         if (this.closed) return;
         save({ status: 'topic' });
+        if (op.reset && !this.state.binding(op.threadId!)) {
+          if (!await this.clearAllowed(op.reset)) {
+            save({ retryAt: Date.now() + 5000 });
+            this.state.enqueueOwnerNotice(`notice/clear-wait/${op.id}`, op.topicId, 'The new conversation is saved. Waiting for the previous session and its deliveries to become idle before switching this topic. No replacement will be created.');
+            return;
+          }
+          this.state.resetTopic(op);
+        }
         if (op.targetTopic && !this.state.binding(op.threadId!)) {
           if (this.topicOccupied(op.targetTopic, op.id)) throw new Error('The confirmed topic is now bound or reserved by another session.');
           this.state.installTopic(op.threadId!, op.targetTopic, op.cwd!, op.topicTitle!);
         }
-        const binding = await this.topics.ensure({ id: op.threadId!, cwd: op.cwd!, projectLabel: op.kind === 'scratch' ? 'No project' : undefined });
+        const binding = op.reset ? this.state.binding(op.threadId!) : await this.topics.ensure({ id: op.threadId!, cwd: op.cwd!, projectLabel: op.kind === 'scratch' ? 'No project' : undefined });
         if (!binding) {
           await this.reportTopic(op);
           const topic = this.state.topicOperation(op.threadId!);
           save({ retryAt: topic?.status === 'retry' ? topic.retryAt : Date.now() + 10_000 }); return;
         }
         await this.connected(binding);
-        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.kind === 'scratch' ? 'New conversation without a project. Send a question or task.' : 'Session created. Send the first task.');
+        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.reset ? `Fresh conversation started.\nSession: ${binding.threadId}\n\nTelegram history is preserved. An open terminal remains on the previous session. Model and permissions use this project's Codex defaults. Send the first task.` :
+          op.kind === 'scratch' ? 'New conversation without a project. Send a question or task.' : 'Session created. Send the first task.');
         save({ status: 'ready', retryAt: 0 });
-        await this.edit(op, `Session created: ${binding.title}. Open the new topic and send the first task.`);
+        if (!op.reset) await this.edit(op, `Session created: ${binding.title}. Open the new topic and send the first task.`);
       }
     } catch (error) {
       if (op.status === 'uncertain' || op.status === 'starting') {
         save({ status: 'uncertain', retryAt: Date.now() + 30_000 }); await this.reportUnknown(op); return;
       }
       // A known ID survives a retry, including an uncertain name/resume result.
-      if (op.threadId && this.operationAllowed(op) && (error instanceof RpcError || this.closed)) {
+      if (op.threadId && this.operationAllowed(op) && (op.reset || error instanceof RpcError || this.closed)) {
         save({ retryAt: Date.now() + 15_000 });
         this.state.enqueueOwnerNotice(`notice/new-retry/${op.id}`, op.topicId, `Session ${op.threadId} has already been created. The relay will retry attachment when Codex recovers; it will not create a replacement.`);
         return;
@@ -396,7 +445,7 @@ export class NewSessions {
     if (!this.codex.nonArchivedThread || this.closed) return false;
     let changed = false;
     const loaded = new Set(loadedIds);
-    for (const op of this.state.newSessions(['ready']).filter(item => item.threadId &&
+    for (const op of this.state.newSessions(['ready']).filter(item => item.threadId && !this.state.retiredSession(item.threadId) &&
       !loaded.has(item.threadId) && (this.restoreAfter.get(item.threadId) ?? 0) <= Date.now()).slice(0, Math.max(0, 64 - loaded.size))) {
       if (!this.operationAllowed(op)) continue;
       this.restoreAfter.set(op.threadId!, Date.now() + 30_000);

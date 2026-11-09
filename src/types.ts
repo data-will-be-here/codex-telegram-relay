@@ -42,7 +42,7 @@ export interface PermissionSnapshot { settings: Json; profiles: Json[]; requirem
 export interface Codex {
   permissionCatalog?(threadId: string, cwd: string): Promise<PermissionSnapshot>;
   updatePermissions?(threadId: string, patch: PermissionPatch, expected: string): Promise<void>;
-  createThread?(cwd: string, marker: string): Promise<Json>;
+  createThread?(cwd: string, marker: string, source?: 'clear'): Promise<Json>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   storedThreads?(cwd: string): Promise<Json[]>;
   nonArchivedThread?(threadId: string): Promise<Json | undefined>;

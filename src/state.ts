@@ -27,8 +27,9 @@ export interface TopicOperation {
 }
 export interface ApprovalCard { identity: string; deliveryKey: string; status: string; }
 
-export type NewSessionPhase = 'selecting' | 'cancelled' | 'preparing' | 'starting' | 'uncertain' | 'known' | 'persisted' | 'topic' | 'ready' | 'failed';
+export type NewSessionPhase = 'selecting' | 'cancelled' | 'checking' | 'preparing' | 'starting' | 'uncertain' | 'known' | 'persisted' | 'topic' | 'ready' | 'failed';
 export interface NewSessionOperation {
+  reset?: Binding;
   id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
   choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
   reportedTopicAttempt?: string;
@@ -78,6 +79,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS approval_cards(identity TEXT PRIMARY KEY, deliveryKey TEXT NOT NULL UNIQUE, requestIdentity TEXT NOT NULL, ownerToken TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS retired_bindings(threadId TEXT PRIMARY KEY, binding TEXT NOT NULL, replacementId TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
           retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
@@ -87,6 +89,7 @@ export class State {
         CREATE INDEX IF NOT EXISTS new_sessions_token ON new_sessions(json_extract(payload,'$.token'));
         CREATE INDEX IF NOT EXISTS new_sessions_workspace ON new_sessions(json_extract(payload,'$.cwd'),status);
         UPDATE new_sessions SET status='uncertain' WHERE status='starting';
+        UPDATE new_sessions SET status='failed' WHERE status='checking';
         UPDATE topic_operations SET status='uncertain' WHERE status='creating';
         UPDATE incoming SET status='uncertain' WHERE status='dispatching';
         UPDATE outbox SET status='uncertain' WHERE status='sending';
@@ -216,6 +219,48 @@ export class State {
       (threadId ? " AND json_extract(payload,'$.threadId')=?" : '') + ' LIMIT 1').get(cwd, ...(threadId ? [threadId] : []));
   }
   workspaceLabel(cwd?: string | null): string | undefined { return cwd && this.ownsScratch(cwd) ? 'No project' : undefined; }
+  retiredSession(threadId: string): boolean { return !!this.db.prepare('SELECT 1 FROM retired_bindings WHERE threadId=?').get(threadId); }
+  resettingTopic(topicId: number): boolean {
+    return !!this.db.prepare("SELECT 1 FROM new_sessions WHERE json_extract(payload,'$.reset.topicId')=? AND status NOT IN ('ready','failed','cancelled') LIMIT 1").get(topicId);
+  }
+  historicalAnswerBinding(binding: Binding): boolean {
+    const current = this.topic(binding.topicId);
+    if (!current || current.cwd !== binding.cwd) return false;
+    let id = binding.threadId;
+    for (let depth = 0; depth < 256; depth++) {
+      if (id === current.threadId) return true;
+      const row = this.db.prepare('SELECT binding,replacementId FROM retired_bindings WHERE threadId=?').get(id);
+      if (!row) return false;
+      const saved = JSON.parse(string(row.binding)) as Binding;
+      if (saved.topicId !== binding.topicId || saved.cwd !== binding.cwd) return false;
+      id = string(row.replacementId);
+    }
+    return false;
+  }
+  sessionDeliveryBusy(threadId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM outbox WHERE sourceThreadId=? AND status IN ('pending','blocked','deferred','held','sending') LIMIT 1").get(threadId) ||
+      !!this.db.prepare("SELECT 1 FROM widget_cards WHERE threadId=? AND delivery IN ('sending','editing') LIMIT 1").get(threadId) ||
+      !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_jobs'").get() &&
+      !!this.db.prepare("SELECT 1 FROM file_jobs WHERE threadId=? AND status IN ('preparing','pending','sending') LIMIT 1").get(threadId);
+  }
+  resetTopic(operation: NewSessionOperation): Binding {
+    const old = operation.reset; const id = operation.threadId;
+    if (!old || !id) throw new Error('Invalid reset operation.');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.topic(old.topicId);
+      if (current?.threadId === id && this.retiredSession(old.threadId)) { this.db.exec('COMMIT'); return current; }
+      if (current?.threadId !== old.threadId || current.cwd !== old.cwd || this.sessionDeliveryBusy(old.threadId)) throw new Error('The previous topic is busy or its binding changed.');
+      this.db.prepare('INSERT INTO retired_bindings VALUES(?,?,?)').run(old.threadId, JSON.stringify(old), id);
+      this.db.prepare("UPDATE widget_cards SET delivery='retired' WHERE threadId=?").run(old.threadId);
+      this.db.prepare('DELETE FROM bindings WHERE threadId=?').run(old.threadId);
+      this.db.prepare("INSERT INTO bindings(threadId,topicId,cwd,title,lastTurn,sessionName) VALUES(?,?,?,?,'-',?)").run(id, old.topicId, old.cwd, old.title, operation.name ?? null);
+      this.db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').run('view/' + id, this.viewMode(old.threadId));
+      this.db.prepare('DELETE FROM topic_operations WHERE threadId IN (?,?)').run(old.threadId, id);
+      this.db.prepare('DELETE FROM replies WHERE threadId=?').run(old.threadId);
+      this.db.exec('COMMIT'); return this.binding(id)!;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   private describeBinding(binding: Binding | undefined): Binding | undefined {
     return binding ? { ...binding, ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'No project' } : {}) } : undefined;
   }
