@@ -212,6 +212,10 @@ Verified:
 
 The native server offered `accept` and `cancel` for the tested approval, rather than `decline`. The relay now renders the advertised choices and has a regression test for this case. A blank native context cannot be resumed before its first input; discovery waits for materialization instead of creating replacement sessions.
 
+## Consistent English interface (development)
+
+All relay-owned Telegram copy now uses English, including model/permission/project pickers, quota reports, recovery buttons, scratch labels and code-preview warnings. Existing behavioral tests assert the English text while retaining routing, preview completeness and one-shot approval checks. Command-menu tests verify that a previously registered Russian list is replaced independently with the same English descriptions as the default list. Native/user text remains in its original language; existing Russian reply/task-title fixtures continue to check its preservation. Persisted approval/message bodies are not rewritten or replayed to change their language.
+
 ## Session permission selection (development)
 
 The `/permissions` regression suite checks a live/custom/paginated catalog, owner/private-chat/message/topic binding, expiry, reconnect/rebind, cancellation, changed settings and managed restrictions. Full Access requires a second confirmation. Reviewer-only changes preserve the profile; profile changes preserve the reviewer. Duplicate/concurrent callbacks and uncertain writes cannot repeat the native change. Proxy transport tests assert exact field whitelists, external-settings invalidation, bounded catalog parsing and an uncertain outcome when the applied notification is absent.

@@ -69,11 +69,11 @@ test('native /permissions: confirmed profiles and reviewer persist across restar
     const sent = telegram.calls.filter(call => call.method === 'sendMessage').at(-1)!;
     const buttons = (markup: unknown): Json[] => (object(markup).inline_keyboard as Json[][]).flat();
     const click = async (data: unknown) => picker.callback({ id: String(++sequence), data }, { message_id: telegram.message }, 101);
-    const full = buttons(sent.params.reply_markup).find(button => button.text === 'Полный доступ')!; assert.ok(full);
+    const full = buttons(sent.params.reply_markup).find(button => button.text === 'Full Access')!; assert.ok(full);
     await click(full.callback_data);
     assert.equal(records.filter(record => record.method === 'thread/settings/update').length, 0, 'first click only displays confirmation');
     const confirmation = telegram.calls.filter(call => call.method === 'editMessageText').at(-1)!;
-    await click(buttons(confirmation.params.reply_markup).find(button => button.text === 'Включить полный доступ')!.callback_data);
+    await click(buttons(confirmation.params.reply_markup).find(button => button.text === 'Enable Full Access')!.callback_data);
     let snapshot = await native.permissionCatalog(threadId, project);
     assert.equal(object(snapshot.settings.activePermissionProfile).id, ':danger-full-access');
     assert.equal(snapshot.settings.approvalPolicy, 'never');

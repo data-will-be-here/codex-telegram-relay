@@ -1,5 +1,9 @@
 # Architecture and compatibility
 
+## Interface language
+
+Relay-generated controls, notices, approval-preview warnings and scratch-workspace labels use English consistently, independently of Telegram's app language. The command list has one English description per command, shared by `/help` and startup registration. Startup overwrites both the default owner-chat scope and the legacy Russian owner-chat scope with that same list, migrating existing installations without resetting pairing or permissions. Native/user text is not translated. Already persisted message/approval bodies keep their original text and delivery identity.
+
 ## Modules
 
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.

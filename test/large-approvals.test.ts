@@ -26,7 +26,7 @@ async function persistentReview() {
   return { telegram, codex, request, command, tick,
     get bridge() { return bridge; },
     get state() { return state; },
-    parts: () => telegram.sent().filter(part => string(part.text).includes('🔐 Апрув ')),
+    parts: () => telegram.sent().filter(part => string(part.text).includes('🔐 Approval ')),
     restart: async () => { state.close(); state = new State(join(temp.dir, 'state')); bridge = new Bridge(config, state, codex, telegram); await bridge.discover(); },
     drain: async () => { while (await tick() || await bridge.flushApproval()) {} },
     close: () => { state.close(); temp.close(); },
@@ -89,7 +89,7 @@ for (const kind of ['file', 'permissions'] as const) test(`large ${kind} proposa
     const proposal = JSON.parse(body.slice(body.indexOf('{'), body.lastIndexOf('}') + 1));
     if (kind === 'file') assert.equal(proposal.proposedChanges[0].diff, diff);
     else assert.deepEqual(proposal.permissions, permissions);
-    assert.doesNotMatch(body, /Message shortened|Цитата сокращена/u);
+    assert.doesNotMatch(body, /Message shortened|Quote abbreviated/u);
     const edit = f.telegram.calls.find(call => call.method === 'editMessageReplyMarkup')!;
     const data = string(object(array(array(object(edit.params.reply_markup).inline_keyboard)[0])[0]).callback_data);
     await f.bridge.update(click(410, data));
@@ -300,7 +300,7 @@ test('only explicit auxiliary source quotes are shortened, while short commands 
     f.codex.pending.add('quote');
     await f.bridge.request({ id: 'quote', method: 'item/commandExecution/requestApproval', params }); await f.drain();
     const text = f.telegram.sent().map(approvalBody).join('');
-    assert.match(text, /Код сокращён: пропущено/u);
+    assert.match(text, /Code abbreviated: omitted/u);
     assert.match(text, /source line 0/u); assert.match(text, /source line 399/u);
     assert.doesNotMatch(text, /source line 200\n/u);
     assert.match(text, /Reason after the quote/u); assert.match(text, /echo short/u);
@@ -327,10 +327,10 @@ test('inline command code and its execution-policy copy use labelled previews wi
     await f.drain(); await f.bridge.flushApproval();
     assert.equal(f.telegram.sent().length, 1, 'A code-heavy approval must fit in one readable card');
     const body = f.telegram.sent().map(approvalBody).join('');
-    assert.match(body, /Сокращённое превью/u);
-    assert.match(body, /одобряет полную команду/u);
-    assert.match(body, /Команда сокращена/u);
-    assert.match(body, /Код в правиле разрешений сокращён/u);
+    assert.match(body, /Abbreviated preview/u);
+    assert.match(body, /approves the complete command/u);
+    assert.match(body, /Command abbreviated/u);
+    assert.match(body, /Permission-rule code abbreviated/u);
     assert.match(body, /synthetic line 0/u); assert.match(body, /synthetic line 399/u);
     assert.doesNotMatch(body, /synthetic line 200/u);
     assert.ok(body.length < 6000, 'Command code must not be repeated in full in permission context');
@@ -342,7 +342,7 @@ test('inline command code and its execution-policy copy use labelled previews wi
       const source = string(part.text).slice(Number(code.offset), Number(code.offset) + Number(code.length));
       assert.ok(source.split('\n').length <= 6, 'Show only a few lines of code');
       assert.ok(string(part.text).length <= 4096);
-      assert.ok(string(part.text).slice(0, Number(code.offset)).includes('одобряет полную команду'));
+      assert.ok(string(part.text).slice(0, Number(code.offset)).includes('approves the complete command'));
     }
     assert.equal(JSON.stringify(params), original);
     const control = f.telegram.calls.find(call => call.method === 'editMessageReplyMarkup')?.params ?? f.telegram.sent().at(-1)!;
@@ -388,7 +388,7 @@ test('multiple large code examples share one compact message without reverting t
     assert.equal(entities.some(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler'), false);
     assert.ok(entities.some(entity => entity.type === 'pre'));
     assert.ok(string(part.text).includes('Example 0:')); assert.ok(string(part.text).includes('Example 7:'));
-    assert.match(string(part.text), /Фрагменты кода сокращены/u);
+    assert.match(string(part.text), /Code excerpts abbreviated/u);
     assert.equal(JSON.stringify(params), original);
   } finally { f.close(); }
 });
@@ -406,7 +406,7 @@ test('long operational arguments stay complete while single-line interpreter cod
     const body = f.telegram.sent().map(approvalBody).join('');
     assert.ok(body.includes(curl), 'Long arguments are not an inline code fragment');
     assert.ok(body.includes(data));
-    assert.equal(body.includes('Сокращённое превью'), false);
+    assert.equal(body.includes('Abbreviated preview'), false);
     let previous = f.telegram.sent().length;
     for (const [index, command] of [
       `node script.js --data '${data} -e user-data'`, `curl --data 'line1\n${data}\nlineN' https://example.com`,
@@ -416,7 +416,7 @@ test('long operational arguments stay complete while single-line interpreter cod
       await f.drain();
       const ordinary = f.telegram.sent().slice(previous).map(approvalBody).join('');
       assert.ok(ordinary.includes(command), 'Quoted data and script arguments are not interpreter flags');
-      assert.equal(ordinary.includes('Сокращённое превью'), false);
+      assert.equal(ordinary.includes('Abbreviated preview'), false);
       previous = f.telegram.sent().length;
     }
     for (const [index, command] of [
@@ -429,7 +429,7 @@ test('long operational arguments stay complete while single-line interpreter cod
     await f.drain();
     const previews = f.telegram.sent().slice(previous).map(approvalBody).join('');
     assert.equal(previews.includes(data), false);
-    assert.equal(previews.match(/Команда сокращена/gu)?.length, 4);
+    assert.equal(previews.match(/Command abbreviated/gu)?.length, 4);
     assert.equal(f.telegram.sent().slice(previous).length, 4, 'Each abbreviated code approval fits in one message');
     for (const part of f.telegram.sent().slice(previous)) {
       const entities = array(part.entities).map(object);

@@ -118,7 +118,7 @@ for (const action of ['bind', 'repair']) test(`topic recovery ${action} buttons 
     const problem = f.telegram.sent().find(m => messageBody(m).includes('Automatic creation is paused'))!;
     assert.ok(problem);
     const rows = array(object(problem.reply_markup).inline_keyboard).flatMap(r => array(r).map(object));
-    const button = rows.find(b => string(b.text).includes(action === 'bind' ? 'появился — привязать' : 'не появился'))!;
+    const button = rows.find(b => string(b.text).includes(action === 'bind' ? 'Topic appeared — bind' : 'Topic did not appear'))!;
     assert.ok(button, 'The recovery notice needs actionable buttons');
     const data = string(button.callback_data);
     const update = click(1, data); object(object(update.callback_query).message).message_thread_id = undefined;

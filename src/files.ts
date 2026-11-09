@@ -212,7 +212,7 @@ export class Files {
       }
       const changed = this.db.prepare("UPDATE file_jobs SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'").run(job.id).changes;
       if (!changed) return false;
-      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd, job.sessionName, this.ownsScratch(job.cwd, job.threadId) ? 'Без проекта' : undefined);
+      const formatted = withProjectHeader({ text: job.caption || job.name, entities: [] }, job.cwd, job.sessionName, this.ownsScratch(job.cwd, job.threadId) ? 'No project' : undefined);
       try {
         const result = object(await telegram.upload!(job.kind === 'video' ? 'sendVideo' : 'sendDocument', {
           chat_id: job.ownerId, message_thread_id: job.topicId, caption: formatted.text, caption_entities: formatted.entities,

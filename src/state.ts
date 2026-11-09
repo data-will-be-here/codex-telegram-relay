@@ -131,9 +131,9 @@ export class State {
     return !!this.db.prepare("SELECT 1 FROM new_sessions WHERE json_extract(payload,'$.cwd')=? AND json_extract(payload,'$.kind')='scratch' AND json_extract(payload,'$.threadId') IS NOT NULL AND status IN ('persisted','topic','ready')" +
       (threadId ? " AND json_extract(payload,'$.threadId')=?" : '') + ' LIMIT 1').get(cwd, ...(threadId ? [threadId] : []));
   }
-  workspaceLabel(cwd?: string | null): string | undefined { return cwd && this.ownsScratch(cwd) ? 'Без проекта' : undefined; }
+  workspaceLabel(cwd?: string | null): string | undefined { return cwd && this.ownsScratch(cwd) ? 'No project' : undefined; }
   private describeBinding(binding: Binding | undefined): Binding | undefined {
-    return binding ? { ...binding, ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'Без проекта' } : {}) } : undefined;
+    return binding ? { ...binding, ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'No project' } : {}) } : undefined;
   }
   bindings(): Binding[] { return (this.db.prepare('SELECT * FROM bindings').all() as unknown as Binding[]).map(binding => this.describeBinding(binding)!); }
   binding(threadId: string): Binding | undefined { return this.describeBinding(this.db.prepare('SELECT * FROM bindings WHERE threadId=?').get(threadId) as unknown as Binding | undefined); }

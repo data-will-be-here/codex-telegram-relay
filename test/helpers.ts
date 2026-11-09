@@ -16,7 +16,7 @@ export function messageBody(message: Json): string {
 export function approvalBody(message: Json): string {
   const review = array(message.entities).map(object).find(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler');
   return review ? string(message.text).slice(Number(review.offset), Number(review.offset) + Number(review.length)) :
-    messageBody(message).replace(/^🔐 Апрув [^\n]+\n\n/u, '');
+    messageBody(message).replace(/^🔐 Approval [^\n]+\n\n/u, '');
 }
 
 export function temporary(): { dir: string; close: () => void } {

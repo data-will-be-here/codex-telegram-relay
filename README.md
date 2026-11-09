@@ -126,7 +126,7 @@ Use one relay process per private state directory. Version 0.1.13 adds durable r
 
 Version 0.1.14 enables live rich previews by default. After restarting the relay, use `/stream off` for completed messages only, or `/stream on` to restore streaming. Pairing and existing topic bindings are preserved; Codex sessions do not need restarting.
 
-Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. Russian Telegram clients get Russian descriptions, with English as the fallback. Menu updates do not change who can access the relay.
+Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The current development UI uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.
 
 ### Agent-assisted installation
 
@@ -212,7 +212,9 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 
 ## Telegram controls
 
-Setup and each relay start synchronize the command menu with `setMyCommands` for the owner's private chat only, with English fallback and Russian descriptions. Each installation uses its own paired owner ID from local configuration. The same command list powers `/help`. Menu synchronization is optional: a failure does not stop message delivery, and the next start retries it. `doctor` remains read-only. Commands always require the configured owner in their private chat, even if someone types a command without seeing the menu.
+The current development interface uses English for all relay-generated menus, buttons, notifications and approval-preview warnings, regardless of the Telegram app language. User messages, Codex replies, question options and native descriptions keep their original language.
+
+Setup and each relay start synchronize the English command menu with `setMyCommands` for the owner's private chat only, including the legacy Russian scope so existing installations stop showing mixed languages. Each installation uses its own paired owner ID from local configuration. The same command list powers `/help`. Menu synchronization is optional: a failure does not stop message delivery, and the next start retries it. `doctor` remains read-only. Commands always require the configured owner in their private chat, even if someone types a command without seeing the menu.
 
 | Input | Behaviour |
 | --- | --- |
@@ -264,9 +266,9 @@ npm start -- new enable --scratch-root /absolute/path/to/conversations
 
 Use canonical absolute directories for overrides. Keep scratch outside Git repositories, project roots, relay private data and `CODEX_HOME`. `npm start -- new` shows effective settings; `new disable` disables new creation while keeping existing conversations usable. These commands are optional; updating an existing relay requires only loading the updated code, not a new setup step.
 
-Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **Без проекта — вопрос / исследование** (a general conversation), followed by the current available project and other known projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
+Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **No project — question / research** (a general conversation), followed by the current available project and other known projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
 
-Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **Без проекта**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
+Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **No project**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
 
 Creation uses the existing Codex connection (`thread/start` then `thread/name/set`), without a synthetic prompt or model turn. Naming saves the empty thread before its topic is created. `/model` is available before the first task. Qualified on Codex CLI 0.166.0, including empty-history reads and recovery after a separate App Server restart. Ordinary cold terminal sessions still require their first local message. Native permissions, model defaults and project configuration are inherited; Codex may initialize project trust under its own rules.
 

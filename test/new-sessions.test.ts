@@ -79,13 +79,13 @@ test('/new from topic-less owner chat creates a persistent empty scratch session
     assert.equal(completed.status, 'ready'); assert.equal(f.native.starts, 1); assert.equal(f.native.names, 1);
     assert.equal(completed.cwd, join(f.scratch, op.id)); assert.ok(existsSync(completed.cwd!));
     const binding = f.state.binding(completed.threadId!)!;
-    assert.equal(binding.lastTurn, '-'); assert.equal(binding.projectLabel, 'Без проекта'); assert.match(binding.title, /^Без проекта · /u);
+    assert.equal(binding.lastTurn, '-'); assert.equal(binding.projectLabel, 'No project'); assert.match(binding.title, /^No project · /u);
     assert.equal(f.native.writes.length, 0);
     await f.bridge.update(message(300, binding.topicId, 'Research this'));
     assert.deepEqual(f.native.writes[0], { method: 'start', params: { threadId: completed.threadId, text: 'Research this' } });
     await f.bridge.notification('turn/completed', { threadId: completed.threadId, turn: { id: 'first', status: 'completed', items: [{ type: 'agentMessage', text: 'First answer' }] } });
     await f.drain();
-    assert.ok(f.telegram.sent().some(item => string(item.text).includes('First answer') && string(item.text).startsWith('» Без проекта')));
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('First answer') && string(item.text).startsWith('» No project')));
   } finally { f.close(); }
 });
 
@@ -94,7 +94,7 @@ test('project selection preserves the originating binding and never copies histo
   try {
     f.native.sessions.push({ id: 'original-thread', cwd: f.project, name: 'Old task', status: 'idle' });
     await f.bridge.discover(); const original = f.state.binding('original-thread')!;
-    const op = await f.open(original.topicId); assert.match(op.choices[1]!.label, /Этот проект/u);
+    const op = await f.open(original.topicId); assert.match(op.choices[1]!.label, /This project/u);
     await f.choose(1); await f.bridge.workNewSession();
     assert.equal(f.state.binding('original-thread')!.topicId, original.topicId);
     assert.notEqual(f.state.binding(f.state.newSession(op.id)!.threadId!)!.topicId, original.topicId);
@@ -344,7 +344,7 @@ test('automatic project choices follow known bindings and scope without listing 
     f.state.bind('connected-thread', 777, other, 'Connected');
     const selected = await f.open(); assert.equal(selected.choices.some(choice => choice.cwd === other), false);
     f.config.sessionScope = 'all';
-    const all = await f.open(777); assert.ok(all.choices.some(choice => choice.cwd === other && /Этот проект/u.test(choice.label)));
+    const all = await f.open(777); assert.ok(all.choices.some(choice => choice.cwd === other && /This project/u.test(choice.label)));
     await f.choose(0); await f.bridge.workNewSession(); const scratch = f.state.newSession(all.id)!.cwd!;
     const next = await f.open(888); assert.equal(next.choices.some(choice => choice.cwd === scratch), false);
     assert.equal(next.choices[0]!.kind, 'scratch');
@@ -361,7 +361,7 @@ test('a known home-directory session cannot hide the general conversation option
     const op = await f.open();
     assert.equal(op.choices[0]!.kind, 'scratch');
     const keyboard = object(f.telegram.sent().at(-1)!.reply_markup).inline_keyboard as { text: string }[][];
-    assert.match(keyboard[0]![0]!.text, /Без проекта/u);
+    assert.match(keyboard[0]![0]!.text, /No project/u);
     assert.equal(op.choices.some(choice => choice.cwd === f.dir), false);
     await f.choose(0); await f.bridge.workNewSession();
     assert.equal(f.state.newSession(op.id)!.status, 'ready');

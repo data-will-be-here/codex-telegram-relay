@@ -25,7 +25,7 @@ function choices(model: Model): { text: string; settings: ModelSettings }[] {
   const tiers = new Map<string, string>([['default', '']]);
   for (const tier of advertised) if (string(tier.id) && tier.id !== 'default') tiers.set(string(tier.id), label(string(tier.name) || string(tier.id)));
   return efforts.flatMap(effort => [...tiers].map(([id, name]) => ({
-    text: `${effort ? EFFORT_NAMES.get(effort) ?? label(effort) : 'По умолчанию'}${name ? ` · ${name}` : ''}`,
+    text: `${effort ? EFFORT_NAMES.get(effort) ?? label(effort) : 'Default'}${name ? ` · ${name}` : ''}`,
     settings: { model: model.id, ...(effort === undefined ? {} : { effort }), serviceTier: id },
   })));
 }
@@ -39,25 +39,25 @@ export class ModelPicker {
   async open(binding: Binding): Promise<void> {
     for (const menu of this.menus.values()) if (!menu.busy && menu.expires < Date.now()) this.retire(menu);
     const previous = this.menus.get(binding.threadId);
-    if (previous?.busy) { this.notice(binding, 'Меню модели уже обрабатывается. Дождитесь завершения.'); return; }
+    if (previous?.busy) { this.notice(binding, 'The model menu is already being processed. Please wait.'); return; }
     if (previous) await this.close(previous);
-    if (this.menus.size >= 64) { this.notice(binding, 'Закройте одно из открытых меню моделей и повторите /model.'); return; }
+    if (this.menus.size >= 64) { this.notice(binding, 'Close an open model menu and retry /model.'); return; }
     const menu: Menu = { binding, key: `prompt/model/${randomUUID()}`, token: '', catalog: [], thread: {}, expires: Date.now() + MENU_LIFETIME,
       page: 0, actions: new Map(), busy: true };
     this.menus.set(binding.threadId, menu);
     try {
       const thread = await this.allowed(binding);
-      if (!thread) { this.retire(menu); this.notice(binding, 'Сессия недоступна для этого топика. Откройте её в Codex и отправьте /model.'); return; }
+      if (!thread) { this.retire(menu); this.notice(binding, 'The session is unavailable for this topic. Open it in Codex and send /model.'); return; }
       menu.thread = thread;
       menu.catalog = await this.catalog();
       if (this.menus.get(binding.threadId) !== menu) { this.retire(menu); return; }
-      if (!await this.allowed(binding)) { this.retire(menu); this.notice(binding, 'Сессия недоступна для этого топика. Откройте её в Codex и отправьте /model.'); return; }
+      if (!await this.allowed(binding)) { this.retire(menu); this.notice(binding, 'The session is unavailable for this topic. Open it in Codex and send /model.'); return; }
       const screen = this.screen(menu);
       this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
     } catch {
       if (this.menus.get(binding.threadId) === menu) {
         await this.close(menu);
-        this.notice(binding, 'Не удалось загрузить модели из Codex. Проверьте подключение и отправьте /model ещё раз.');
+        this.notice(binding, 'Could not load models from Codex. Check the connection and retry /model.');
       }
     } finally { menu.busy = false; }
   }
@@ -68,27 +68,27 @@ export class ModelPicker {
     const action = match && menu?.actions.get(match[2]!);
     if (!menu || !action || menu.expires < Date.now() || topicId !== menu.binding.topicId ||
         integer(message.message_id) !== this.state.promptMessage(menu.key)) {
-      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'Это меню устарело или относится к другому топику. Отправьте /model.' }); return 'done';
+      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This menu expired or belongs to another topic. Send /model.' }); return 'done';
     }
-    if (menu.busy) { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'Выбор уже обрабатывается.' }); return 'done'; }
+    if (menu.busy) { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'Your selection is already being processed.' }); return 'done'; }
     menu.busy = true;
     let writing = false;
     try {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
       const thread = await this.allowed(menu.binding);
-      if (!thread || !this.current(menu)) { await this.complete(menu, 'Сессия недоступна для этого топика. Откройте её в Codex и отправьте /model.'); return 'rejected'; }
-      if (action.kind === 'close') { await this.complete(menu, 'Выбор модели отменён.'); return 'done'; }
+      if (!thread || !this.current(menu)) { await this.complete(menu, 'The session is unavailable for this topic. Open it in Codex and send /model.'); return 'rejected'; }
+      if (action.kind === 'close') { await this.complete(menu, 'Model selection cancelled.'); return 'done'; }
       if (action.kind === 'select') {
         const fresh = (await this.catalog()).find(model => model.id === action.settings.model);
         if (!fresh || !choices(fresh).some(choice => JSON.stringify(choice.settings) === JSON.stringify(action.settings))) {
-          await this.complete(menu, 'Модель или выбранный режим больше не доступны в каталоге Codex. Отправьте /model для нового выбора.'); return 'rejected';
+          await this.complete(menu, 'The model or selected mode is no longer available in the Codex catalog. Send /model to choose again.'); return 'rejected';
         }
         const currentThread = await this.allowed(menu.binding);
-        if (!currentThread || !this.current(menu)) { await this.complete(menu, 'Сессия больше не доступна для этого топика. Отправьте /model.'); return 'rejected'; }
+        if (!currentThread || !this.current(menu)) { await this.complete(menu, 'The session is no longer available for this topic. Send /model.'); return 'rejected'; }
         menu.actions.clear(); menu.token = '';
         writing = true;
         await this.codex.updateSettings(menu.binding.threadId, action.settings);
-        await this.complete(menu, `Выбрано: ${fresh.name} · ${action.text}.\nСохранено для всех следующих запросов в этой сессии.${object(currentThread.status).type === 'active' ? '\nТекущий ответ завершится с прежними настройками.' : ''}`);
+        await this.complete(menu, `Selected: ${fresh.name} · ${action.text}.\nSaved for all following requests in this session.${object(currentThread.status).type === 'active' ? '\nThe current response will finish with its previous settings.' : ''}`);
         return 'done';
       }
       if (action.kind === 'model') { menu.selected = action.model; menu.page = 0; }
@@ -99,9 +99,9 @@ export class ModelPicker {
       return 'done';
     } catch (error) {
       const uncertain = writing && (!(error instanceof RpcError) || error.uncertain);
-      const text = uncertain ? 'Не удалось подтвердить изменение модели. Проверьте настройки в Codex перед повторным выбором. Автоматического повтора не будет.' :
-        writing ? `Codex отклонил изменение настроек. ${label(error instanceof Error ? error.message : '')}\nОтправьте /model для нового выбора.` :
-          'Не удалось открыть или обновить меню модели. Проверьте подключение и отправьте /model ещё раз.';
+      const text = uncertain ? 'The model change could not be confirmed. Check settings in Codex before choosing again. It will not be retried automatically.' :
+        writing ? `Codex rejected the settings change. ${label(error instanceof Error ? error.message : '')}\nSend /model to choose again.` :
+          'Could not open or update the model menu. Check the connection and retry /model.';
       await this.complete(menu, text);
       return uncertain ? 'uncertain' : 'rejected';
     } finally { menu.busy = false; }
@@ -137,12 +137,12 @@ export class ModelPicker {
     if (menu.page) navigation.push(button('←', { kind: 'page', page: menu.page - 1 }));
     if (menu.page + 1 < pages) navigation.push(button('→', { kind: 'page', page: menu.page + 1 }));
     if (navigation.length) rows.push(navigation);
-    const footer = menu.selected ? [button('Назад', { kind: 'back' })] : [];
-    footer.push(button(menu.selected ? 'Отмена' : 'Закрыть', { kind: 'close' })); rows.push(footer);
+    const footer = menu.selected ? [button('Back', { kind: 'back' })] : [];
+    footer.push(button(menu.selected ? 'Cancel' : 'Close', { kind: 'close' })); rows.push(footer);
     const current = [label(string(menu.thread.model)), label(string(menu.thread.reasoningEffort))].filter(Boolean).join(' · ');
-    const text = menu.selected ? `Модель: ${menu.selected.name}\nВыберите уровень рассуждений и скорость.${options.some(o => o.settings.serviceTier !== 'default') ? '\nБыстрые режимы могут расходовать больше лимитов.' : ''}` :
-      `Выберите модель для этой сессии.${current ? `\nСейчас: ${current}` : ''}`;
-    return { text: text + (pages > 1 ? `\nСтраница ${menu.page + 1}/${pages}` : ''), markup: { inline_keyboard: rows } };
+    const text = menu.selected ? `Model: ${menu.selected.name}\nChoose reasoning effort and speed.${options.some(o => o.settings.serviceTier !== 'default') ? '\nFast modes may use more of your limits.' : ''}` :
+      `Choose a model for this session.${current ? `\nCurrent: ${current}` : ''}`;
+    return { text: text + (pages > 1 ? `\nPage ${menu.page + 1}/${pages}` : ''), markup: { inline_keyboard: rows } };
   }
 
   private async edit(menu: Menu, text: string, markup: Keyboard): Promise<void> {

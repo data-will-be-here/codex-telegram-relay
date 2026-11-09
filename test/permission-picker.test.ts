@@ -23,8 +23,8 @@ test('/permissions shows live current settings and profiles without changing a s
   const f = await fixture();
   try {
     const choices = await open(f);
-    assert.ok(choices.some(item => string(item.text).includes('Работа в проекте')));
-    assert.match(string(f.telegram.sent().at(-1)!.text), /Апрувы: спрашивать меня/u);
+    assert.ok(choices.some(item => string(item.text).includes('Workspace')));
+    assert.match(string(f.telegram.sent().at(-1)!.text), /Approvals: ask me/u);
     assert.equal(f.codex.writes.length, 0);
     f.codex.permissionProfiles.push({ id: 'new-profile', allowed: true, description: 'New policy' });
     assert.ok((await open(f, 2)).some(item => item.text === 'new-profile'));
@@ -36,20 +36,20 @@ test('ordinary profiles apply immediately and preserve the separately selected r
   const f = await fixture();
   try {
     await f.codex.permissionCatalog('thread-a', f.projectA); f.codex.permissionStates.get('thread-a')!.approvalsReviewer = 'auto_review';
-    await choose(f, await open(f), 'Только чтение', 2);
+    await choose(f, await open(f), 'Read-only', 2);
     assert.deepEqual(f.codex.writes, [{ method: 'permissions', params: { threadId: 'thread-a', permissions: ':read-only', approvalPolicy: 'on-request' } }]);
     assert.equal(f.codex.permissionStates.get('thread-a')!.approvalsReviewer, 'auto_review');
-    assert.match(string(edited(f).text), /следующих запросов/u);
+    assert.match(string(edited(f).text), /following requests/u);
   } finally { f.close(); }
 });
 
 test('full access requires a distinct confirmation and duplicate clicks cannot apply it twice', async () => {
   const f = await fixture();
   try {
-    const first = await open(f); const original = string(first.find(item => item.text === 'Полный доступ')!.callback_data);
+    const first = await open(f); const original = string(first.find(item => item.text === 'Full Access')!.callback_data);
     await f.bridge.update(action(f, 2, original)); assert.equal(f.codex.writes.length, 0);
-    assert.match(string(edited(f).text), /за пределами проекта/u);
-    const confirm = string(buttons(edited(f).reply_markup).find(item => item.text === 'Включить полный доступ')!.callback_data);
+    assert.match(string(edited(f).text), /outside the project/u);
+    const confirm = string(buttons(edited(f).reply_markup).find(item => item.text === 'Enable Full Access')!.callback_data);
     await f.bridge.update(action(f, 3, original)); assert.equal(f.codex.writes.length, 0);
     await f.bridge.update(action(f, 4, confirm)); await f.bridge.update(action(f, 5, confirm));
     assert.deepEqual(f.codex.writes, [{ method: 'permissions', params: { threadId: 'thread-a', permissions: ':danger-full-access', approvalPolicy: 'never' } }]);
@@ -62,7 +62,7 @@ test('custom profiles come from Codex, show their description, and preserve exis
     f.codex.permissionProfiles = [{ id: 'audit-custom', allowed: true, description: 'Read-only audit policy' }];
     await choose(f, await open(f), 'audit-custom', 2); assert.equal(f.codex.writes.length, 0);
     assert.match(string(edited(f).text), /Read-only audit policy/u);
-    await choose(f, buttons(edited(f).reply_markup), 'Выбрать профиль', 3);
+    await choose(f, buttons(edited(f).reply_markup), 'Choose profile', 3);
     assert.deepEqual(f.codex.writes[0]!.params, { threadId: 'thread-a', permissions: 'audit-custom' });
   } finally { f.close(); }
 });
@@ -70,15 +70,15 @@ test('custom profiles come from Codex, show their description, and preserve exis
 test('reviewer selection changes only the reviewer and respects feature and managed gates', async () => {
   const f = await fixture();
   try {
-    await choose(f, await open(f), 'Проверка апрувов', 2);
-    await choose(f, buttons(edited(f).reply_markup), 'Автоматическая проверка', 3);
+    await choose(f, await open(f), 'Approval reviewer', 2);
+    await choose(f, buttons(edited(f).reply_markup), 'Automatic review', 3);
     assert.deepEqual(f.codex.writes[0]!.params, { threadId: 'thread-a', approvalsReviewer: 'auto_review' });
     f.codex.autoReview = false;
-    await choose(f, await open(f, 4), 'Проверка апрувов', 5);
-    assert.equal(buttons(edited(f).reply_markup).some(item => string(item.text).includes('Автоматическая')), false);
+    await choose(f, await open(f, 4), 'Approval reviewer', 5);
+    assert.equal(buttons(edited(f).reply_markup).some(item => string(item.text).includes('Automatic')), false);
     f.codex.autoReview = true; f.codex.permissionRequirements = { allowedApprovalsReviewers: ['user'] };
-    await choose(f, await open(f, 6), 'Проверка апрувов', 7);
-    assert.equal(buttons(edited(f).reply_markup).some(item => string(item.text).includes('Автоматическая')), false);
+    await choose(f, await open(f, 6), 'Approval reviewer', 7);
+    assert.equal(buttons(edited(f).reply_markup).some(item => string(item.text).includes('Automatic')), false);
   } finally { f.close(); }
 });
 
@@ -86,7 +86,7 @@ test('native policy changes or a withdrawn profile invalidate full-access confir
   for (const change of ['state', 'catalog', 'requirements']) {
     const f = await fixture();
     try {
-      await choose(f, await open(f), 'Полный доступ', 2);
+      await choose(f, await open(f), 'Full Access', 2);
       const confirm = string(buttons(edited(f).reply_markup)[0]!.callback_data);
       if (change === 'state') f.codex.permissionStates.get('thread-a')!.approvalsReviewer = 'auto_review';
       if (change === 'catalog') f.codex.permissionProfiles.find(profile => profile.id === ':danger-full-access')!.allowed = false;
@@ -100,10 +100,10 @@ test('unconfirmed permission writes are consumed and never automatically replaye
   const f = await fixture(); let writes = 0;
   try {
     f.codex.updatePermissions = async () => { writes++; throw new RpcError('Response lost', true); };
-    const option = string((await open(f)).find(item => string(item.text).includes('Только чтение'))!.callback_data);
+    const option = string((await open(f)).find(item => string(item.text).includes('Read-only'))!.callback_data);
     await f.bridge.update(action(f, 2, option)); await f.bridge.update(action(f, 3, option));
     assert.equal(writes, 1); assert.equal(f.state.uncertainCount(), 1);
-    assert.match(string(edited(f).text), /Автоматического повтора не будет/u);
+    assert.match(string(edited(f).text), /It will not be retried automatically/u);
   } finally { f.close(); }
 });
 
@@ -111,7 +111,7 @@ test('only the authorized owner in the original private topic/message can change
   const f = await fixture();
   try {
     await f.bridge.update(message(1, 101, '/permissions', 99)); assert.equal(f.codex.permissionReads, 0);
-    const option = string((await open(f, 2)).find(item => string(item.text).includes('Только чтение'))!.callback_data);
+    const option = string((await open(f, 2)).find(item => string(item.text).includes('Read-only'))!.callback_data);
     await f.bridge.update(click(3, option, 101, 99)); await f.bridge.update(click(4, option, 102));
     const wrong = action(f, 5, option); object(object(wrong.callback_query).message).message_id = 9999; await f.bridge.update(wrong);
     const group = action(f, 6, option); object(object(object(group.callback_query).message).chat).type = 'group'; await f.bridge.update(group);
@@ -125,7 +125,7 @@ test('cancellation, expiry and relay reconnection retire permission controls', a
   const f = await fixture(); const now = Date.now;
   try {
     const first = await open(f); const option = string(first[0]!.callback_data);
-    await choose(f, first, 'Закрыть', 2); await f.bridge.update(action(f, 3, option));
+    await choose(f, first, 'Close', 2); await f.bridge.update(action(f, 3, option));
     const second = await open(f, 4); Date.now = () => now() + 11 * 60_000;
     await f.bridge.update(action(f, 5, string(second[0]!.callback_data))); Date.now = now;
     const third = await open(f, 6); const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram); await bridge.discover();
@@ -155,7 +155,7 @@ test('profile paging and a running turn do not steer, interrupt or answer approv
     f.codex.permissionProfiles.push(...Array.from({ length: 10 }, (_, i) => ({ id: `custom-${i}`, allowed: true, description: 'Configured' })));
     await choose(f, await open(f), '→', 2);
     assert.ok(buttons(edited(f).reply_markup).some(item => string(item.text).includes('custom-9')));
-    await choose(f, await open(f, 4), 'Только чтение', 5);
+    await choose(f, await open(f, 4), 'Read-only', 5);
     assert.deepEqual(f.codex.writes.map(write => write.method), ['permissions']);
   } finally { f.close(); }
 });

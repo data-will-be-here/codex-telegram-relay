@@ -42,39 +42,39 @@ export class NewSessions {
   }
 
   async open(topicId: number | null, text: string): Promise<void> {
-    if (text !== '/new') { this.notice(topicId, 'Используйте /new без аргументов и выберите вариант кнопкой.'); return; }
-    if (this.config.newSessions?.enabled === false) { this.notice(topicId, 'Создание сессий отключено локально. Существующие разговоры продолжают работать.'); return; }
+    if (text !== '/new') { this.notice(topicId, 'Use /new without arguments and choose an option with the buttons.'); return; }
+    if (this.config.newSessions?.enabled === false) { this.notice(topicId, 'Session creation is disabled locally. Existing conversations remain available.'); return; }
     if (!this.codex.createThread || !this.codex.setThreadName || !this.codex.nonArchivedThread || !this.codex.findCreatedThread) {
-      this.notice(topicId, 'Создание сессий не поддерживается этим подключением Codex.'); return;
+      this.notice(topicId, 'This Codex connection does not support session creation.'); return;
     }
     const pending = this.state.newSessions(active).find(op => op.topicId === topicId);
     if (pending) { this.notice(topicId, pending.status === 'uncertain' ?
-      'Результат предыдущего создания пока неизвестен. Релей проверяет Codex и не повторяет создание. Проверьте Codex локально.' :
-      'Сессия уже создаётся для этого меню. Дождитесь результата; повторного создания не будет.'); return; }
+      'The previous creation outcome is unknown. The relay is checking Codex without repeating creation. Check Codex locally.' :
+      'A session is already being created for this menu. Please wait; creation will not be repeated.'); return; }
     for (const op of this.state.newSessions(['selecting']).filter(op => op.topicId === topicId || op.expires < Date.now())) {
       this.state.changeNewSession(op.id, 'selecting', { status: 'cancelled' }); this.state.cancelPrompt(op.menuKey);
     }
     if (this.state.newSessions([...active, 'selecting']).length >= 64) {
-      this.notice(topicId, 'Слишком много открытых меню или незавершённых созданий. Завершите их и повторите /new.'); return;
+      this.notice(topicId, 'Too many open menus or pending session creations. Complete them and retry /new.'); return;
     }
     const choices: NewSessionOperation['choices'] = [];
     const scratch = this.config.newSessions?.scratchRoot;
     if (scratch && this.validRoot(scratch, true, true)) {
       try { mkdirSync(scratch, { recursive: true, mode: 0o700 }); }
       catch { /* Project choices remain available when the workspace cannot be prepared. */ }
-      if (this.validRoot(scratch, true)) choices.push({ cwd: scratch, label: '💬 Без проекта — вопрос / исследование', kind: 'scratch' });
+      if (this.validRoot(scratch, true)) choices.push({ cwd: scratch, label: '💬 No project — question / research', kind: 'scratch' });
     }
     const current = topicId === null ? undefined : this.state.topic(topicId);
     const projects = this.projectPaths().filter(path => this.validRoot(path, false));
     projects.sort((a, b) => Number(b === current?.cwd) - Number(a === current?.cwd));
     for (const path of projects) choices.push({ cwd: path, kind: 'project', label:
-      `${current?.cwd === path ? '📁 Этот проект — ' : '📁 '}${clean(basename(path))} · ${clean(path)}` });
-    if (!choices.length) { this.notice(topicId, 'Не удалось подготовить папку для нового разговора. Проверьте доступ к рабочему каталогу релея на компьютере и повторите /new.'); return; }
+      `${current?.cwd === path ? '📁 This project — ' : '📁 '}${clean(basename(path))} · ${clean(path)}` });
+    if (!choices.length) { this.notice(topicId, 'Could not prepare a directory for the new conversation. Check access to the relay workspace locally and retry /new.'); return; }
     const id = randomUUID();
     const op: NewSessionOperation = { id, status: 'selecting', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
       expires: Date.now() + LIFETIME, choices, page: 0 };
     this.state.createNewSession(op);
-    this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Где начать новый разговор?', this.keyboard(op));
+    this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op));
   }
 
   private keyboard(op: NewSessionOperation): Json {
@@ -84,7 +84,7 @@ export class NewSessions {
     if (op.page > 0) navigation.push({ text: '←', callback_data: `n:${op.token}:p${op.page - 1}` });
     if ((op.page + 1) * PAGE < op.choices.length) navigation.push({ text: '→', callback_data: `n:${op.token}:p${op.page + 1}` });
     if (navigation.length) rows.push(navigation);
-    rows.push([{ text: 'Отмена', callback_data: `n:${op.token}:x` }]);
+    rows.push([{ text: 'Cancel', callback_data: `n:${op.token}:x` }]);
     return { inline_keyboard: rows };
   }
 
@@ -92,27 +92,27 @@ export class NewSessions {
     const match = /^n:([a-f0-9]{32}):(x|p\d+|\d+)$/u.exec(string(callback.data));
     const op = match ? this.state.findNewSession('token', match[1]!) : undefined;
     if (!op || op.topicId !== topicId || this.state.promptMessage(op.menuKey) !== integer(message.message_id) || op.expires < Date.now()) {
-      await this.ack(callback, 'Меню устарело или относится к другому топику. Отправьте /new.'); return;
+      await this.ack(callback, 'This menu expired or belongs to another topic. Send /new.'); return;
     }
-    if (op.status !== 'selecting') { await this.ack(callback, op.status === 'ready' ? 'Сессия уже создана.' : 'Выбор уже обработан.'); return; }
+    if (op.status !== 'selecting') { await this.ack(callback, op.status === 'ready' ? 'The session has already been created.' : 'This selection has already been processed.'); return; }
     await this.ack(callback);
     const action = match![2]!;
     if (action === 'x') {
-      if (this.state.changeNewSession(op.id, 'selecting', { status: 'cancelled' })) await this.edit(op, 'Создание отменено.');
+      if (this.state.changeNewSession(op.id, 'selecting', { status: 'cancelled' })) await this.edit(op, 'Creation cancelled.');
       return;
     }
     if (action.startsWith('p')) {
       const page = Number(action.slice(1));
       if (!Number.isSafeInteger(page) || page < 0 || page * PAGE >= op.choices.length) return;
       const next = this.state.changeNewSession(op.id, 'selecting', { page });
-      if (next) await this.edit(next, 'Где начать новый разговор?', this.keyboard(next));
+      if (next) await this.edit(next, 'Where should the new conversation start?', this.keyboard(next));
       return;
     }
     const choice = op.choices[Number(action)];
-    if (!choice || this.config.newSessions?.enabled === false || !this.choiceAllowed(choice.cwd, choice.kind)) { await this.edit(op, 'Каталог больше не разрешён. Отправьте /new.'); return; }
+    if (!choice || this.config.newSessions?.enabled === false || !this.choiceAllowed(choice.cwd, choice.kind)) { await this.edit(op, 'This directory is no longer allowed. Send /new.'); return; }
     const next = this.state.changeNewSession(op.id, 'selecting', { status: 'preparing', choices: [], kind: choice.kind, root: choice.cwd,
       cwd: choice.kind === 'scratch' ? join(choice.cwd, op.id) : choice.cwd });
-    if (next) await this.edit(next, 'Создаю сессию…');
+    if (next) await this.edit(next, 'Creating session…');
   }
 
   private async ack(callback: Json, text?: string): Promise<void> {
@@ -178,7 +178,7 @@ export class NewSessions {
   }
   private verify(thread: Json, op: NewSessionOperation): void {
     if (!string(thread.id) || thread.cwd !== op.cwd || thread.ephemeral === true || thread.parentThreadId || thread.canAcceptDirectInput === false ||
-        !['cli', 'vscode', 'appServer'].includes(string(thread.source))) throw new Error('Codex вернул неподходящую сессию. Создание не будет повторено.');
+        !['cli', 'vscode', 'appServer'].includes(string(thread.source))) throw new Error('Codex returned an ineligible session. Creation will not be repeated.');
   }
 
   async tick(): Promise<void> {
@@ -197,12 +197,12 @@ export class NewSessions {
       if (!next) throw new Error('Creation operation changed.'); op = next;
     };
     try {
-      if (this.config.newSessions?.enabled === false || !this.operationAllowed(op)) throw new Error('Каталог удалён, изменён или больше не разрешён. Проверьте настройки локально.');
+      if (this.config.newSessions?.enabled === false || !this.operationAllowed(op)) throw new Error('The directory was removed, changed or is no longer allowed. Check settings locally.');
       if (op.status === 'preparing') {
         const loaded = await this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) &&
           allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)));
-        if (loaded.length >= 64) throw new Error('Достигнут лимит 64 подключаемых сессий. Освободите место перед /new.');
-        if (op.kind === 'scratch') { if (!existsSync(op.cwd!)) mkdirSync(op.cwd!, { mode: 0o700 }); if (!this.operationAllowed(op)) throw new Error('Рабочий каталог изменился.'); }
+        if (loaded.length >= 64) throw new Error('The limit of 64 attached sessions has been reached. Free a slot before using /new.');
+        if (op.kind === 'scratch') { if (!existsSync(op.cwd!)) mkdirSync(op.cwd!, { mode: 0o700 }); if (!this.operationAllowed(op)) throw new Error('The working directory changed.'); }
         if (this.closed) return;
         save({ status: 'starting' });
         let thread: Json;
@@ -226,7 +226,7 @@ export class NewSessions {
       if (op.status === 'known') {
         const thread = await this.codex.read(op.threadId!); this.verify(thread, op);
         if (string(object(thread.status).type) === 'notLoaded' && !await this.codex.nonArchivedThread!(op.threadId!)) throw new Error('Archived thread cannot be renamed.');
-        const name = string(thread.name) || op.name || `${op.kind === 'scratch' ? 'Разговор' : clean(basename(op.cwd!))} · ${op.threadId!.slice(0, 8)}`;
+        const name = string(thread.name) || op.name || `${op.kind === 'scratch' ? 'Conversation' : clean(basename(op.cwd!))} · ${op.threadId!.slice(0, 8)}`;
         save({ name });
         if (!string(thread.name)) await this.codex.setThreadName!(op.threadId!, name);
         await this.codex.turns(op.threadId!); // A reserved path alone never qualifies a new empty session.
@@ -235,19 +235,19 @@ export class NewSessions {
       }
       if (this.closed) return;
       if (op.status === 'persisted' || op.status === 'topic') {
-        if (!this.operationAllowed(op)) throw new Error('Рабочий каталог больше не разрешён.');
+        if (!this.operationAllowed(op)) throw new Error('The working directory is no longer allowed.');
         // Only non-archived, exact-ID native threads may be resumed after a restart.
         const saved = await this.codex.nonArchivedThread!(op.threadId!);
-        if (!saved) throw new Error('Сессия архивирована или больше не доступна. Автоматическая замена отключена.');
+        if (!saved) throw new Error('The session is archived or no longer available. Automatic replacement is disabled.');
         this.verify(saved, op);
         if (this.closed) return;
         save({ status: 'topic' });
-        const binding = await this.topics.ensure({ id: op.threadId!, cwd: op.cwd!, projectLabel: op.kind === 'scratch' ? 'Без проекта' : undefined });
+        const binding = await this.topics.ensure({ id: op.threadId!, cwd: op.cwd!, projectLabel: op.kind === 'scratch' ? 'No project' : undefined });
         if (!binding) { save({ retryAt: Date.now() + 10_000 }); return; }
         await this.connected(binding);
-        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.kind === 'scratch' ? 'Новый разговор без проекта. Напишите вопрос или задачу.' : 'Сессия создана. Напишите первую задачу.');
+        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.kind === 'scratch' ? 'New conversation without a project. Send a question or task.' : 'Session created. Send the first task.');
         save({ status: 'ready', retryAt: 0 });
-        await this.edit(op, `Сессия создана: ${binding.title}. Откройте новую тему и напишите первую задачу.`);
+        await this.edit(op, `Session created: ${binding.title}. Open the new topic and send the first task.`);
       }
     } catch (error) {
       if (op.status === 'uncertain' || op.status === 'starting') {
@@ -256,16 +256,16 @@ export class NewSessions {
       // A known ID survives a retry, including an uncertain name/resume result.
       if (op.threadId && this.operationAllowed(op) && (error instanceof RpcError || this.closed)) {
         save({ retryAt: Date.now() + 15_000 });
-        this.state.enqueueOwnerNotice(`notice/new-retry/${op.id}`, op.topicId, `Сессия ${op.threadId} уже создана. Релей повторит подключение к ней после восстановления Codex; другая сессия вместо неё создаваться не будет.`);
+        this.state.enqueueOwnerNotice(`notice/new-retry/${op.id}`, op.topicId, `Session ${op.threadId} has already been created. The relay will retry attachment when Codex recovers; it will not create a replacement.`);
         return;
       }
-      save({ status: 'failed', error: 'Создание остановлено. Проверьте Codex и локальные настройки.' });
-      const text = `Создание остановлено.${op.threadId ? ` Сессия ${op.threadId} сохранена; новая вместо неё не создавалась.` : ''} Проверьте Codex и настройки на компьютере.`;
+      save({ status: 'failed', error: 'Creation stopped. Check Codex and local settings.' });
+      const text = `Creation stopped.${op.threadId ? ` Session ${op.threadId} is saved; no replacement was created.` : ''} Check Codex and local settings.`;
       this.state.enqueueOwnerNotice(`notice/new-failed/${op.id}`, op.topicId, text); await this.edit(op, text);
     }
   }
   private async reportUnknown(op: NewSessionOperation): Promise<void> {
-    const text = 'Результат создания пока не подтверждён. Релей проверяет уже созданные сессии и не повторяет запрос создания. Проверьте Codex локально.';
+    const text = 'Creation is not yet confirmed. The relay is checking existing sessions without repeating the creation request. Check Codex locally.';
     this.state.enqueueOwnerNotice(`notice/new-uncertain/${op.id}`, op.topicId, text); await this.edit(op, text);
   }
 
@@ -287,7 +287,7 @@ export class NewSessions {
       } catch (error) {
         if (error instanceof RpcError && error.uncertain) throw error;
         this.state.enqueueOwnerNotice(`notice/new-restore/${op.id}`, op.topicId,
-          `Сохранённая сессия ${op.threadId} сейчас недоступна. Проверьте её локально в Codex. Остальные сессии продолжают работать; замена не создавалась.`);
+          `Saved session ${op.threadId} is currently unavailable. Check it locally in Codex. Other sessions remain connected; no replacement was created.`);
       }
     }
     return changed;
