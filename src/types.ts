@@ -36,8 +36,12 @@ export interface RpcRequest {
 
 export interface AgentOrigin { threadId: string; name: string; }
 export interface ModelSettings { model: string; effort?: string; serviceTier: string; }
+export interface PermissionPatch { permissions?: string; approvalPolicy?: 'on-request' | 'never'; approvalsReviewer?: 'user' | 'auto_review'; }
+export interface PermissionSnapshot { settings: Json; profiles: Json[]; requirements: Json; autoReview: boolean; }
 
 export interface Codex {
+  permissionCatalog?(threadId: string, cwd: string): Promise<PermissionSnapshot>;
+  updatePermissions?(threadId: string, patch: PermissionPatch, expected: string): Promise<void>;
   createThread?(cwd: string, marker: string): Promise<Json>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   storedThreads?(cwd: string): Promise<Json[]>;

@@ -7,6 +7,68 @@ import { CodexClient, FirstMessageRequiredError, RpcError } from '../src/codex.j
 import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
+import { permissionSignature } from '../src/permission-settings.js';
+
+test('native permission catalog is live and paginated; writes use only explicit permission fields and require an applied event', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.attach('a');
+    await c.call('test/permissions', { pages: [
+      { cursor: null, response: { data: [{ id: ':workspace', allowed: true }], nextCursor: 'next' } },
+      { cursor: 'next', response: { data: [{ id: 'custom', allowed: false }], nextCursor: null } },
+    ], requirements: { allowedApprovalsReviewers: ['user'] } });
+    const snapshot = await c.permissionCatalog('a', process.cwd());
+    assert.deepEqual(snapshot.profiles.map(profile => profile.id), [':workspace', 'custom']);
+    assert.deepEqual(snapshot.requirements.allowedApprovalsReviewers, ['user']);
+    assert.equal(snapshot.autoReview, true);
+    await c.updatePermissions('a', { permissions: ':read-only', approvalPolicy: 'on-request' }, permissionSignature(snapshot.settings));
+    const saved = await c.permissionCatalog('a', process.cwd());
+    assert.equal((saved.settings.activePermissionProfile as Json).id, ':read-only');
+    assert.equal(saved.settings.approvalsReviewer, 'user');
+    await c.updatePermissions('a', { approvalsReviewer: 'auto_review' }, permissionSignature(saved.settings));
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.filter(record => record.method === 'thread/settings/update').map(record => record.params), [
+      { threadId: 'a', permissions: ':read-only', approvalPolicy: 'on-request' },
+      { threadId: 'a', approvalsReviewer: 'auto_review' },
+    ]);
+    assert.deepEqual(records.filter(record => record.method === 'thread/resume').map(record => record.params), [{ threadId: 'a', excludeTurns: true }]);
+    assert.equal(records.some(record => ['turn/start', 'turn/steer', 'config/value/write', 'thread/start'].includes(record.method)), false);
+    await assert.rejects(c.updatePermissions('a', { permissions: ':danger-full-access' }, permissionSignature(snapshot.settings)), /changed/u);
+  } finally { c.close(); }
+});
+
+test('native external settings changes invalidate confirmation and missing applied event is uncertain without a repeated write', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]); await c.attach('a');
+    const snapshot = await c.permissionCatalog('a', process.cwd());
+    await c.call('thread/settings/update', { threadId: 'a', approvalsReviewer: 'auto_review' });
+    await assert.rejects(c.updatePermissions('a', { permissions: ':danger-full-access' }, permissionSignature(snapshot.settings)), /changed/u);
+    const current = await c.permissionCatalog('a', process.cwd());
+    await c.call('test/permissions', { acknowledgementOnly: true });
+    await assert.rejects(c.updatePermissions('a', { permissions: ':read-only' }, permissionSignature(current.settings)),
+      error => error instanceof RpcError && error.uncertain);
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.equal(records.filter(record => record.method === 'thread/settings/update' && record.params.permissions).length, 1);
+  } finally { c.close(); }
+});
+
+test('permission catalogs reject missing attachment, malformed requirements and looping cursors', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await assert.rejects(c.permissionCatalog('a', process.cwd()), /unavailable/u);
+    await c.attach('a');
+    await c.call('test/permissions', { requirements: [] });
+    await assert.rejects(c.permissionCatalog('a', process.cwd()), /requirements/u);
+    await c.call('test/permissions', { requirements: {}, features: [] });
+    assert.equal((await c.permissionCatalog('a', process.cwd())).autoReview, false);
+    await c.call('test/permissions', { pages: [{ cursor: null, response: { data: [], nextCursor: 'loop' } },
+      { cursor: 'loop', response: { data: [], nextCursor: 'loop' } }] });
+    await assert.rejects(c.permissionCatalog('a', process.cwd()), /cursor/u);
+  } finally { c.close(); }
+});
 
 test('new thread creation and naming send only cwd, persistence and correlation fields', async () => {
   const c = new CodexClient();

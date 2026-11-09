@@ -1,5 +1,9 @@
 # Architecture and compatibility
 
+## Interface language
+
+Relay-generated controls, notices, approval-preview warnings and scratch-workspace labels use English consistently, independently of Telegram's app language. The command list has one English description per command, shared by `/help` and startup registration. Startup overwrites both the default owner-chat scope and the legacy Russian owner-chat scope with that same list, migrating existing installations without resetting pairing or permissions. Native/user text is not translated. Already persisted message/approval bodies keep their original text and delivery identity.
+
 ## Modules
 
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
@@ -67,6 +71,14 @@ A selected combination calls `thread/settings/update` with only `threadId`, `mod
 Controls are consumed before the native write; an ambiguous acknowledgement closes the menu without automatic replay. Startup cancels unsent old menus and a fresh connection rejects their old callbacks. Queue admission, project-scope cancellation and owner checks remain shared with other prompts. Telegram edit failure can produce a separate durable outcome notice, but never another native write. There is no fallback through a fake prompt or global configuration write when the native setter is unavailable.
 
 Protocol evidence: the [official App Server documentation](https://learn.chatgpt.com/docs/app-server) defines `model/list` and reasoning options, and identifies `default` as standard processing. `codex-cli 0.166.0 app-server generate-json-schema --experimental` additionally confirms `Model.serviceTiers`, current `Thread.model/reasoningEffort` and the experimental `ThreadSettingsUpdateParams` fields above. The public page does not currently describe that setter; compatibility beyond the qualified local schema requires acceptance testing. The actual daemon catalog was read without changing live settings. [Verification](verification.md).
+
+### Session permission selection
+
+`PermissionPicker` exposes two operations: open a session menu and handle a scoped callback. `CodexClient` retains actual permission settings from the existing `thread/resume` response and subsequent `thread/settings/updated` events. There is no additional resume or invented settings-read endpoint on menu open. Opening and every selection read all `permissionProfile/list` pages for the current cwd, `configRequirements/read` and the thread's `experimentalFeature/list`. Failed/malformed/incomplete reads fail closed. Native profile IDs are opaque; built-in IDs only supply labels and native preset approval policies. Full Access maps to `never`; read-only/workspace map to `on-request`; custom profiles preserve the existing approval policy. Reviewer changes are separate and preserve the profile/sandbox. Native validation remains authoritative, including model-dependent managed restrictions.
+
+Full Access and custom profiles require a distinct confirmation screen. Tokens rotate on every screen, expire after ten minutes and are bound to the confirmed Telegram message, topic, connection, attached root and cwd. Confirmation includes a signature of the cached native profile, complete sandbox policy, approval policy, reviewer and model/provider; local changes invalidate it. Profiles and eligibility are rechecked before applying. The setter accepts only explicit `permissions`, `approvalPolicy` and/or `approvalsReviewer` fields. It requires the matching applied-settings notification after native acknowledgement before reporting success. The callback is consumed before writing; timeout, missing notification or disconnect does not trigger replay. No settings, model turn, pending approval answer or global config write occurs during menu reads/cancellation.
+
+Qualified against Codex CLI 0.166.0's experimental schema and a real isolated App Server, using the [official permission-profile protocol](https://learn.chatgpt.com/docs/app-server) and [native auto-review behavior](https://learn.chatgpt.com/docs/sandboxing/auto-review). Older native APIs fail with an unavailable-menu notice rather than falling back to a synthetic prompt. [Verification](verification.md).
 
 ## Telegram identity and topics
 

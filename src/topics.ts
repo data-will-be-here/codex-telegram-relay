@@ -106,10 +106,10 @@ export class Topics {
     const id = threadId;
     const reason = op.status === 'uncertain' ? 'Telegram may have created its topic, but the response was not confirmed. Automatic creation is paused to avoid duplicates.' : 'Telegram rejected topic creation. Correct the bot settings before retrying.';
     const token = op.attempt.replaceAll('-', '');
-    this.state.enqueue(`topic-problem/${op.attempt}`, null, `${op.title}\n\n${reason}\nВыберите действие кнопкой ниже.\nРучное восстановление: /bind ${id} в появившемся топике; /repair ${id}, если топик не появился.`,
+    this.state.enqueue(`topic-problem/${op.attempt}`, null, `${op.title}\n\n${reason}\nChoose an action below.\nManual recovery: /bind ${id} in the topic that appeared; /repair ${id} if the topic did not appear.`,
       { inline_keyboard: [
-        [{ text: 'Топик появился — привязать', callback_data: `recover:${token}:b` }],
-        [{ text: 'Топик не появился — создать заново', callback_data: `recover:${token}:r` }],
+        [{ text: 'Topic appeared — bind', callback_data: `recover:${token}:b` }],
+        [{ text: 'Topic did not appear — create again', callback_data: `recover:${token}:r` }],
       ] }, op.cwd, id);
   }
 }

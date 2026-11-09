@@ -40,7 +40,7 @@ test('/model loads the current native catalog each time and never starts a model
     const names = buttons(f.telegram.sent().at(-1)!.reply_markup).map(b => string(b.text));
     assert.equal(f.codex.modelReads, 2);
     assert.ok(names.some(name => name.includes('new-model-from-daemon')));
-    assert.ok(names.every(name => !name.includes('model-before-update') && !/Обновить|Применить/u.test(name)));
+    assert.ok(names.every(name => !name.includes('model-before-update') && !/Refresh|Apply/u.test(name)));
     assert.equal(f.codex.writes.length, 0);
   } finally { f.close(); }
 });
@@ -56,7 +56,7 @@ test('new reasoning levels and speed IDs appear without relay changes; a model w
     assert.deepEqual(f.codex.writes[0]!.params, { threadId: 'thread-a', model: 'future-model', effort: 'future-depth', serviceTier: 'future-speed' });
     f.codex.modelCatalog = [{ ...model('standard-only', ['medium']), serviceTiers: [] }];
     options = await select(f, 5, 'standard-only');
-    assert.deepEqual(options.map(b => b.text), ['Medium', 'Назад', 'Отмена']);
+    assert.deepEqual(options.map(b => b.text), ['Medium', 'Back', 'Cancel']);
     await f.bridge.update(menuClick(f, 6, string(options[0]!.callback_data)));
     assert.equal(f.codex.writes[1]!.params.serviceTier, 'default', 'Ordinary speed must explicitly replace a previously selected Fast tier');
   } finally { f.close(); }
@@ -75,7 +75,7 @@ test('foreign senders, wrong topics, wrong messages and stale screen controls ca
     const group = click(6, choice); object(object(object(group.callback_query).message).chat).type = 'group';
     await f.bridge.update(group);
     assert.equal(f.codex.writes.length, 0);
-    const back = options.find(b => b.text === 'Назад')!;
+    const back = options.find(b => b.text === 'Back')!;
     await f.bridge.update(click(7, string(back.callback_data)));
     await f.bridge.update(click(8, choice));
     assert.equal(f.codex.writes.length, 0);
@@ -105,7 +105,7 @@ test('a removed reasoning level is rechecked before the write and never substitu
     f.codex.modelCatalog = [model('dynamic-model', ['high'])];
     await f.bridge.update(click(3, string(choice.callback_data)));
     assert.equal(f.codex.writes.length, 0);
-    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /больше не доступны/u);
+    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /no longer available/u);
   } finally { f.close(); }
 });
 
@@ -122,7 +122,7 @@ test('an uncertain native settings write is never retried by a second click or a
     const bridge = new Bridge(f.bridge.config, f.state, f.codex, f.telegram);
     await bridge.discover(); await bridge.update(click(5, choice));
     assert.equal(f.codex.writes.length, 1);
-    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /Не удалось подтвердить/u);
+    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /could not be confirmed/u);
   } finally { f.close(); }
 });
 
@@ -132,7 +132,7 @@ test('changing an active session configures following requests without steering 
     f.codex.sessions[0]!.status = 'active'; f.codex.modelCatalog = [model()];
     await f.bridge.update(click(3, string((await select(f))[0]!.callback_data)));
     assert.deepEqual(f.codex.writes.map(w => w.method), ['settings']);
-    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /Текущий ответ завершится с прежними настройками/u);
+    assert.match(string(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.text), /The current response will finish with its previous settings/u);
   } finally { f.close(); }
 });
 
@@ -151,7 +151,7 @@ test('model and settings pages remain navigable and expired or cancelled menus n
     second = buttons(f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!.params.reply_markup);
     assert.ok(second.some(b => b.text === 'future-depth'));
     const oldChoice = string(second[0]!.callback_data);
-    await f.bridge.update(menuClick(f, 5, string(second.find(b => b.text === 'Отмена')!.callback_data)));
+    await f.bridge.update(menuClick(f, 5, string(second.find(b => b.text === 'Cancel')!.callback_data)));
     await f.bridge.update(menuClick(f, 6, oldChoice));
     const options = await select(f, 8, 'dynamic-0');
     Date.now = () => now() + 11 * 60 * 1000;
@@ -187,7 +187,7 @@ test('a failed catalog read retires previous controls without showing stale mode
     await f.bridge.update(message(3, 101, '/model')); await f.drain();
     await f.bridge.update(menuClick(f, 4, choice));
     assert.equal(f.codex.writes.length, 0);
-    assert.match(string(f.telegram.sent().at(-1)!.text), /Не удалось загрузить/u);
+    assert.match(string(f.telegram.sent().at(-1)!.text), /Could not load/u);
   } finally { f.close(); }
 });
 
@@ -208,7 +208,7 @@ test('a session that becomes ineligible while the catalog loads gets a visible e
   try {
     f.codex.models = async () => { f.codex.sessions[0]!.cwd = f.dir; return [model()]; };
     await f.bridge.update(message(1, 101, '/model')); await f.drain();
-    assert.ok(f.telegram.sent().some(message => /Сессия недоступна/u.test(string(message.text))));
+    assert.ok(f.telegram.sent().some(message => /The session is unavailable/u.test(string(message.text))));
     assert.equal(f.codex.writes.length, 0);
   } finally { f.close(); }
 });
@@ -225,7 +225,7 @@ test('choosing a model opens dynamic settings and a single choice applies that e
     const options = buttons(screen.params.reply_markup);
     assert.ok(options.some(b => b.text === 'High'));
     assert.ok(options.some(b => b.text === 'Extra High'));
-    assert.ok(options.every(b => !/Обновить|Применить/u.test(string(b.text))));
+    assert.ok(options.every(b => !/Refresh|Apply/u.test(string(b.text))));
     assert.equal(f.codex.writes.length, 0, 'Opening either screen is read-only');
     const choice = options.find(b => b.text === 'Extra High · Fast')!;
     assert.ok(choice);
@@ -233,7 +233,7 @@ test('choosing a model opens dynamic settings and a single choice applies that e
     await f.bridge.update(click(4, string(choice.callback_data)));
     assert.deepEqual(f.codex.writes, [{ method: 'settings', params: { threadId: 'thread-a', model: 'dynamic-model', effort: 'xhigh', serviceTier: 'priority' } }]);
     const result = f.telegram.calls.filter(c => c.method === 'editMessageText').at(-1)!;
-    assert.match(string(result.params.text), /Сохранено для всех следующих запросов/u);
+    assert.match(string(result.params.text), /Saved for all following requests/u);
     assert.equal(buttons(result.params.reply_markup).length, 0);
   } finally { f.close(); }
 });

@@ -212,6 +212,18 @@ Verified:
 
 The native server offered `accept` and `cancel` for the tested approval, rather than `decline`. The relay now renders the advertised choices and has a regression test for this case. A blank native context cannot be resumed before its first input; discovery waits for materialization instead of creating replacement sessions.
 
+## Consistent English interface (main/dev after v0.1.19)
+
+All relay-owned Telegram copy now uses English, including model/permission/project pickers, quota reports, recovery buttons, scratch labels and code-preview warnings. Existing behavioral tests assert the English text while retaining routing, preview completeness and one-shot approval checks. Command-menu tests verify that a previously registered Russian list is replaced independently with the same English descriptions as the default list. Native/user text remains in its original language; existing Russian reply/task-title fixtures continue to check its preservation. Persisted approval/message bodies are not rewritten or replayed to change their language.
+
+## Session permission selection (main/dev after v0.1.19)
+
+The `/permissions` regression suite checks a live/custom/paginated catalog, owner/private-chat/message/topic binding, expiry, reconnect/rebind, cancellation, changed settings and managed restrictions. Full Access requires a second confirmation. Reviewer-only changes preserve the profile; profile changes preserve the reviewer. Duplicate/concurrent callbacks and uncertain writes cannot repeat the native change. Proxy transport tests assert exact field whitelists, external-settings invalidation, bounded catalog parsing and an uncertain outcome when the applied notification is absent.
+
+Local Windows validation: 302 tests, 298 passed, four platform/opt-in skips, zero failures. The separate native permission test also passed. Clean dependency installation, typecheck/build, runtime audit (zero known vulnerabilities), package allowlist check, `npm pack --dry-run` and whitespace checks passed. Cross-platform CI and actual Telegram presentation remain separate acceptance checks.
+
+Run `CODEX_RELAY_NATIVE_PERMISSIONS=1 node --test dist/test/native-permissions.test.js` after building (PowerShell: `$env:CODEX_RELAY_NATIVE_PERMISSIONS='1'`). This opt-in test starts its own native App Server with a temporary `CODEX_HOME`; it never changes the user's daemon or sessions. With Codex CLI 0.166.0, the real native test passed: Full Access needed its separate Telegram-adapter confirmation, profile/reviewer settings survived an App Server restart, no model turn was created and the temporary global config remained byte-for-byte unchanged. Telegram delivery/appearance uses an adapter in this test; a real-client check remains separate.
+
 ## Installation acceptance checklist
 
 - Configure a dedicated BotFather bot with private topics and complete owner pairing (performed for one local installation; repeat for each installation).

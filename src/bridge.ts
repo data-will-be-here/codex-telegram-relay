@@ -10,6 +10,7 @@ import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
+import { PermissionPicker } from './permission-picker.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
@@ -50,6 +51,7 @@ export class Bridge {
   private startedAt = Date.now();
   private topics: Topics;
   private models: ModelPicker;
+  private permissions: PermissionPicker;
   private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
@@ -58,7 +60,8 @@ export class Bridge {
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
-    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.modelThread(binding));
+    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
+    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
   }
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
@@ -77,7 +80,7 @@ export class Bridge {
     catch (error) { this.attached.delete(binding.threadId); throw error; }
   }
 
-  private async modelThread(binding: Binding): Promise<Json | undefined> {
+  private async settingsThread(binding: Binding): Promise<Json | undefined> {
     const eligible = (): boolean => this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
     if (!eligible()) return;
@@ -458,6 +461,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('p:')) {
+        this.state.finish(id, await this.permissions.callback(callback, message, topic)); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -481,15 +487,15 @@ export class Bridge {
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
     if (/^\/limits(?:\s|$)/u.test(text)) {
-      if (text !== '/limits') { this.notice(topicId, 'Используйте /limits без аргументов.'); return; }
+      if (text !== '/limits') { this.notice(topicId, 'Use /limits without arguments.'); return; }
       try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
-      catch { this.notice(topicId, 'Не удалось получить лимиты Codex. Проверьте подключение и вход в аккаунт Codex, затем повторите /limits.'); }
+      catch { this.notice(topicId, 'Could not load Codex limits. Check the connection and Codex sign-in, then retry /limits.'); }
       return;
     }
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; the relay sends no sandbox overrides.`); return; }
+    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
@@ -503,7 +509,7 @@ export class Bridge {
       if (command === '/bind' && !prefix && this.pendingBind) {
         const pending = this.pendingBind;
         if (pending.expires < Date.now() || this.state.topicOperation(pending.threadId)?.attempt !== pending.attempt) {
-          this.pendingBind = undefined; this.notice(topicId, 'Выбор для привязки устарел. Нажмите кнопку восстановления ещё раз.'); return;
+          this.pendingBind = undefined; this.notice(topicId, 'The binding selection expired. Press the recovery button again.'); return;
         }
         prefix = pending.threadId;
         selectedBind = pending;
@@ -525,9 +531,9 @@ export class Bridge {
         if (selectedBind) {
           const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
           if (!live || live.cwd !== session.cwd || !this.allowed(live.cwd, session.id) || this.config.ignoredThreadIds?.includes(session.id))
-            throw new Error('Сессия больше не доступна в выбранном проекте. Возобновите её в Codex и повторите восстановление.');
+            throw new Error('The session is no longer available in the selected project. Resume it in Codex and retry recovery.');
           if (this.pendingBind !== selectedBind || selectedBind.expires < Date.now() || this.state.topicOperation(session.id)?.attempt !== selectedBind.attempt)
-            throw new Error('Выбор для привязки устарел. Нажмите кнопку восстановления ещё раз.');
+            throw new Error('The binding selection expired. Press the recovery button again.');
         }
         const binding = command === '/bind' ? this.topics.bind(prefix, topicId!) : await this.topics.retry(prefix);
         if (binding) {
@@ -554,10 +560,16 @@ export class Bridge {
       if (!count) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
     }
+    if (/^\/permissions(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (!binding) { this.notice(topicId, 'Open an attached session topic and send /permissions.'); return; }
+      if (text !== '/permissions') { this.notice(topicId, 'Use /permissions and choose a mode with the buttons.'); return; }
+      await this.permissions.open(binding); return;
+    }
     if (/^\/model(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
-      if (!binding) { this.notice(topicId, 'Откройте топик подключённой сессии и отправьте /model.'); return; }
-      if (text !== '/model') { this.notice(topicId, 'Используйте /model и выберите модель кнопками.'); return; }
+      if (!binding) { this.notice(topicId, 'Open an attached session topic and send /model.'); return; }
+      if (text !== '/model') { this.notice(topicId, 'Use /model and choose a model with the buttons.'); return; }
       await this.models.open(binding); return;
     }
     const binding = topicId === null ? undefined : this.state.topic(topicId);
@@ -597,27 +609,27 @@ export class Bridge {
     const operation = match ? this.state.topicOperations().find(op => op.attempt.replaceAll('-', '') === match[1]) : undefined;
     if (!operation || topicId !== null || !['failed', 'uncertain'].includes(operation.status) ||
         integer(message.message_id) !== this.state.promptMessage(`topic-problem/${operation.attempt}`)) {
-      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'Это действие восстановления уже недоступно.' }); return;
+      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
     }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
     try {
       const session = this.topics.resolve(operation.threadId);
       const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
-      if (!live || live.cwd !== session.cwd) throw new Error('Возобновите эту сессию локально в Codex перед восстановлением топика.');
+      if (!live || live.cwd !== session.cwd) throw new Error('Resume this session locally in Codex before recovering the topic.');
       await this.codex.turns(session.id);
       const current = this.state.topicOperation(session.id);
-      if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('Состояние восстановления уже изменилось. Проверьте /sessions.');
+      if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('The recovery state has changed. Check /sessions.');
       if (match![2] === 'b') {
         this.pendingBind = { threadId: session.id, attempt: operation.attempt, expires: Date.now() + 10 * 60 * 1000 };
-        this.state.enqueue(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nОткройте появившийся топик и отправьте /bind без ID. Выбор действует 10 минут; инструкция в Codex отправлена не будет.`, null, operation.cwd, session.id);
+        this.state.enqueue(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`, null, operation.cwd, session.id);
       } else {
         const binding = await this.topics.retry(session.id);
         if (binding) {
           this.attached.delete(binding.threadId); await this.retireTopicPrompts(binding.threadId);
-          this.notice(binding.topicId, 'Топик восстановлен. Релей подключит сессию автоматически.');
+          this.notice(binding.topicId, 'Topic recovered. The relay will attach the session automatically.');
         }
       }
-    } catch (error) { this.notice(topicId, string(object(error).message) || 'Не удалось восстановить топик.'); }
+    } catch (error) { this.notice(topicId, string(object(error).message) || 'Could not recover the topic.'); }
   }
 
   private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {

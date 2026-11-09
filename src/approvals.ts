@@ -3,7 +3,7 @@ import { Lexer } from 'marked';
 import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
 import { formatMessages, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 
-const PREVIEW_NOTICE = '⚠️ Сокращённое превью. Кнопка одобряет полную команду, включая пропущенный код. Полный текст доступен в Codex.\n\n';
+const PREVIEW_NOTICE = '⚠️ Abbreviated preview. The button approves the complete command, including omitted code. The full text is available in Codex.\n\n';
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -28,8 +28,8 @@ export function approvalParts(card: string, reference: string, cwd?: string | nu
   // Reserve space for a stable request reference and counters even for very large plans.
   const chunks = formatMessages(card, true, limit - 200);
   return chunks.map((chunk, index) => {
-    const prefix = `🔐 Апрув ${reference.slice(0, 8)} · ${index + 1}/${chunks.length}\n\n` +
-      (preview ? '⚠️ Превью: кнопка одобряет полную команду в Codex.\n\n' : '');
+    const prefix = `🔐 Approval ${reference.slice(0, 8)} · ${index + 1}/${chunks.length}\n\n` +
+      (preview ? '⚠️ Preview: the button approves the complete command in Codex.\n\n' : '');
     return withProjectHeader({ text: prefix + chunk.text,
       entities: [{ type: 'expandable_blockquote', offset: prefix.length, length: chunk.text.length }] }, cwd, sessionName, projectLabel);
   });
@@ -41,7 +41,7 @@ function shortenReviewText(text: string, label: string, limit = 600): string {
   const head = lines.slice(0, 4).join('\n').slice(0, Math.floor(limit * 0.58)).replace(/[\ud800-\udbff]$/u, '');
   const tail = lines.slice(-1).join('\n').slice(-Math.floor(limit * 0.2)).replace(/^[\udc00-\udfff]/u, '');
   const omitted = Math.max(0, lines.length - head.split('\n').length - tail.split('\n').length);
-  return head + `\n[${label}: пропущено ${omitted} строк, ${text.length - head.length - tail.length} символов]\n` + tail;
+  return head + `\n[${label}: omitted ${omitted} lines, ${text.length - head.length - tail.length} characters]\n` + tail;
 }
 
 function shortenAuxiliaryQuotes(reason: string): string {
@@ -59,9 +59,9 @@ function shortenAuxiliaryQuotes(reason: string): string {
     if (token.type !== 'code' && token.type !== 'blockquote') continue;
     let shown: string;
     if (token.type === 'code' && !selected.has(token)) {
-      shown = omittedNotice ? '' : `[Фрагменты кода сокращены: пропущено ${omitted.length} блоков, ${omitted.reduce((sum, block) => sum + block.raw.length, 0)} символов. Полный текст в Codex.]\n\n`;
+      shown = omittedNotice ? '' : `[Code excerpts abbreviated: omitted ${omitted.length} blocks, ${omitted.reduce((sum, block) => sum + block.raw.length, 0)} characters. Full text in Codex.]\n\n`;
       omittedNotice = true;
-    } else shown = token.type === 'code' ? code(shortenReviewText(token.text, 'Код сокращён', budget)) + '\n\n' : shortenReviewText(token.raw, 'Цитата сокращена');
+    } else shown = token.type === 'code' ? code(shortenReviewText(token.text, 'Code abbreviated', budget)) + '\n\n' : shortenReviewText(token.raw, 'Quote abbreviated');
     result += reason.slice(offset, start) + shown;
     offset = cursor;
   }
@@ -109,16 +109,16 @@ export function approvalDisplayMessage(method: string, params: Json, agent?: Age
   if (method === 'item/commandExecution/requestApproval' && hasEmbeddedCode(string(params.command))) {
     const command = string(params.command);
     if (command) {
-      display.command = shortenReviewText(command, 'Команда сокращена');
+      display.command = shortenReviewText(command, 'Command abbreviated');
       preview = display.command !== command;
     }
     if (Array.isArray(params.proposedExecpolicyAmendment)) {
       display.proposedExecpolicyAmendment = params.proposedExecpolicyAmendment.map(value => {
         if (typeof value !== 'string') return value;
-        const shown = shortenReviewText(value, 'Код в правиле разрешений сокращён');
+        const shown = shortenReviewText(value, 'Permission-rule code abbreviated');
         if (shown !== value) {
           preview = true;
-          if (command.includes(value)) return `[Код в правиле разрешений сокращён: ${value.length} символов; см. превью команды выше, полный текст в Codex]`;
+          if (command.includes(value)) return `[Permission-rule code abbreviated: ${value.length} characters; see the command preview above; full text in Codex]`;
         }
         return shown;
       });

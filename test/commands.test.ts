@@ -16,7 +16,7 @@ class MenuTelegram extends FakeTelegram {
   }
 }
 
-test('command menus use only the owner chat, with valid English fallback and Russian descriptions shared with help', async () => {
+test('command menus use the owner chat and English descriptions in both default and legacy Russian scopes', async () => {
   const telegram = new MenuTelegram();
   const ownerId = 710007;
   assert.equal(await syncCommandMenu(telegram, ownerId), true);
@@ -24,7 +24,7 @@ test('command menus use only the owner chat, with valid English fallback and Rus
   assert.equal(sets.length, 2);
   assert.deepEqual(sets.map(c => c.params.language_code), ['', 'ru']);
   for (const call of telegram.calls) assert.deepEqual(call.params.scope, { type: 'chat', chat_id: ownerId });
-  const expected = ['help', 'status', 'limits', 'sessions', 'new', 'model', 'mode', 'stream', 'questions'];
+  const expected = ['help', 'status', 'limits', 'sessions', 'new', 'model', 'permissions', 'mode', 'stream', 'questions'];
   for (const set of sets) {
     const items = array(set.params.commands).map(object);
     assert.deepEqual(items.map(c => c.command), expected);
@@ -34,20 +34,21 @@ test('command menus use only the owner chat, with valid English fallback and Rus
       assert.ok(commandHelp().includes('/' + string(item.command)));
     }
   }
-  assert.notDeepEqual(sets[0]!.params.commands, sets[1]!.params.commands);
+  assert.deepEqual(sets[0]!.params.commands, sets[1]!.params.commands);
   assert.equal(telegram.calls.some(c => c.method === 'deleteMyCommands' || c.method === 'sendMessage'), false);
 });
 
-test('unchanged menus are not rewritten, but an outdated language list is replaced independently', async () => {
+test('unchanged menus are not rewritten, but legacy Russian descriptions are replaced independently', async () => {
   const telegram = new MenuTelegram();
   await syncCommandMenu(telegram, 42); telegram.calls.length = 0;
   assert.equal(await syncCommandMenu(telegram, 42), true);
   assert.deepEqual(telegram.calls.map(c => c.method), ['getMyCommands', 'getMyCommands']);
-  telegram.menus.set('ru', [{ command: 'obsolete', description: 'Old command' }]); telegram.calls.length = 0;
+  telegram.menus.set('ru', telegram.menus.get('')!.map(command => ({ ...object(command), description: 'Старое русское описание' }))); telegram.calls.length = 0;
   assert.equal(await syncCommandMenu(telegram, 42), true);
   const sets = telegram.calls.filter(c => c.method === 'setMyCommands');
   assert.equal(sets.length, 1); assert.equal(sets[0]!.params.language_code, 'ru');
   assert.ok(array(sets[0]!.params.commands).some(c => object(c).command === 'stream'));
+  assert.deepEqual(sets[0]!.params.commands, telegram.menus.get(''));
 });
 
 test('a failed language update cannot stop the other language or normal relay messages, and next startup repairs it', async () => {

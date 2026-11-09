@@ -4,7 +4,9 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { State } from '../src/state.js';
 import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
-import { array, object, string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings } from '../src/types.js';
+import { permissionSignature } from '../src/permission-settings.js';
+import { RpcError } from '../src/codex.js';
+import { array, object, string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings, type PermissionPatch, type PermissionSnapshot } from '../src/types.js';
 
 export function messageBody(message: Json): string {
   const text = string(message.text);
@@ -14,7 +16,7 @@ export function messageBody(message: Json): string {
 export function approvalBody(message: Json): string {
   const review = array(message.entities).map(object).find(entity => entity.type === 'expandable_blockquote' || entity.type === 'spoiler');
   return review ? string(message.text).slice(Number(review.offset), Number(review.offset) + Number(review.length)) :
-    messageBody(message).replace(/^🔐 Апрув [^\n]+\n\n/u, '');
+    messageBody(message).replace(/^🔐 Approval [^\n]+\n\n/u, '');
 }
 
 export function temporary(): { dir: string; close: () => void } {
@@ -28,6 +30,32 @@ export function temporary(): { dir: string; close: () => void } {
 }
 
 export class FakeCodex implements Codex {
+  permissionProfiles: Json[] = [':read-only', ':workspace', ':danger-full-access'].map(id => ({ id, allowed: true, description: null }));
+  permissionStates = new Map<string, Json>();
+  permissionRequirements: Json = {};
+  autoReview = true;
+  permissionReads = 0;
+  async permissionCatalog(threadId: string, cwd: string): Promise<PermissionSnapshot> {
+    this.permissionReads++;
+    let settings = this.permissionStates.get(threadId);
+    if (!settings) {
+      settings = { cwd, sandboxPolicy: { type: 'workspaceWrite' }, activePermissionProfile: { id: ':workspace' },
+        approvalPolicy: 'on-request', approvalsReviewer: 'user', model: 'test-model', modelProvider: 'openai' };
+      this.permissionStates.set(threadId, settings);
+    }
+    return structuredClone({ settings, profiles: this.permissionProfiles, requirements: this.permissionRequirements, autoReview: this.autoReview });
+  }
+  async updatePermissions(threadId: string, patch: PermissionPatch, expected: string): Promise<void> {
+    const current = this.permissionStates.get(threadId)!;
+    if (permissionSignature(current) !== expected) throw new RpcError('Settings changed', false);
+    this.writes.push({ method: 'permissions', params: { threadId, ...patch } });
+    if (patch.permissions) {
+      current.activePermissionProfile = { id: patch.permissions };
+      current.sandboxPolicy = { type: patch.permissions === ':danger-full-access' ? 'dangerFullAccess' : patch.permissions === ':read-only' ? 'readOnly' : 'workspaceWrite' };
+    }
+    if (patch.approvalPolicy) current.approvalPolicy = patch.approvalPolicy;
+    if (patch.approvalsReviewer) current.approvalsReviewer = patch.approvalsReviewer;
+  }
   async rateLimits(): Promise<Json> { return {}; }
   sessions: Session[] = [];
   histories = new Map<string, Json[]>();
