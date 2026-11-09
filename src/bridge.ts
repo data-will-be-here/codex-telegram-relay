@@ -11,6 +11,8 @@ import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
 import { PermissionPicker } from './permission-picker.js';
+import { Widgets, ViewPicker } from './widgets.js';
+import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
@@ -52,6 +54,9 @@ export class Bridge {
   private topics: Topics;
   private models: ModelPicker;
   private permissions: PermissionPicker;
+  private widgets: Widgets;
+  private views: ViewPicker;
+  private closed = false;
   private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
@@ -62,11 +67,25 @@ export class Bridge {
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
+    this.widgets = new Widgets(state, this.generation);
+    this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async binding => {
+      this.widgets.recover(binding, await this.codex.turns(binding.threadId));
+    });
   }
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
   workNewSession(): Promise<void> { return this.newSessions.tick(); }
-  close(): void { this.newSessions.close(); }
+  close(): void { this.closed = true; this.widgets.close(); this.newSessions.close(); }
+  widgetDelivery(): WidgetDeliveryGuard {
+    for (const id of this.attached) {
+      const turnId = this.state.widgetCards(id).filter(card => card.generation === this.generation && card.snapshot.finishedAt === null).at(-1)?.turnId;
+      const prompts = [...this.prompts.values()].filter(prompt => prompt.binding.threadId === id && prompt.request.params.threadId === id &&
+        (!prompt.request.params.turnId || prompt.request.params.turnId === turnId) && this.pending(prompt));
+      this.widgets.waiting(id, prompts.filter(prompt => prompt.request.method.endsWith('/requestApproval')).length,
+        prompts.filter(prompt => prompt.questions.length > 0).length);
+    }
+    return { generation: this.generation, allowed: async card => !this.closed && card.generation === this.generation && !!await this.settingsThread(card.binding) };
+  }
   private async connectCreated(binding: Binding): Promise<void> {
     if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
     if (binding.lastTurn === null) this.state.baseline(binding.threadId, '-');
@@ -81,7 +100,7 @@ export class Bridge {
   }
 
   private async settingsThread(binding: Binding): Promise<Json | undefined> {
-    const eligible = (): boolean => this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+    const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
     if (!eligible()) return;
     const thread = await this.codex.read(binding.threadId, 1000);
@@ -91,6 +110,12 @@ export class Bridge {
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
   streamEvent(method: string, params: Json): void {
+    if (['turn/started', 'turn/plan/updated', 'turn/completed', 'item/started', 'item/completed'].includes(method)) {
+      const activityThread = string(params.threadId) || string(object(params.thread).id);
+      const activityBinding = this.state.binding(activityThread);
+      if (!this.closed && activityBinding && this.attached.has(activityThread) && !this.state.topicOperation(activityThread) &&
+          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) this.widgets.observe(activityBinding, method, params);
+    }
     if (!['item/started', 'item/agentMessage/delta', 'item/completed', 'turn/completed'].includes(method)) return;
     const threadId = string(params.threadId);
     const binding = this.state.binding(threadId);
@@ -224,6 +249,7 @@ export class Bridge {
 
   async catchUp(binding: Binding): Promise<void> {
     const turns = await this.codex.turns(binding.threadId);
+    this.widgets.recover(binding, turns);
     const saved = this.state.binding(binding.threadId)?.lastTurn;
     const missed: Json[] = [];
     for (const turn of turns) {
@@ -464,6 +490,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('p:')) {
         this.state.finish(id, await this.permissions.callback(callback, message, topic)); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('v:')) {
+        await this.views.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -559,6 +588,15 @@ export class Bridge {
       }
       if (!count) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
+    }
+    if (/^\/view(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (!binding) { this.notice(topicId, 'Open an attached session topic and send /view.'); return; }
+      const choice = text.split(/\s+/u);
+      if (choice.length > 2 || choice[1] !== undefined && !['classic', 'widgets'].includes(choice[1])) {
+        this.notice(topicId, 'Use /view, /view classic or /view widgets.'); return;
+      }
+      await this.views.open(binding, choice[1] as 'classic' | 'widgets' | undefined); return;
     }
     if (/^\/permissions(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);

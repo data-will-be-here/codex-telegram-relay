@@ -8,6 +8,7 @@ const commands = [
   { command: 'new', args: '', en: 'Start a new conversation or project session' },
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed' },
   { command: 'permissions', args: '', en: 'Choose this session’s access and approval review mode' },
+  { command: 'view', args: 'classic|widgets', en: 'Choose Classic or experimental Widgets for this session' },
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews' },
   { command: 'questions', args: '', en: 'Show pending questions with answer buttons' },

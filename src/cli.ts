@@ -168,13 +168,19 @@ async function start(args: string[]): Promise<void> {
   const stop = (): void => { stopping = true; uploadStop.abort(); current?.close(); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   const output = async (): Promise<void> => {
+    let nextPreviewAt = 0;
+    let widgetFirst = true;
     while (!stopping) {
       try {
         // Order settled preview calls before permanent answers; remote timeout outcomes remain uncertain.
         // Saved answers and controls always take priority over ephemeral previews.
         if (await liveBridge?.flushApproval()) continue;
         if (await outbox.flushOne()) continue;
-        if (await liveBridge?.flushDraft()) continue;
+        if (Date.now() >= nextPreviewAt) {
+          if (!widgetFirst && await liveBridge?.flushDraft()) { widgetFirst = true; nextPreviewAt = Date.now() + 1000; continue; }
+          if (liveBridge && await outbox.flushWidget(liveBridge.widgetDelivery())) { widgetFirst = false; nextPreviewAt = Date.now() + 1000; continue; }
+          if (await liveBridge?.flushDraft()) { widgetFirst = true; nextPreviewAt = Date.now() + 1000; continue; }
+        }
         await delay(100);
       }
       catch (error) { console.error(string(object(error).message) || 'Telegram delivery failed.'); await delay(1000); }

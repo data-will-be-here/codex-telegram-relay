@@ -6,6 +6,9 @@ import { formatMessages, withoutFormatting, projectHeader, withProjectHeader, ty
 import { approvalParts } from './approvals.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
+import { WIDGET_HTML, widgetData } from './widget-template.js';
+import { widgetCaption } from './widgets.js';
+import { type WidgetDeliveryGuard } from './widget-types.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
@@ -93,6 +96,8 @@ async function boundedBody(response: Response, limit: number): Promise<Buffer> {
 class DeliveryCancelled extends Error {}
 
 export class Outbox {
+  private widgetSending = false;
+  private widgetNextAt = 0;
   constructor(private readonly state: State, private readonly telegram: Telegram,
     private readonly config: Pick<Config, 'ownerId' | 'roots' | 'sessionScope' | 'ignoredThreadIds' | 'newSessions'>, private readonly interval = 1100) {}
   private allowed(context: DeliveryContext): boolean {
@@ -108,6 +113,68 @@ export class Outbox {
     if (this.allowed(delivery) && (!delivery.key.startsWith('prompt/approval/') || this.state.approvalDeliveryActive(delivery.key))) return;
     this.state.cancelDelivery(delivery.id);
     throw new DeliveryCancelled();
+  }
+  /** Durable low-priority widget queue, serialized by the same sender as ordinary output. */
+  async flushWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
+    const now = Date.now();
+    if (this.widgetSending || now < this.widgetNextAt) return false;
+    let card = this.state.widgetCards().filter(card => card.view === 'widgets' && card.generation === guard.generation &&
+      now >= card.retryAt && (card.delivery === 'new' ? card.snapshot.finishedAt === null && now - card.createdAt >= 1000 :
+        card.delivery === 'active' && card.revision > card.sentRevision && now - card.lastSentAt >= 2500))
+      .sort((left, right) => left.lastSentAt - right.lastSentAt || left.createdAt - right.createdAt)[0];
+    if (!card) return false;
+    this.widgetSending = true;
+    try {
+      const context = { topicId: card.binding.topicId, projectCwd: card.binding.cwd, sourceThreadId: card.binding.threadId, ownerNotice: false };
+      const binding = this.state.binding(card.binding.threadId);
+      if (!this.allowed(context) || binding?.topicId !== card.binding.topicId || binding.cwd !== card.binding.cwd) {
+        this.state.widgetResult(card.id, 'retired'); return false;
+      }
+      if (!await guard.allowed(card)) {
+        this.state.widgetResult(card.id, card.delivery, now + 5000); return false;
+      }
+      // Events, detach or completion may have arrived during native authorization.
+      const fresh = this.state.widgetCards(card.binding.threadId).find(current => current.id === card!.id);
+      if (!fresh || fresh.generation !== guard.generation || !['new', 'active'].includes(fresh.delivery) ||
+          fresh.delivery === 'new' && fresh.snapshot.finishedAt !== null || !this.allowed(context)) return false;
+      card = fresh;
+      const editing = card.messageId !== null;
+      const data = widgetData(card);
+      if (!this.state.claimWidget(card.id, editing)) return false;
+      this.widgetNextAt = now + 1000;
+      try {
+        if (editing) {
+          const result = await this.telegram.call('editMessageWidgetData', { chat_id: this.config.ownerId, message_id: card.messageId, chat_data: data });
+          if (result !== true) throw new TelegramError('Widget edit receipt was not confirmed.', 0);
+          this.state.widgetDelivered(card.id, card.revision, card.messageId!, Date.now());
+        } else {
+          const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
+            html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
+            caption: widgetCaption(card), reply_markup: { inline_keyboard: [[{ text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
+          const id = integer(result.message_id);
+          if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
+          this.state.widgetDelivered(card.id, card.revision, id, Date.now());
+        }
+      } catch (error) {
+        if (editing && error instanceof TelegramError && error.status === 400 && /message is not modified/iu.test(error.message)) {
+          this.state.widgetDelivered(card.id, card.revision, card.messageId!, Date.now());
+        } else if (error instanceof TelegramError && error.status === 429) {
+          const next = Date.now() + Math.max(1, error.retryAfter ?? 3) * 1000;
+          this.widgetNextAt = next; this.state.widgetResult(card.id, editing ? 'active' : 'new', next);
+        } else if (editing && (!(error instanceof TelegramError) || error.status === 0 || error.status >= 500)) {
+          // An edit writes a complete revision to a known message; retries cannot create another card.
+          this.state.widgetResult(card.id, 'active', Date.now() + 5000);
+        } else {
+          const definite = error instanceof TelegramError && error.status >= 400 && error.status < 500;
+          this.state.widgetResult(card.id, definite ? 'disabled' : 'uncertain');
+          if (definite) this.state.setViewMode(card.binding.threadId, 'classic');
+          this.state.enqueue(`attention/widgets/${card.id}`, card.binding.topicId, definite ?
+            'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again after updating Telegram.' :
+            'Widget delivery could not be confirmed and will not be repeated. Replies and approvals continue normally. Use /view classic for the classic view.');
+        }
+      }
+      return true;
+    } finally { this.widgetSending = false; }
   }
   async flushOne(): Promise<boolean> {
     let cancelled = false;

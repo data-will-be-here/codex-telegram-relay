@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateDirectory } from './config.js';
 import { object, string, type Binding, type Json, type MessageMode } from './types.js';
+import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
@@ -72,6 +73,11 @@ export class State {
         CREATE TABLE IF NOT EXISTS approval_cards(identity TEXT PRIMARY KEY, deliveryKey TEXT NOT NULL UNIQUE, requestIdentity TEXT NOT NULL, ownerToken TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
+          delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
+          retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
+        UPDATE widget_cards SET delivery='uncertain' WHERE delivery='sending';
+        UPDATE widget_cards SET delivery='active' WHERE delivery='editing';
         CREATE INDEX IF NOT EXISTS new_sessions_status ON new_sessions(status);
         CREATE UNIQUE INDEX IF NOT EXISTS new_sessions_thread ON new_sessions(json_extract(payload,'$.threadId'));
         CREATE INDEX IF NOT EXISTS new_sessions_token ON new_sessions(json_extract(payload,'$.token'));
@@ -105,6 +111,34 @@ export class State {
   close(): void {
     this.db.close();
     if (existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
+  }
+  viewMode(threadId: string): ViewMode { return this.db.prepare('SELECT value FROM settings WHERE key=?').get('view/' + threadId)?.value === 'widgets' ? 'widgets' : 'classic'; }
+  setViewMode(threadId: string, view: ViewMode): void {
+    if (!threadId || !['classic', 'widgets'].includes(view)) throw new Error('Invalid session view.');
+    this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('view/' + threadId, view);
+  }
+  widgetCards(threadId?: string): WidgetDelivery[] {
+    return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => ({
+      ...JSON.parse(string(row.payload)), delivery: row.delivery, messageId: row.messageId, sentRevision: row.sentRevision,
+      retryAt: row.retryAt, lastSentAt: row.lastSentAt,
+    }) as WidgetDelivery);
+  }
+  saveWidget(card: WidgetCard): void {
+    this.db.prepare('INSERT INTO widget_cards(id,threadId,turnId,payload) VALUES(?,?,?,?) ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload')
+      .run(card.id, card.binding.threadId, card.turnId, JSON.stringify(card));
+    // Bounded local summaries, never full transcripts. Retain recent controls for seven days.
+    this.db.prepare("DELETE FROM widget_cards WHERE rowid IN (SELECT rowid FROM widget_cards WHERE delivery NOT IN ('sending','editing') AND CAST(json_extract(payload,'$.snapshot.updatedAt') AS INTEGER)<?)").run(Date.now() - 7 * 86400_000);
+    this.db.exec("DELETE FROM widget_cards WHERE rowid IN (SELECT rowid FROM widget_cards WHERE delivery NOT IN ('sending','editing') ORDER BY rowid DESC LIMIT -1 OFFSET 512)");
+  }
+  claimWidget(id: string, editing: boolean): boolean {
+    return !!this.db.prepare('UPDATE widget_cards SET delivery=? WHERE id=? AND delivery=?').run(editing ? 'editing' : 'sending', id, editing ? 'active' : 'new').changes;
+  }
+  widgetDelivered(id: string, revision: number, messageId: number, now: number): void {
+    this.db.prepare("UPDATE widget_cards SET delivery=CASE WHEN delivery='retired' THEN 'retired' ELSE 'active' END,messageId=?,sentRevision=MAX(sentRevision,?),retryAt=0,lastSentAt=? WHERE id=?")
+      .run(messageId, revision, now, id);
+  }
+  widgetResult(id: string, delivery: WidgetDelivery['delivery'], retryAt = 0): void {
+    this.db.prepare('UPDATE widget_cards SET delivery=?,retryAt=? WHERE id=?').run(delivery, retryAt, id);
   }
   newSessions(phases?: readonly NewSessionPhase[]): NewSessionOperation[] {
     const rows = phases ? this.db.prepare(`SELECT * FROM new_sessions WHERE status IN (${phases.map(() => '?').join(',')})`).all(...phases) : this.db.prepare('SELECT * FROM new_sessions').all();
@@ -379,7 +413,7 @@ export class State {
   uncertainCount(): number {
     const files = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_jobs'").get()
       ? Number(this.db.prepare("SELECT count(*) AS n FROM file_jobs WHERE status='uncertain'").get()?.n ?? 0) : 0;
-    return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain') AS n").get()?.n ?? 0);
+    return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain')+(SELECT count(*) FROM widget_cards WHERE delivery='uncertain') AS n").get()?.n ?? 0);
   }
   prune(): void {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;

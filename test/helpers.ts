@@ -93,7 +93,7 @@ export class FakeTelegram implements Telegram {
   async call(method: string, params: Json = {}): Promise<unknown> {
     this.calls.push({ method, params });
     if (method === 'createForumTopic') return { message_thread_id: ++this.topic };
-    if (method === 'sendMessage' || method === 'sendRichMessage') return { message_id: ++this.message };
+    if (method === 'sendMessage' || method === 'sendRichMessage' || method === 'sendWidget') return { message_id: ++this.message };
     return true;
   }
   sent(): Json[] { return this.calls.filter(c => c.method === 'sendMessage').map(c => c.params); }
