@@ -1,5 +1,13 @@
 # Verification record
 
+## Widget progress and terminal rendering
+
+Four red regressions established that widget commentary was neither shown in the card nor suppressed outside it, missed completion events stayed Working until reconnect, summaries without plan/tool rows were hidden, and terminal Last update continued growing. Production-state inspection found two known sent cards already Done with every revision acknowledged, so the user-visible stale footer was not treated as proof of a failed edit.
+
+Fixes keep bounded commentary in the card, add safe action detail, remove captions, poll quiet active cards fairly and recover missed final replies once. Additional regressions cover Classic fallback of suppressed progress, native-poll races, terminal activity cleanup and preserving a newer final baseline. No model task/settings/permission writes are introduced. Existing HTML is immutable; old cards keep their old template.
+
+Official WidgetHost/QuickJS/renderer acceptance passed 16 light/dark cases at 320/430px and 20/24/32/64 text sizes, including summary-only cards and live state changes without restart. The maximum measured height was 395.2px, with no horizontal overflow, runtime death or page errors. A live Working→Done update showed Finished unchanged across subsequent timer ticks. The real renderer initially caught an oversized 64px layout; spacing and detail visibility were fixed before acceptance. Final local suite: 341 discovered, 337 passed, four platform/opt-in skips and zero failures. Type checking, production dependency audit and package checks passed. A screenshot from the official renderer was delivered through send-file with a sent receipt. A new clearly labelled widget using the corrected HTML was then accepted and edited in the exact existing Telegram topic, without a caption, new topic, native session or model turn. The initial preflight encountered a proven pre-connect failure; a safe bounded retry succeeded. The owner then confirmed that the new card shows Done and Finished in the actual Telegram client, without the growing Last update footer.
+
 ## Post-fix widget API acceptance
 
 A separate clearly labelled diagnostic card was sent to the verified existing current-session topic with TelegramClient after the fixes. Production sendWidget returned a positive widget Message receipt and the expected message_thread_id on its first attempt; editMessageWidgetData then confirmed an update to that same message. No new topic, native session, model turn, permission or view preference was created or changed. This is direct API acceptance; appearance on the physical client remains user acceptance. The earlier unknown card was not replayed.

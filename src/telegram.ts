@@ -7,7 +7,6 @@ import { approvalParts } from './approvals.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
 import { WIDGET_HTML, widgetData } from './widget-template.js';
-import { widgetCaption } from './widgets.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 export { splitMessage } from './format.js';
 
@@ -175,7 +174,7 @@ export class Outbox {
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
             html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
-            caption: widgetCaption(card), reply_markup: { inline_keyboard: [[{ text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
+            reply_markup: { inline_keyboard: [[{ text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
           this.acceptWidgetReceipt(card.id, card.revision, id);
@@ -202,6 +201,8 @@ export class Outbox {
             this.state.enqueue(`attention/widgets/${card!.id}`, card!.binding.topicId, definite ?
             'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again when widget support is available.' :
             'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+            const progress = this.state.widgetCard(card!.binding.threadId, card!.turnId)?.snapshot.summary;
+            if (progress) this.state.enqueue(`attention/widget-progress/${card!.id}`, card!.binding.topicId, `Latest progress: ${progress}`, null, card!.binding.cwd, card!.binding.threadId);
           });
         }
       }

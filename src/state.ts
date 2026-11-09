@@ -149,7 +149,7 @@ export class State {
     return this.decodeWidget(this.db.prepare("SELECT * FROM widget_cards WHERE threadId=? AND json_extract(payload,'$.generation')=? AND json_extract(payload,'$.snapshot.finishedAt') IS NULL ORDER BY rowid DESC LIMIT 1").get(threadId, generation));
   }
   activeWidgets(generation: string): WidgetDelivery[] {
-    return this.db.prepare("SELECT * FROM widget_cards WHERE json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL AND json_extract(payload,'$.snapshot.status') IN ('working','approval','answer')")
+    return this.db.prepare("SELECT * FROM widget_cards WHERE json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL AND json_extract(payload,'$.snapshot.status') IN ('working','approval','answer','unavailable','disconnected')")
       .all(generation).map(row => this.decodeWidget(row)!);
   }
   nextWidgetDelivery(generation: string, now: number): WidgetDelivery | undefined {
@@ -254,6 +254,10 @@ export class State {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   baseline(threadId: string, turnId: string): void { this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=?').run(turnId, threadId); }
+  baselineIfCurrent(threadId: string, turnId: string, expected: string | null): void {
+    this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=? AND lastTurn IS ?').run(turnId, threadId, expected);
+  }
+  deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=?').get(key); }
   asyncAnswered(threadId: string, callId: string): boolean { return !!this.db.prepare('SELECT 1 FROM async_answers WHERE threadId=? AND callId=?').get(threadId, callId); }
   asyncAnswerIds(threadId: string): string[] { return this.db.prepare('SELECT callId FROM async_answers WHERE threadId=?').all(threadId).map(row => string(row.callId)); }
   beginAsyncAnswer(threadId: string, callId: string): boolean { return Number(this.db.prepare("INSERT OR IGNORE INTO async_answers(threadId,callId,at,status) VALUES(?,?,?,'sending')").run(threadId, callId, Date.now()).changes) > 0; }

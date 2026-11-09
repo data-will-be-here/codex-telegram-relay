@@ -2,10 +2,11 @@ import { type Binding } from './types.js';
 
 export type ViewMode = 'classic' | 'widgets';
 export type ActivityStatus = 'working' | 'approval' | 'answer' | 'done' | 'interrupted' | 'failed' | 'disconnected' | 'unavailable';
-export interface WidgetActivity { id: string; label: string; status: 'running' | 'done' | 'failed'; }
+export interface WidgetActivity { id: string; label: string; status: 'running' | 'done' | 'failed' | 'stopped'; }
 export interface WidgetSnapshot {
   status: ActivityStatus; startedAt: number | null; finishedAt: number | null; updatedAt: number;
   plan: { done: number; total: number; current?: string } | null; activities: WidgetActivity[];
+  summary?: string;
 }
 export interface WidgetCard {
   id: string; token: string; generation: string; binding: Binding; turnId: string; view: ViewMode;

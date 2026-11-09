@@ -55,6 +55,7 @@ export class Bridge {
   private models: ModelPicker;
   private permissions: PermissionPicker;
   private widgets: Widgets;
+  private widgetChecks = new Map<string, number>();
   private views: ViewPicker;
   private closed = false;
   private newSessions: NewSessions;
@@ -145,6 +146,7 @@ export class Bridge {
         const reply = this.state.reply(binding.threadId);
         return this.state.streamingEnabled() && this.attached.has(binding.threadId) && current?.topicId === binding.topicId &&
           !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+          !(['commentary', 'partial_answer'].includes(phase) && this.widgets.usesCard(binding.threadId, turnId)) &&
           (!phase || phase === 'final_answer' || this.state.messageMode() === 'all' || !!reply && (!reply.turnId || reply.turnId === turnId));
       };
       if (!eligible()) return false;
@@ -213,7 +215,38 @@ export class Bridge {
       }
       await this.discoverAgents();
       await this.flushApproval();
+      await this.reconcileWidgets();
     } finally { this.discovering = false; }
+  }
+
+  private async reconcileWidgets(): Promise<void> {
+    const now = Date.now();
+    const active = this.state.activeWidgets(this.generation).filter(card => ['new', 'active', 'sending', 'editing'].includes(card.delivery));
+    const ids = new Set(active.map(card => card.id));
+    for (const id of this.widgetChecks.keys()) if (!ids.has(id)) this.widgetChecks.delete(id);
+    const allowed = (binding: Binding): boolean => !this.closed && this.attached.has(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+    const due = active.filter(card => now - card.snapshot.updatedAt >= 15_000 && now - (this.widgetChecks.get(card.id) ?? 0) >= 15_000 && allowed(card.binding))
+      .sort((a, b) => (this.widgetChecks.get(a.id) ?? 0) - (this.widgetChecks.get(b.id) ?? 0)).slice(0, 4);
+    for (const card of due) {
+      this.widgetChecks.set(card.id, now);
+      try {
+        const turns = await this.codex.turns(card.binding.threadId, 3000);
+        const current = this.state.widgetCard(card.binding.threadId, card.turnId);
+        if (!allowed(card.binding) || current?.revision !== card.revision) continue;
+        const turnIndex = turns.findIndex(turn => turn.id === card.turnId);
+        const turn = turns[turnIndex];
+        if (turn && ['completed', 'failed', 'interrupted'].includes(string(turn.status))) {
+          const baseline = this.state.binding(card.binding.threadId)!.lastTurn;
+          const previousIndex = turns.findIndex(turn => turn.id === baseline);
+          await this.complete(card.binding, turn, { baseline, advance: baseline === null || baseline === '-' || baseline === card.turnId || previousIndex > turnIndex });
+        }
+        if (allowed(card.binding)) this.widgets.reconcile(card, turns);
+      } catch {
+        if (allowed(card.binding)) this.widgets.reconcile(card, []);
+      }
+    }
   }
 
   private async discoverAgents(): Promise<void> {
@@ -302,7 +335,7 @@ export class Bridge {
         const reply = this.state.reply(threadId);
         const matchingReply = reply && (!reply.turnId || reply.turnId === params.turnId);
         const all = this.state.messageMode() === 'all';
-        if ((all || matchingReply) && await this.stillAllowed(binding)) {
+        if ((all || matchingReply) && !this.widgets.usesCard(threadId, string(params.turnId)) && await this.stillAllowed(binding)) {
           const itemId = string(item.id) || createHash('sha256').update(string(item.text)).digest('hex');
           const key = all ? `assistant/${threadId}/${string(params.turnId)}/${itemId}` : `reply/${threadId}/${reply!.inputId}`;
           this.state.enqueue(key, binding.topicId, string(item.text));
@@ -317,21 +350,26 @@ export class Bridge {
     }
   }
 
-  private async complete(binding: Binding, turn: Json): Promise<void> {
+  private async complete(binding: Binding, turn: Json, recovery?: { baseline: string | null; advance: boolean }): Promise<void> {
     const turnId = string(turn.id);
     if (!turnId) return;
     const status = string(turn.status);
     if (!['completed', 'failed', 'interrupted'].includes(status)) return;
-    if (!await this.stillAllowed(binding)) return;
+    const previous = recovery?.baseline ?? this.state.binding(binding.threadId)?.lastTurn ?? null;
+    if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     let text = finalAnswer(turn) || this.finals.get(`${binding.threadId}/${turnId}`) || '';
     if (!text) {
-      const snapshot = (await this.codex.turns(binding.threadId)).find(t => t.id === turnId);
+      const snapshot = (await this.codex.turns(binding.threadId, recovery ? 3000 : undefined)).find(t => t.id === turnId);
       if (snapshot) text = finalAnswer(snapshot);
+      if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     }
+    const currentBinding = this.state.binding(binding.threadId);
+    if (this.closed || currentBinding?.topicId !== binding.topicId || currentBinding.cwd !== binding.cwd || this.state.topicOperation(binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) return;
     const header = status === 'completed' ? '✅ Turn finished' : status === 'interrupted' ? '⏹ Turn interrupted' : '❌ Turn failed';
     const error = string(object(turn.error).message);
-    this.state.enqueue(`final/${binding.threadId}/${turnId}`, binding.topicId, `${header}\n\n${text || error || 'See the terminal for details.'}`);
-    this.state.baseline(binding.threadId, turnId);
+    const key = `final/${binding.threadId}/${turnId}`; const exists = this.state.deliveryExists(key);
+    this.state.enqueue(key, binding.topicId, `${header}\n\n${text || error || 'See the terminal for details.'}`, null, binding.cwd, binding.threadId);
+    if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
     this.finals.delete(`${binding.threadId}/${turnId}`);
@@ -916,8 +954,8 @@ export class Bridge {
     const key = 'attention/' + createHash('sha256').update(identity).digest('hex');
     this.state.enqueue(key, binding.topicId, text);
   }
-  private async stillAllowed(binding: Binding): Promise<boolean> {
-    const current = await this.codex.read(binding.threadId);
+  private async stillAllowed(binding: Binding, timeoutMs?: number): Promise<boolean> {
+    const current = await this.codex.read(binding.threadId, timeoutMs);
     if (this.allowed(string(current.cwd), binding.threadId)) return true;
     this.attached.delete(binding.threadId);
     this.notice(binding.topicId, 'This native session moved outside your selected projects. Relaying is paused; select that project locally to reconnect it.');

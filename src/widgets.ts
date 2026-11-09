@@ -1,16 +1,33 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { type State } from './state.js';
 import { array, object, string, type Binding, type Json, type Telegram } from './types.js';
 import { widgetLabel } from './widget-template.js';
-import { projectHeader } from './format.js';
 import { type WidgetActivity, type WidgetCard, type WidgetDelivery, type ViewMode } from './widget-types.js';
 
 const finalStatuses = new Map([['completed', 'done'], ['failed', 'failed'], ['interrupted', 'interrupted']] as const);
 const millis = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value * 1000 : null;
 function activityLabel(item: Json): string | undefined {
+  const file = (path: unknown): string => widgetLabel(basename(string(path).replaceAll('\\', '/')), 64);
   if (item.type === 'commandExecution') {
-    const kinds = array(item.commandActions).map(value => object(value).type);
-    return kinds.includes('read') ? 'Read file' : kinds.includes('search') ? 'Search files' : kinds.includes('listFiles') ? 'List files' : 'Run command';
+    const actions = array(item.commandActions).map(object);
+    const read = actions.find(action => action.type === 'read');
+    if (read) return `Read file${file(read.path || read.name) ? ' · ' + file(read.path || read.name) : ''}`;
+    const search = actions.find(action => action.type === 'search');
+    if (search) return `Search files${file(search.path) ? ' · ' + file(search.path) : ''}`;
+    const list = actions.find(action => action.type === 'listFiles');
+    if (list) return `List files${file(list.path) ? ' · ' + file(list.path) : ''}`;
+    const executable = /^(?:"([^"]+)"|'([^']+)'|([^\s]+))/u.exec(string(item.command).trim());
+    const name = file(executable?.[1] || executable?.[2] || executable?.[3]).replace(/\.(?:exe|cmd)$/iu, '').toLowerCase();
+    return /^(?:node|npm|npx|pnpm|yarn|python|python3|py|powershell|pwsh|git|rg|tsc|tsx|cargo|dotnet|go|bash|sh|cmd)$/u.test(name) ? `Run command · ${name}` : 'Run command';
+  }
+  if (['mcpToolCall', 'dynamicToolCall', 'collabAgentToolCall'].includes(string(item.type))) {
+    const name = string(item.tool);
+    return /^[\w./:-]{1,128}$/u.test(name) ? `Use tool · ${widgetLabel(name, 64)}` : 'Use tool';
+  }
+  if (item.type === 'fileChange') {
+    const paths = array(item.changes).map(value => file(object(value).path)).filter(Boolean);
+    return paths.length ? `Update files · ${paths[0]}${paths.length > 1 ? ` (+${paths.length - 1})` : ''}` : 'Update files';
   }
   return new Map([['fileChange', 'Update files'], ['mcpToolCall', 'Use tool'], ['dynamicToolCall', 'Use tool'],
     ['webSearch', 'Search the web'], ['imageGeneration', 'Generate image'], ['collabAgentToolCall', 'Coordinate agents']]).get(string(item.type));
@@ -44,6 +61,10 @@ export class Widgets {
     if (method === 'turn/completed') {
       const status = finalStatuses.get(string(turn.status) as 'completed'); if (!status) return;
       card.snapshot.status = status; card.snapshot.finishedAt = millis(turn.completedAt) ?? this.now();
+      this.hydrate(card, array(turn.items)); this.settle(card);
+    } else if (card.view === 'widgets' && method.startsWith('item/') && object(params.item).type === 'agentMessage') {
+      const item = object(params.item);
+      if (['commentary', 'partial_answer'].includes(string(item.phase)) && string(item.text).trim()) card.snapshot.summary = widgetLabel(string(item.text), 160);
     } else if (card.view === 'widgets' && method === 'turn/plan/updated') {
       const raw = array(params.plan); const plan = raw.length > 512 ? [] : raw.map(object);
       card.snapshot.plan = plan.length ? { done: plan.filter(step => step.status === 'completed').length, total: plan.length,
@@ -78,6 +99,29 @@ export class Widgets {
       card.snapshot.activities = [...card.snapshot.activities.filter(activity => activity.id !== key), { id: key, label, status }].slice(-3);
     }
   }
+  private settle(card: WidgetCard): void {
+    card.snapshot.activities = card.snapshot.activities.map(activity => activity.status === 'running' ? { ...activity, status: 'stopped' } : activity);
+  }
+  usesCard(threadId: string, turnId: string): boolean {
+    const card = this.state.widgetCard(threadId, turnId);
+    return !!card && card.generation === this.generation && card.view === 'widgets' &&
+      !['uncertain', 'disabled', 'retired'].includes(card.delivery) && !['unavailable', 'disconnected'].includes(card.snapshot.status);
+  }
+  reconcile(saved: WidgetDelivery, turns: Json[]): void {
+    const current = this.state.widgetCard(saved.binding.threadId, saved.turnId);
+    if (!current || current.id !== saved.id || current.revision !== saved.revision || current.generation !== this.generation || current.snapshot.finishedAt !== null) return;
+    const turn = turns.find(turn => turn.id === saved.turnId);
+    const card: WidgetCard = current;
+    if (turn?.status === 'inProgress') {
+      if (!['approval', 'answer'].includes(card.snapshot.status)) card.snapshot.status = 'working';
+      card.snapshot.startedAt ??= millis(turn.startedAt); this.hydrate(card, array(turn.items));
+    } else {
+      const status = finalStatuses.get(string(turn?.status) as 'completed');
+      card.snapshot.status = status || 'unavailable';
+      if (status) { card.snapshot.finishedAt = millis(turn?.completedAt) ?? this.now(); this.hydrate(card, array(turn?.items)); this.settle(card); }
+    }
+    this.save(card);
+  }
   recover(binding: Binding, turns: Json[]): void {
     const active = turns.find(turn => turn.status === 'inProgress');
     for (const saved of this.state.widgetCards(binding.threadId)) {
@@ -95,7 +139,7 @@ export class Widgets {
         card.snapshot.plan = null; this.hydrate(card, array(turn.items));
       } else {
         const status = finalStatuses.get(string(turn?.status) as 'completed');
-        if (status) { card.snapshot.status = status; card.snapshot.finishedAt ??= millis(turn?.completedAt) ?? this.now(); this.hydrate(card, array(turn?.items)); }
+        if (status) { card.snapshot.status = status; card.snapshot.finishedAt ??= millis(turn?.completedAt) ?? this.now(); this.hydrate(card, array(turn?.items)); this.settle(card); }
         else card.snapshot.status = 'unavailable';
         if (saved.messageId === null) this.state.widgetResult(saved.id, 'retired');
       }
@@ -140,13 +184,13 @@ export class ViewPicker {
     if (this.menus.size >= 64) { this.notice(binding, 'Close an open view menu and retry /view.'); return; }
     const token = randomBytes(16).toString('hex'); const key = `prompt/view/${token}`;
     this.menus.set(token, { binding, key, expires: Date.now() + 10 * 60_000 });
-    this.state.enqueue(key, binding.topicId, `Session view: ${this.state.viewMode(binding.threadId) === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns. Text previews and message mode keep their existing settings.`, {
+    this.state.enqueue(key, binding.topicId, `Session view: ${this.state.viewMode(binding.threadId) === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns. Widgets keep progress in the card; final replies and approvals stay in the conversation.`, {
       inline_keyboard: [[{ text: 'Classic', callback_data: `v:${token}:c` }, { text: 'Widgets · experimental', callback_data: `v:${token}:w` }]],
     });
   }
   private apply(binding: Binding, view: ViewMode): void {
     this.state.setViewMode(binding.threadId, view);
-    this.notice(binding, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in this session. The current turn keeps its view.\n/mode controls permanent messages; /stream controls answer previews.`);
+    this.notice(binding, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in this session. The current turn keeps its view.\n${view === 'widgets' ? 'Progress stays in the card. Final replies and approvals stay in the conversation.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
   }
   async callback(callback: Json, message: Json, topic: number | null): Promise<void> {
     const match = /^v:([a-f0-9]{32}):([cw])$/u.exec(string(callback.data));
@@ -165,8 +209,4 @@ export class ViewPicker {
     if (!await this.allowed(binding)) return;
     this.apply(binding, match![2] === 'w' ? 'widgets' : 'classic');
   }
-}
-
-export function widgetCaption(card: WidgetDelivery): string {
-  return `${projectHeader(card.binding.cwd, widgetLabel(card.binding.sessionName || card.binding.threadId.slice(0, 8), 96), card.binding.projectLabel)}\nCodex activity. Final replies and approvals stay in the conversation. Use /view classic for the classic view.`;
 }

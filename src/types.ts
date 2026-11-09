@@ -55,7 +55,7 @@ export interface Codex {
   list(eligible?: (session: Session) => boolean): Promise<Session[]>;
   attach(threadId: string): Promise<Json>;
   read(threadId: string, timeoutMs?: number): Promise<Json>;
-  turns(threadId: string): Promise<Json[]>;
+  turns(threadId: string, timeoutMs?: number): Promise<Json[]>;
   start(threadId: string, text: string | UserInput[]): Promise<unknown>;
   steer(threadId: string, turnId: string, text: string | UserInput[]): Promise<unknown>;
   respond(id: string | number, result: Json): Promise<void>;

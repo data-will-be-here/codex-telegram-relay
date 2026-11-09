@@ -310,10 +310,10 @@ export class CodexClient extends EventEmitter implements Codex {
     if (thread.id === threadId) this.cachePermissions(threadId, { ...result, sandboxPolicy: result.sandbox });
     return thread;
   }
-  async turns(threadId: string): Promise<Json[]> {
+  async turns(threadId: string, timeoutMs?: number): Promise<Json[]> {
     try {
       // Display summaries retain agent replies while excluding enormous historical tool outputs.
-      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' })).data).map(object);
+      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' }, timeoutMs)).data).map(object);
     } catch (error) {
       // A reserved rollout path is not proof of materialization. Keep this state distinct from readable empty history.
       if (error instanceof RpcError && !error.uncertain &&
