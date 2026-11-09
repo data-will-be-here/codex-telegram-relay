@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ### Why use it?
 
-- **Start a separate conversation (development).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
+- **Start a separate conversation (main/dev after v0.1.19).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
 - **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
@@ -64,7 +64,7 @@ Your Telegram bot / private project topics
 - Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
   Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
-- Native sandbox, network, approval and instruction settings are inherited. `/model` explicitly changes this session's model settings; `/permissions` (dev) explicitly changes its permission profile or approval reviewer for following requests.
+- Native sandbox, network, approval and instruction settings are inherited. `/model` explicitly changes this session's model settings; `/permissions` (main/dev after v0.1.19) explicitly changes its permission profile or approval reviewer for following requests.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 Previews share roughly one update per second across the private chat; simultaneous sessions and network delays can slow individual topics. Incomplete formatting may change layout while text arrives. Very long previews show their latest part, while permanent answers retain all parts within the existing 40,000 UTF-16-unit source limit. Drafts are temporary; permanent sends retain the existing uncertainty/recovery rules. [Streaming details](docs/architecture.md#live-answer-previews).
@@ -126,7 +126,7 @@ Use one relay process per private state directory. Version 0.1.13 adds durable r
 
 Version 0.1.14 enables live rich previews by default. After restarting the relay, use `/stream off` for completed messages only, or `/stream on` to restore streaming. Pairing and existing topic bindings are preserved; Codex sessions do not need restarting.
 
-Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The current development UI uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.
+Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The main/dev UI after v0.1.19 uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.
 
 ### Agent-assisted installation
 
@@ -212,7 +212,7 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 
 ## Telegram controls
 
-The current development interface uses English for all relay-generated menus, buttons, notifications and approval-preview warnings, regardless of the Telegram app language. User messages, Codex replies, question options and native descriptions keep their original language.
+The main/dev interface after v0.1.19 uses English for all relay-generated menus, buttons, notifications and approval-preview warnings, regardless of the Telegram app language. User messages, Codex replies, question options and native descriptions keep their original language.
 
 Setup and each relay start synchronize the English command menu with `setMyCommands` for the owner's private chat only, including the legacy Russian scope so existing installations stop showing mixed languages. Each installation uses its own paired owner ID from local configuration. The same command list powers `/help`. Menu synchronization is optional: a failure does not stop message delivery, and the next start retries it. `doctor` remains read-only. Commands always require the configured owner in their private chat, even if someone types a command without seeing the menu.
 
@@ -220,7 +220,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
-| `/new` | Create a conversation without a project, or in a connected project (development) |
+| `/new` | Create a conversation without a project, or in a connected project (main/dev after v0.1.19) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -229,7 +229,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
 | `/model` | Choose this session's model, reasoning effort and speed |
-| `/permissions` | Show and change this session's native permissions (dev) |
+| `/permissions` | Show and change this session's native permissions (main/dev after v0.1.19) |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
@@ -241,7 +241,7 @@ Topic-creation failure notices offer “Topic appeared — bind” and “Topic 
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
 
-## Session permissions with /permissions (development)
+## Session permissions with /permissions (main/dev after v0.1.19)
 
 Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. Typical profiles are Read-only, Workspace and Full Access; custom profiles appear automatically. Managed restrictions remain authoritative.
 
@@ -251,7 +251,7 @@ The separate approval-reviewer screen offers manual or native automatic review w
 
 Opening, paging and cancelling never change settings. Buttons expire after ten minutes and belong only to the original message, topic and connection. A local settings change invalidates an earlier selection. Unknown write outcomes are never automatically repeated: check permissions in Codex before another selection. [Protocol and verification](docs/architecture.md#session-permission-selection).
 
-## New conversations with /new (development)
+## New conversations with /new (main/dev after v0.1.19)
 
 `/new` works out of the box, including existing installations without a `newSessions` configuration section. The relay automatically prepares `codex-telegram-conversations` beside its private data directory, keeping workspace files separate from the bot token and state database. If that location lies inside a Git repository, the default is `~/Codex/Conversations`. No `new enable` or manual directory creation is required.
 
