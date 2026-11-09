@@ -255,6 +255,8 @@ The card uses Telegram's message-bubble palette and native text tokens, includin
 
 The implementation targets production Bot API 10.4/private topics. Actual rendering depends on the Telegram client. Every card includes a caption and an ordinary `Classic mode` button for fallback. A definite widget rejection selects Classic for that session; normal replies remain usable. Unknown initial sends are not repeated. Reconnect updates known cards only after checking their session route. Previously observed terminal states stay terminal; an unavailable structured plan is hidden until a fresh native plan event arrives. Uncertain receipts remain protected from pruning; at 512 unresolved/live records, new card admission pauses with a notice rather than evicting receipt identities. [Protocol and validation](docs/architecture.md#activity-widgets).
 
+Proven connection failures before a widget request is sent are retried after three seconds. If an initial send has an unknown outcome, it is never replayed automatically and Classic is selected for following turns. `/view widgets` enables future cards. Safe diagnostic categories are retained locally; raw transport errors and bot URLs are not stored.
+
 ## Session permissions with /permissions (main/dev after v0.1.19)
 
 Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. Typical profiles are Read-only, Workspace and Full Access; custom profiles appear automatically. Managed restrictions remain authoritative.
@@ -287,6 +289,8 @@ Each general conversation uses a persistent `<scratchRoot>/<operation-id>` direc
 Creation uses the existing Codex connection (`thread/start` then `thread/name/set`), without a synthetic prompt or model turn. Naming saves the empty thread before its topic is created. `/model` is available before the first task. Qualified on Codex CLI 0.166.0, including empty-history reads and recovery after a separate App Server restart. Ordinary cold terminal sessions still require their first local message. Native permissions, model defaults and project configuration are inherited; Codex may initialize project trust under its own rules.
 
 The computer, relay and background Codex process must be running; a terminal window per conversation and the Windows GUI app are unnecessary. The current proxy does not start the daemon. Creation runs beside messaging and uploads. Duplicate clicks cannot repeat a start. Lost responses are reconciled by exact operation metadata, never automatically retried as a new start. Known IDs survive naming/topic failures; uncertain Telegram topic creation uses `/bind` and `/repair`. Archived sessions are not unarchived or replaced. [Protocol and recovery](docs/architecture.md#new-conversation-creation).
+
+If Telegram rejects topic creation after Codex has already created a session, the original `/new` menu shows the saved session ID and topic recovery actions. Repeating `/new` returns to those actions. Retry creates only a Telegram topic for the same session; `/bind` can connect an existing empty topic. A proven connection failure before sending is retried after three seconds. An unknown delivery outcome requires checking Telegram before an explicit retry.
 
 ## Account limits
 

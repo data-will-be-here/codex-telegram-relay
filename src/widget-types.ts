@@ -14,5 +14,6 @@ export interface WidgetCard {
 export interface WidgetDelivery extends WidgetCard {
   delivery: 'new' | 'sending' | 'active' | 'editing' | 'uncertain' | 'disabled' | 'retired';
   messageId: number | null; sentRevision: number; retryAt: number; lastSentAt: number;
+  failure: string | null;
 }
 export interface WidgetDeliveryGuard { generation: string; allowed: (card: WidgetDelivery) => Promise<boolean>; }

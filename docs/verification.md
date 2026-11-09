@@ -1,5 +1,11 @@
 # Verification record
 
+## Development: topic recovery and widget transport failures
+
+Regression tests reproduce a scratch session already created in Codex while Telegram rejects its topic, and verify recovery controls in the original menu, no repeated background prompt, rejection of cross-topic callbacks and retry using the same native session. Connection classification tests distinguish DNS/connect failures from resets, response-body errors and ambiguous aggregate errors. Widgets retry proven pre-connect failures after three seconds, preserve known message receipts and retry outcomes across temporary local persistence errors, and never replay an unknown initial send. Bounded failure categories are stored without transport causes or credential-bearing URLs. Unknown sends select Classic for following turns; explicit `/view widgets` enables future cards without replaying the uncertain card.
+
+Final local validation: 325 tests discovered, 321 passed, four platform/opt-in skips, zero failures. Clean installation, typecheck, production dependency audit and package checks passed. The exact local relay process was restarted after checking there were no in-flight writes. A deliberate retry for an existing definitely rejected topic first hit a proven pre-connect failure, then the normal worker retried and received `BOT_TOPIC_WRONG_HOME` again. The native session ID remained unchanged, the originating menu was updated, and its old uncertain widget admission remained consumed. Bot topic mode was confirmed enabled; the exact undocumented server refusal remains unresolved.
+
 ## Development: home-directory project collision (2026-11-09)
 
 A binding for the user's home directory appeared in automatic project candidates. It was correctly excluded from project buttons because it contains private relay/Codex data, but still participated in scratch overlap validation. This incorrectly suppressed the general-conversation choice under AppData.

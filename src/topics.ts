@@ -2,7 +2,7 @@ import { basename } from 'node:path';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { State } from './state.js';
 import { TelegramError, isMissingTopic } from './telegram.js';
-import { integer, object, type Binding, type Session, type Telegram } from './types.js';
+import { integer, object, type Binding, type Json, type Session, type Telegram } from './types.js';
 
 type TopicSession = Pick<Session, 'id' | 'cwd'> & { projectLabel?: string | undefined };
 
@@ -35,8 +35,12 @@ export class Topics {
     } catch (error) {
       if (error instanceof TelegramError && error.status === 429) {
         this.state.topicResult(session.id, attempt.attempt, 'retry', Date.now() + Math.max(error.retryAfter ?? 3, 1) * 1000);
+      } else if (error instanceof TelegramError && error.notSent) {
+        this.state.topicResult(session.id, attempt.attempt, 'retry', Date.now() + 3000, 'Telegram could not connect. No topic request was sent; retrying.');
       } else {
-        this.state.topicResult(session.id, attempt.attempt, error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain');
+        const code = error instanceof TelegramError ? /\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b/u.exec(error.message)?.[1] : undefined;
+        const summary = error instanceof TelegramError ? `Telegram topic request failed (${error.status}${code ? ', ' + code : ''}).` : 'Topic creation was not confirmed.';
+        this.state.topicResult(session.id, attempt.attempt, error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain', 0, summary);
         this.problem(session.id);
       }
       return undefined;
@@ -101,15 +105,19 @@ export class Topics {
     return session;
   }
 
-  private problem(threadId: string): void {
+  recovery(threadId: string): { text: string; markup: Json } {
     const op = this.state.topicOperation(threadId)!;
     const id = threadId;
-    const reason = op.status === 'uncertain' ? 'Telegram may have created its topic, but the response was not confirmed. Automatic creation is paused to avoid duplicates.' : 'Telegram rejected topic creation. Correct the bot settings before retrying.';
+    const reason = op.status === 'uncertain' ? 'Telegram may have created its topic, but the response was not confirmed. Automatic creation is paused to avoid duplicates.' : 'Telegram rejected topic creation. The saved Codex session has not been replaced.';
     const token = op.attempt.replaceAll('-', '');
-    this.state.enqueue(`topic-problem/${op.attempt}`, null, `${op.title}\n\n${reason}\nChoose an action below.\nManual recovery: /bind ${id} in the topic that appeared; /repair ${id} if the topic did not appear.`,
-      { inline_keyboard: [
+    return { text: `${op.title}\n\n${reason}${op.error ? '\n' + op.error : ''}\nChoose an action below.\nManual recovery: create/open an empty topic and send /bind ${id}; /repair ${id} retries only topic creation.`,
+      markup: { inline_keyboard: [
         [{ text: 'Topic appeared — bind', callback_data: `recover:${token}:b` }],
         [{ text: 'Topic did not appear — create again', callback_data: `recover:${token}:r` }],
-      ] }, op.cwd, id);
+      ] } };
+  }
+  private problem(threadId: string): void {
+    const op = this.state.topicOperation(threadId)!; const prompt = this.recovery(threadId);
+    this.state.enqueue(`topic-problem/${op.attempt}`, null, prompt.text, prompt.markup, op.cwd, threadId);
   }
 }

@@ -648,8 +648,11 @@ export class Bridge {
   private async recoverTopic(callback: Json, message: Json, topicId: number | null): Promise<void> {
     const match = /^recover:([a-f0-9]{32}):([br])$/u.exec(string(callback.data));
     const operation = match ? this.state.topicOperations().find(op => op.attempt.replaceAll('-', '') === match[1]) : undefined;
-    if (!operation || topicId !== null || !['failed', 'uncertain'].includes(operation.status) ||
-        integer(message.message_id) !== this.state.promptMessage(`topic-problem/${operation.attempt}`)) {
+    const creation = operation ? this.state.findNewSession('threadId', operation.threadId) : undefined;
+    const originalMenu = creation?.status === 'topic' && creation.topicId === topicId && integer(message.message_id) === this.state.promptMessage(creation.menuKey);
+    const recoveryNotice = operation && topicId === null && integer(message.message_id) === this.state.promptMessage(`topic-problem/${operation.attempt}`);
+    const creationNotice = creation && operation && creation.topicId === topicId && integer(message.message_id) === this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}`);
+    if (!operation || !['failed', 'uncertain'].includes(operation.status) || !(originalMenu || recoveryNotice || creationNotice)) {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
     }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
@@ -662,7 +665,7 @@ export class Bridge {
       if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('The recovery state has changed. Check /sessions.');
       if (match![2] === 'b') {
         this.pendingBind = { threadId: session.id, attempt: operation.attempt, expires: Date.now() + 10 * 60 * 1000 };
-        this.state.enqueue(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`, null, operation.cwd, session.id);
+        this.state.enqueueOwnerNotice(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`);
       } else {
         const binding = await this.topics.retry(session.id);
         if (binding) {

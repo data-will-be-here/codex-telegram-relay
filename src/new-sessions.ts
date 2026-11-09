@@ -48,6 +48,7 @@ export class NewSessions {
       this.notice(topicId, 'This Codex connection does not support session creation.'); return;
     }
     const pending = this.state.newSessions(active).find(op => op.topicId === topicId);
+    if (pending?.status === 'topic' && await this.reportTopic(pending, true)) return;
     if (pending) { this.notice(topicId, pending.status === 'uncertain' ?
       'The previous creation outcome is unknown. The relay is checking Codex without repeating creation. Check Codex locally.' :
       'A session is already being created for this menu. Please wait; creation will not be repeated.'); return; }
@@ -119,11 +120,21 @@ export class NewSessions {
     try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(text ? { text } : {}) }); }
     catch { /* Callback acknowledgement is not evidence of a native write. */ }
   }
-  private async edit(op: NewSessionOperation, text: string, markup: Json = { inline_keyboard: [] }): Promise<void> {
+  private async edit(op: NewSessionOperation, text: string, markup: Json = { inline_keyboard: [] }): Promise<boolean> {
     const messageId = this.state.promptMessage(op.menuKey);
-    if (!messageId) return;
-    try { await this.telegram.call('editMessageText', { chat_id: this.config.ownerId, message_id: messageId, text, reply_markup: markup }); }
-    catch { /* The durable operation is authoritative; Telegram edits are best effort. */ }
+    if (!messageId) return false;
+    try { await this.telegram.call('editMessageText', { chat_id: this.config.ownerId, message_id: messageId, text, reply_markup: markup }); return true; }
+    catch { return false; /* The durable operation is authoritative; Telegram edits are best effort. */ }
+  }
+  private async reportTopic(op: NewSessionOperation, force = false): Promise<boolean> {
+    const topic = op.threadId ? this.state.topicOperation(op.threadId) : undefined;
+    if (!topic || !['failed', 'uncertain'].includes(topic.status)) return false;
+    if (!force && op.reportedTopicAttempt === topic.attempt) return true;
+    const prompt = this.topics.recovery(topic.threadId);
+    const text = `Codex session created: ${op.name || op.threadId}.\n${op.threadId}\nA Telegram topic is still required.\n\n${prompt.text}`;
+    if (!await this.edit(op, text, prompt.markup)) this.state.enqueueOwnerNotice(`notice/new-topic/${op.id}/${topic.attempt}`, op.topicId, text, prompt.markup);
+    this.state.changeNewSession(op.id, op.status, { reportedTopicAttempt: topic.attempt });
+    return true;
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueueOwnerNotice(`notice/new/${randomUUID()}`, topicId, text); }
 
@@ -243,7 +254,11 @@ export class NewSessions {
         if (this.closed) return;
         save({ status: 'topic' });
         const binding = await this.topics.ensure({ id: op.threadId!, cwd: op.cwd!, projectLabel: op.kind === 'scratch' ? 'No project' : undefined });
-        if (!binding) { save({ retryAt: Date.now() + 10_000 }); return; }
+        if (!binding) {
+          await this.reportTopic(op);
+          const topic = this.state.topicOperation(op.threadId!);
+          save({ retryAt: topic?.status === 'retry' ? topic.retryAt : Date.now() + 10_000 }); return;
+        }
         await this.connected(binding);
         this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.kind === 'scratch' ? 'New conversation without a project. Send a question or task.' : 'Session created. Send the first task.');
         save({ status: 'ready', retryAt: 0 });

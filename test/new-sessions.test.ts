@@ -163,6 +163,62 @@ test('Telegram uncertainty holds topic creation and uses existing bind recovery'
   } finally { f.close(); }
 });
 
+test('a rejected scratch topic replaces Creating session with recovery in the originating topic', async () => {
+  const f = setup(); let creates = 0;
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'createForumTopic') { creates++; throw new TelegramError('Telegram createForumTopic failed (400): Bad Request: BOT_TOPIC_WRONG_HOME', 400); }
+      return call(method, params);
+    };
+    const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession(); await f.drain();
+    const saved = f.state.newSession(op.id)!; assert.equal(f.native.starts, 1); assert.ok(saved.threadId);
+    const edit = f.telegram.calls.filter(item => item.method === 'editMessageText').at(-1)!.params;
+    assert.match(string(edit.text), /session.*created|created.*session/iu);
+    assert.match(string(edit.text), /topic/iu); assert.match(string(edit.text), /BOT_TOPIC_WRONG_HOME/u);
+    assert.ok(string(edit.text).includes(saved.threadId!)); assert.ok(object(edit.reply_markup).inline_keyboard);
+    const before = f.telegram.calls.length;
+    f.state.changeNewSession(op.id, 'topic', { retryAt: 0 }); await f.bridge.workNewSession();
+    assert.equal(f.telegram.calls.length, before, 'background checks must not repeat the same recovery prompt');
+    await f.bridge.update(message(900, 999, '/new')); await f.drain();
+    assert.equal(f.native.starts, 1); assert.equal(creates, 1); assert.equal(f.state.newSessions().length, 1);
+    const latest = f.telegram.calls.filter(item => item.method === 'editMessageText').at(-1)!.params;
+    assert.doesNotMatch(string(latest.text), /already being created/u);
+    const attempt = f.state.topicOperation(saved.threadId!)!;
+    const retry: Json = { update_id: 901, callback_query: { id: 'retry', from: { id: 42, is_bot: false },
+      data: `recover:${attempt.attempt.replaceAll('-', '')}:r`, message: { message_id: f.state.promptMessage(op.menuKey),
+        chat: { id: 42, type: 'private' }, message_thread_id: 888 } } };
+    await f.bridge.update(retry); assert.equal(creates, 1, 'the same message ID in another topic cannot recover');
+    object(object(retry.callback_query).message).message_thread_id = 999;
+    object(retry.callback_query).data = `recover:${attempt.attempt.replaceAll('-', '')}:b`;
+    retry.update_id = 902; await f.bridge.update(retry); await f.drain();
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('selection expires in 10 minutes') && item.message_thread_id === 999));
+    f.telegram.call = call;
+    object(retry.callback_query).data = `recover:${attempt.attempt.replaceAll('-', '')}:r`;
+    retry.update_id = 903; await f.bridge.update(retry);
+    assert.ok(f.state.binding(saved.threadId!), 'retry is available on the original creation menu');
+    f.state.changeNewSession(op.id, 'topic', { retryAt: 0 }); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
+  } finally { f.close(); }
+});
+
+test('a proven unsent topic request retries after three seconds using the same native session', async () => {
+  const f = setup(); const realNow = Date.now; let now = realNow(); Date.now = () => now;
+  let creates = 0;
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'createForumTopic' && creates++ === 0) throw new TelegramError('Not connected', 0, undefined, true);
+      return call(method, params);
+    };
+    const op = await f.open(); await f.choose(0); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.retryAt, now + 3000); assert.equal(f.native.starts, 1);
+    now += 2999; await f.bridge.workNewSession(); assert.equal(creates, 1);
+    now++; await f.bridge.workNewSession(); assert.equal(creates, 2);
+    assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
+  } finally { Date.now = realNow; f.close(); }
+});
+
 test('selected scope accepts only owned scratch workspaces and refuses revoked roots', async () => {
   const f = setup();
   try {

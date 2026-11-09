@@ -12,7 +12,17 @@ import { type WidgetDeliveryGuard } from './widget-types.js';
 export { splitMessage } from './format.js';
 
 export class TelegramError extends Error {
-  constructor(message: string, readonly status: number, readonly retryAfter?: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly retryAfter?: number, readonly notSent = false) { super(message); }
+}
+
+function failedBeforeConnect(error: unknown): boolean {
+  const connectFailure = (value: unknown): boolean => {
+    const failure = object(value); const code = string(failure.code);
+    return code === 'UND_ERR_CONNECT_TIMEOUT' || ['ENOTFOUND', 'EAI_AGAIN'].includes(code) && failure.syscall === 'getaddrinfo' ||
+      ['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code) && failure.syscall === 'connect';
+  };
+  const cause = object(object(error).cause);
+  return Array.isArray(cause.errors) && cause.errors.length > 0 ? cause.errors.every(connectFailure) : connectFailure(cause);
 }
 
 export function isMissingTopic(error: unknown): error is TelegramError {
@@ -42,11 +52,13 @@ export class TelegramClient implements Telegram {
   }
   async call(method: string, params: Json = {}): Promise<unknown> {
     if (!/^[A-Za-z]+$/u.test(method)) throw new Error('Invalid Telegram method.');
+    let responseReceived = false;
     try {
       const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
         signal: AbortSignal.timeout(method === 'getUpdates' ? 35_000 : method.endsWith('MessageDraft') ? 3000 : /^(?:get|set)MyCommands$/u.test(method) ? 5000 : 15_000), redirect: 'error',
       });
+      responseReceived = true;
       const body = (await boundedBody(response, 2 * 1024 * 1024)).toString('utf8');
       const result = object(JSON.parse(body));
       if (!response.ok || result.ok !== true) {
@@ -57,7 +69,9 @@ export class TelegramClient implements Telegram {
     } catch (error) {
       if (error instanceof TelegramError) throw error;
       // Never preserve an HTTP error cause: it can contain the credential-bearing URL.
-      throw new TelegramError(`Telegram ${method} connection failed. Delivery may be uncertain.`, 0);
+      const notSent = !responseReceived && failedBeforeConnect(error);
+      throw new TelegramError(notSent ? `Telegram ${method} could not connect. No request was sent.` :
+        `Telegram ${method} connection failed. Delivery may be uncertain.`, 0, undefined, notSent);
     }
   }
   async download(fileId: string): Promise<Buffer> {
@@ -98,6 +112,14 @@ class DeliveryCancelled extends Error {}
 export class Outbox {
   private widgetSending = false;
   private widgetNextAt = 0;
+  private widgetWrites = new Map<string, () => void>();
+  private persistWidget(id: string, write: () => void): void {
+    try { write(); }
+    catch { this.widgetWrites.set(id, write); }
+  }
+  private acceptWidgetReceipt(id: string, revision: number, messageId: number): void {
+    this.persistWidget(id, () => this.state.widgetDelivered(id, revision, messageId, Date.now()));
+  }
   constructor(private readonly state: State, private readonly telegram: Telegram,
     private readonly config: Pick<Config, 'ownerId' | 'roots' | 'sessionScope' | 'ignoredThreadIds' | 'newSessions'>, private readonly interval = 1100) {}
   private allowed(context: DeliveryContext): boolean {
@@ -118,6 +140,12 @@ export class Outbox {
   async flushWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
     const now = Date.now();
     if (this.widgetSending || now < this.widgetNextAt) return false;
+    const pendingWrite = this.widgetWrites.entries().next().value;
+    if (pendingWrite) {
+      const [id, write] = pendingWrite;
+      try { write(); this.widgetWrites.delete(id); return true; }
+      catch { this.widgetNextAt = now + 3000; return false; }
+    }
     let card = this.state.nextWidgetDelivery(guard.generation, now);
     if (!card) return false;
     this.widgetSending = true;
@@ -143,31 +171,38 @@ export class Outbox {
         if (editing) {
           const result = await this.telegram.call('editMessageWidgetData', { chat_id: this.config.ownerId, message_id: card.messageId, chat_data: data });
           if (result !== true) throw new TelegramError('Widget edit receipt was not confirmed.', 0);
-          this.state.widgetDelivered(card.id, card.revision, card.messageId!, Date.now());
+          this.acceptWidgetReceipt(card.id, card.revision, card.messageId!);
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
             html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
             caption: widgetCaption(card), reply_markup: { inline_keyboard: [[{ text: 'Classic mode', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
-          this.state.widgetDelivered(card.id, card.revision, id, Date.now());
+          this.acceptWidgetReceipt(card.id, card.revision, id);
         }
       } catch (error) {
         if (editing && error instanceof TelegramError && error.status === 400 && /message is not modified/iu.test(error.message)) {
-          this.state.widgetDelivered(card.id, card.revision, card.messageId!, Date.now());
+          this.acceptWidgetReceipt(card.id, card.revision, card.messageId!);
+        } else if (error instanceof TelegramError && error.notSent) {
+          const next = Date.now() + 3000;
+          this.widgetNextAt = next; this.persistWidget(card.id, () => this.state.widgetResult(card!.id, editing ? 'active' : 'new', next, 'before-connect'));
         } else if (error instanceof TelegramError && error.status === 429) {
           const next = Date.now() + Math.max(1, error.retryAfter ?? 3) * 1000;
-          this.widgetNextAt = next; this.state.widgetResult(card.id, editing ? 'active' : 'new', next);
+          this.widgetNextAt = next; this.persistWidget(card.id, () => this.state.widgetResult(card!.id, editing ? 'active' : 'new', next));
         } else if (editing && (!(error instanceof TelegramError) || error.status === 0 || error.status >= 500)) {
           // An edit writes a complete revision to a known message; retries cannot create another card.
-          this.state.widgetResult(card.id, 'active', Date.now() + 5000);
+          this.persistWidget(card.id, () => this.state.widgetResult(card!.id, 'active', Date.now() + 5000));
         } else {
           const definite = error instanceof TelegramError && error.status >= 400 && error.status < 500;
-          this.state.widgetResult(card.id, definite ? 'disabled' : 'uncertain');
-          if (definite) this.state.setViewMode(card.binding.threadId, 'classic');
-          this.state.enqueue(`attention/widgets/${card.id}`, card.binding.topicId, definite ?
+          const failure = error instanceof TelegramError ? (error.message.includes('receipt was not confirmed') ? 'missing-receipt' :
+            error.status === 0 ? 'transport-outcome-unknown' : `http-${error.status}`) : 'unexpected-failure';
+          this.persistWidget(card.id, () => {
+            this.state.widgetResult(card!.id, definite ? 'disabled' : 'uncertain', 0, failure);
+            this.state.setViewMode(card!.binding.threadId, 'classic');
+            this.state.enqueue(`attention/widgets/${card!.id}`, card!.binding.topicId, definite ?
             'Widgets are unavailable for this session. Classic view selected; replies and approvals continue normally. Use /view widgets to try again when widget support is available.' :
-            'Widget delivery could not be confirmed and will not be repeated. Replies and approvals continue normally. Use /view classic for the classic view.');
+            'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+          });
         }
       }
       return true;

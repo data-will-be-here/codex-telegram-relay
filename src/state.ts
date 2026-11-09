@@ -23,6 +23,7 @@ export interface DeliveryContext { topicId: number | null; projectCwd: string | 
 export interface TopicOperation {
   threadId: string; cwd: string; title: string; attempt: string;
   status: 'missing' | 'creating' | 'uncertain' | 'failed' | 'retry'; retryAt: number;
+  error?: string | null;
 }
 export interface ApprovalCard { identity: string; deliveryKey: string; status: string; }
 
@@ -30,6 +31,7 @@ export type NewSessionPhase = 'selecting' | 'cancelled' | 'preparing' | 'startin
 export interface NewSessionOperation {
   id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
   choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
+  reportedTopicAttempt?: string;
   kind?: 'project' | 'scratch'; root?: string; cwd?: string; threadId?: string; name?: string;
   retryAt?: number; error?: string;
 }
@@ -77,8 +79,6 @@ export class State {
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
           retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
-        UPDATE widget_cards SET delivery='uncertain' WHERE delivery='sending';
-        UPDATE widget_cards SET delivery='active' WHERE delivery='editing';
         CREATE INDEX IF NOT EXISTS new_sessions_status ON new_sessions(status);
         CREATE UNIQUE INDEX IF NOT EXISTS new_sessions_thread ON new_sessions(json_extract(payload,'$.threadId'));
         CREATE INDEX IF NOT EXISTS new_sessions_token ON new_sessions(json_extract(payload,'$.token'));
@@ -107,7 +107,17 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(async_answers)').all().some(column => column.name === 'status')) this.db.exec("ALTER TABLE async_answers ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
       this.db.exec("UPDATE async_answers SET status='uncertain' WHERE status='sending'; CREATE INDEX IF NOT EXISTS outbox_status_id ON outbox(status,id)");
       if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'everUncertain')) this.db.exec('ALTER TABLE widget_cards ADD COLUMN everUncertain INTEGER NOT NULL DEFAULT 0');
+      const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
+      if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
+      const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
+      this.db.prepare("UPDATE settings SET value='classic' WHERE key IN (SELECT 'view/' || threadId FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain'))").run(Number(legacyWidgets));
+      this.db.exec("UPDATE widget_cards SET delivery='uncertain',failure='restart-outcome-unknown' WHERE delivery='sending'; UPDATE widget_cards SET delivery='active' WHERE delivery='editing'; UPDATE widget_cards SET failure='legacy-outcome-unknown' WHERE delivery='uncertain' AND failure IS NULL");
+      if (!this.db.prepare('PRAGMA table_info(topic_operations)').all().some(column => column.name === 'error')) this.db.exec('ALTER TABLE topic_operations ADD COLUMN error TEXT');
       this.db.exec("UPDATE widget_cards SET everUncertain=1 WHERE delivery='uncertain'");
+      for (const card of this.widgetCards().filter(card => interruptedWidgets.has(card.id))) {
+        this.enqueue(`attention/widgets/${card.id}`, card.binding.topicId,
+          'Widget delivery could not be confirmed and will not be repeated. Classic view selected for following turns; replies and approvals continue normally. Use /view widgets to enable cards again.');
+      }
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
   }
@@ -127,7 +137,7 @@ export class State {
     if (!value) return;
     const row = object(value);
     return { ...JSON.parse(string(row.payload)), delivery: row.delivery, messageId: row.messageId, sentRevision: row.sentRevision,
-      retryAt: row.retryAt, lastSentAt: row.lastSentAt } as WidgetDelivery;
+      retryAt: row.retryAt, lastSentAt: row.lastSentAt, failure: row.failure } as WidgetDelivery;
   }
   widgetCard(threadId: string, turnId: string): WidgetDelivery | undefined {
     return this.decodeWidget(this.db.prepare('SELECT * FROM widget_cards WHERE threadId=? AND turnId=?').get(threadId, turnId));
@@ -163,11 +173,11 @@ export class State {
     return !!this.db.prepare('UPDATE widget_cards SET delivery=? WHERE id=? AND delivery=?').run(editing ? 'editing' : 'sending', id, editing ? 'active' : 'new').changes;
   }
   widgetDelivered(id: string, revision: number, messageId: number, now: number): void {
-    this.db.prepare("UPDATE widget_cards SET delivery=CASE WHEN delivery='retired' THEN 'retired' ELSE 'active' END,messageId=?,sentRevision=MAX(sentRevision,?),retryAt=0,lastSentAt=? WHERE id=?")
+    this.db.prepare("UPDATE widget_cards SET delivery=CASE WHEN delivery='retired' THEN 'retired' ELSE 'active' END,messageId=?,sentRevision=MAX(sentRevision,?),retryAt=0,lastSentAt=?,failure=NULL WHERE id=?")
       .run(messageId, revision, now, id);
   }
-  widgetResult(id: string, delivery: WidgetDelivery['delivery'], retryAt = 0): void {
-    this.db.prepare("UPDATE widget_cards SET delivery=?,retryAt=?,everUncertain=MAX(everUncertain,CASE WHEN ?='uncertain' THEN 1 ELSE 0 END) WHERE id=?").run(delivery, retryAt, delivery, id);
+  widgetResult(id: string, delivery: WidgetDelivery['delivery'], retryAt = 0, failure: string | null = null): void {
+    this.db.prepare("UPDATE widget_cards SET delivery=?,retryAt=?,failure=COALESCE(?,failure),everUncertain=MAX(everUncertain,CASE WHEN ?='uncertain' THEN 1 ELSE 0 END) WHERE id=?").run(delivery, retryAt, failure, delivery, id);
   }
   newSessions(phases?: readonly NewSessionPhase[]): NewSessionOperation[] {
     const rows = phases ? this.db.prepare(`SELECT * FROM new_sessions WHERE status IN (${phases.map(() => '?').join(',')})`).all(...phases) : this.db.prepare('SELECT * FROM new_sessions').all();
@@ -209,11 +219,11 @@ export class State {
   beginTopic(threadId: string, cwd: string, title: string): TopicOperation | undefined {
     const previous = this.topicOperation(threadId);
     if (previous && (['creating', 'uncertain', 'failed'].includes(previous.status) || previous.retryAt > Date.now())) return undefined;
-    this.db.prepare("INSERT INTO topic_operations VALUES(?,?,?,?,'creating',0) ON CONFLICT(threadId) DO UPDATE SET cwd=excluded.cwd,title=excluded.title,attempt=excluded.attempt,status='creating',retryAt=0").run(threadId, cwd, title, randomUUID());
+    this.db.prepare("INSERT INTO topic_operations(threadId,cwd,title,attempt,status,retryAt) VALUES(?,?,?,?,'creating',0) ON CONFLICT(threadId) DO UPDATE SET cwd=excluded.cwd,title=excluded.title,attempt=excluded.attempt,status='creating',retryAt=0,error=NULL").run(threadId, cwd, title, randomUUID());
     return this.topicOperation(threadId);
   }
-  topicResult(threadId: string, attempt: string, status: TopicOperation['status'], retryAt = 0): void {
-    this.db.prepare('UPDATE topic_operations SET status=?,retryAt=? WHERE threadId=? AND attempt=?').run(status, retryAt, threadId, attempt);
+  topicResult(threadId: string, attempt: string, status: TopicOperation['status'], retryAt = 0, error: string | null = null): void {
+    this.db.prepare('UPDATE topic_operations SET status=?,retryAt=?,error=? WHERE threadId=? AND attempt=?').run(status, retryAt, error, threadId, attempt);
   }
   retryTopic(threadId: string): void {
     this.db.prepare("UPDATE topic_operations SET status='missing',retryAt=0 WHERE threadId=? AND status!='creating'").run(threadId);
@@ -221,7 +231,7 @@ export class State {
   missingTopic(binding: Binding): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare("INSERT OR IGNORE INTO topic_operations VALUES(?,?,?,?,'missing',0)").run(binding.threadId, binding.cwd, binding.title, randomUUID());
+      this.db.prepare("INSERT OR IGNORE INTO topic_operations(threadId,cwd,title,attempt,status,retryAt) VALUES(?,?,?,?,'missing',0)").run(binding.threadId, binding.cwd, binding.title, randomUUID());
       this.db.prepare("UPDATE outbox SET status=CASE WHEN key LIKE 'prompt/%' THEN 'cancelled' ELSE 'blocked' END WHERE topicId=? AND status IN ('pending','deferred','sending')").run(binding.topicId);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

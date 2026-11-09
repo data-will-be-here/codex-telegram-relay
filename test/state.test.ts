@@ -156,6 +156,36 @@ test('HTTP errors cannot leak the bot token or its URL', async () => {
   await assert.rejects(rejected.call('sendMessage'), error => !String(error).includes(token));
 });
 
+test('only proven connection failures before an HTTP response are safe to retry', async () => {
+  const token = 'synthetic-transport-token';
+  const safe = [
+    { code: 'UND_ERR_CONNECT_TIMEOUT' },
+    { code: 'ENOTFOUND', syscall: 'getaddrinfo' },
+    { code: 'EAI_AGAIN', syscall: 'getaddrinfo' },
+    { code: 'ECONNREFUSED', syscall: 'connect' },
+    { code: 'ENETUNREACH', syscall: 'connect' },
+    { code: 'EHOSTUNREACH', syscall: 'connect' },
+    { code: 'ETIMEDOUT', syscall: 'connect' },
+  ];
+  const unknown = [{ code: 'ECONNRESET', syscall: 'read' }, { code: 'ETIMEDOUT' }, { code: 'UND_ERR_SOCKET' },
+    { code: 'UND_ERR_HEADERS_TIMEOUT' }, { code: 'ENOTFOUND', syscall: 'read' }, {}];
+  for (const [cause, expected] of [...safe.map(cause => [cause, true] as const), ...unknown.map(cause => [cause, false] as const),
+    [new AggregateError(safe.map(value => Object.assign(new Error('connect'), value))), true] as const,
+    [new AggregateError([...safe, ...unknown].map(value => Object.assign(new Error('unknown'), value))), false] as const]) {
+    const client = new TelegramClient(token, async () => {
+      throw new TypeError(`https://api.telegram.org/bot${token}/sendWidget`, { cause });
+    });
+    await assert.rejects(client.call('sendWidget'), error => {
+      assert.ok(error instanceof TelegramError); assert.equal(error.notSent, expected);
+      assert.equal(error.cause, undefined); assert.ok(!String(error).includes(token)); return true;
+    });
+  }
+  const received = new TelegramClient(token, async () => new Response(new ReadableStream({
+    start(controller) { controller.error(Object.assign(new Error('body failed'), { cause: safe[0] })); },
+  })));
+  await assert.rejects(received.call('sendWidget'), error => error instanceof TelegramError && !error.notSent);
+});
+
 test('an uncertain Telegram POST is not automatically replayed', async () => {
   const temp = temporary(); const state = new State(join(temp.dir, 'home'));
   try {

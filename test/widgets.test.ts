@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { join } from 'node:path';
 import { Bridge } from '../src/bridge.js';
-import { Outbox, TelegramError } from '../src/telegram.js';
+import { Outbox, TelegramClient, TelegramError } from '../src/telegram.js';
 import { State } from '../src/state.js';
 import { WIDGET_HTML, widgetData } from '../src/widget-template.js';
 import { Widgets } from '../src/widgets.js';
@@ -89,6 +89,54 @@ test('unknown send outcomes are durable and never replayed, while ordinary outpu
   } finally { f.close(); }
 });
 
+test('proven pre-connect failures retry widget delivery after three seconds without an uncertain admission', async () => {
+  const f = await setup(); let attempts = 0;
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    const api = new TelegramClient('123456:synthetic_token', async () => {
+      if (attempts++ === 0) throw new TypeError('fetch failed', { cause: Object.assign(new Error('credential-bearing URL must not be retained'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }));
+    });
+    const original = f.telegram.call.bind(f.telegram);
+    f.telegram.call = (method, params) => method === 'sendWidget' ? api.call(method, params) : original(method, params);
+    await f.flush(); assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'new');
+    assert.equal(f.state.uncertainCount(), 0); f.advance(2999); assert.equal(await f.flush(), false);
+    f.advance(1); await f.flush(); assert.equal(attempts, 2);
+    assert.equal(f.state.widgetCard('thread-a', 'live')!.messageId, 9001);
+  } finally { f.close(); }
+});
+
+test('a received widget message is retained when local receipt persistence fails temporarily', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    const delivered = f.state.widgetDelivered.bind(f.state); let fail = true;
+    f.state.widgetDelivered = (...args) => { if (fail) { fail = false; throw new Error('Database busy'); } delivered(...args); };
+    await f.flush(); f.advance(); await f.flush();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'active');
+    assert.ok(f.state.widgetCard('thread-a', 'live')!.messageId);
+  } finally { f.close(); }
+});
+
+test('widget retry outcomes survive a temporary local state write failure', async () => {
+  const f = await setup(); let attempts = 0;
+  try {
+    f.state.setViewMode('thread-a', 'widgets'); await f.start(); f.advance();
+    const result = f.state.widgetResult.bind(f.state); let fail = true;
+    f.state.widgetResult = (...args) => { if (fail) { fail = false; throw new Error('Database busy'); } result(...args); };
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'sendWidget' && attempts++ === 0) throw new TelegramError('No connection', 0, undefined, true);
+      return call(method, params);
+    };
+    await f.flush(); assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'sending');
+    f.advance(3000); await f.flush(); assert.equal(attempts, 1);
+    assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'new');
+    await f.flush(); assert.equal(attempts, 2); assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'active');
+  } finally { f.close(); }
+});
+
 test('a definite widget rejection selects classic and does not disconnect or change native permissions', async () => {
   const f = await setup();
   try {
@@ -148,13 +196,16 @@ test('reconnect reuses a confirmed message, does not import old turns and preser
   } finally { f.close(); }
 });
 
-test('disk recovery preserves preferences and classifies interrupted initial widget sends as uncertain', async () => {
+test('disk recovery selects classic for interrupted sends once and preserves explicit later choices', async () => {
   const f = await setup(); const temp = temporary(); let state: State | undefined;
   try {
     f.state.setViewMode('thread-a', 'widgets'); await f.start();
     state = new State(join(temp.dir, 'private')); state.setViewMode('thread-a', 'widgets');
     const card = f.state.widgetCards('thread-a')[0]!; state.saveWidget(card); assert.equal(state.claimWidget(card.id, false), true);
     state.close(); state = new State(join(temp.dir, 'private'));
+    assert.equal(state.viewMode('thread-a'), 'classic'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
+    assert.equal(state.widgetCards()[0]!.failure, 'restart-outcome-unknown');
+    state.setViewMode('thread-a', 'widgets'); state.close(); state = new State(join(temp.dir, 'private'));
     assert.equal(state.viewMode('thread-a'), 'widgets'); assert.equal(state.widgetCards()[0]!.delivery, 'uncertain');
   } finally { state?.close(); temp.close(); f.close(); }
 });
