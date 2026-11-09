@@ -485,7 +485,8 @@ export class Bridge {
         await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('n:')) {
-        await this.newSessions.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+        if (await this.newSessions.callback(callback, message, topic) === 'bind') this.pendingBind = undefined;
+        this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
@@ -538,6 +539,7 @@ export class Bridge {
       const [command, supplied, extra] = text.split(/\s+/u);
       let prefix = supplied;
       let selectedBind: typeof this.pendingBind;
+      if (command === '/bind' && !prefix && !this.pendingBind && await this.newSessions.bindPending(topicId)) return;
       if (command === '/bind' && !prefix && this.pendingBind) {
         const pending = this.pendingBind;
         if (pending.expires < Date.now() || this.state.topicOperation(pending.threadId)?.attempt !== pending.attempt) {
@@ -561,7 +563,8 @@ export class Bridge {
         }
         await this.codex.turns(session.id); // Explicit recovery must respect the same first-message gate as discovery.
         if (selectedBind) {
-          const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+          let live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+          if (!live && await this.newSessions.recoverOwned(session.id)) live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
           if (!live || live.cwd !== session.cwd || !this.allowed(live.cwd, session.id) || this.config.ignoredThreadIds?.includes(session.id))
             throw new Error('The session is no longer available in the selected project. Resume it in Codex and retry recovery.');
           if (this.pendingBind !== selectedBind || selectedBind.expires < Date.now() || this.state.topicOperation(session.id)?.attempt !== selectedBind.attempt)
@@ -651,19 +654,22 @@ export class Bridge {
     const creation = operation ? this.state.findNewSession('threadId', operation.threadId) : undefined;
     const originalMenu = creation?.status === 'topic' && creation.topicId === topicId && integer(message.message_id) === this.state.promptMessage(creation.menuKey);
     const recoveryNotice = operation && topicId === null && integer(message.message_id) === this.state.promptMessage(`topic-problem/${operation.attempt}`);
-    const creationNotice = creation && operation && creation.topicId === topicId && integer(message.message_id) === this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}`);
+    const creationNotice = creation && operation && creation.topicId === topicId &&
+      [this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}`), this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}/${operation.status}`)].includes(integer(message.message_id));
     if (!operation || !['failed', 'uncertain'].includes(operation.status) || !(originalMenu || recoveryNotice || creationNotice)) {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
     }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
     try {
       const session = this.topics.resolve(operation.threadId);
-      const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+      let live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+      if (!live && await this.newSessions.recoverOwned(session.id)) live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
       if (!live || live.cwd !== session.cwd) throw new Error('Resume this session locally in Codex before recovering the topic.');
       await this.codex.turns(session.id);
       const current = this.state.topicOperation(session.id);
       if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('The recovery state has changed. Check /sessions.');
       if (match![2] === 'b') {
+        this.newSessions.clearPendingBind();
         this.pendingBind = { threadId: session.id, attempt: operation.attempt, expires: Date.now() + 10 * 60 * 1000 };
         this.state.enqueueOwnerNotice(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`);
       } else {

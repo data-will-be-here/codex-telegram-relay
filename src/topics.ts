@@ -40,7 +40,8 @@ export class Topics {
       } else {
         const code = error instanceof TelegramError ? /\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b/u.exec(error.message)?.[1] : undefined;
         const summary = error instanceof TelegramError ? `Telegram topic request failed (${error.status}${code ? ', ' + code : ''}).` : 'Topic creation was not confirmed.';
-        this.state.topicResult(session.id, attempt.attempt, error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain', 0, summary);
+        const rejected = error instanceof TelegramError && error.status >= 400 && error.status < 500 && code !== 'BOT_TOPIC_WRONG_HOME';
+        this.state.topicResult(session.id, attempt.attempt, rejected ? 'failed' : 'uncertain', 0, summary);
         this.problem(session.id);
       }
       return undefined;
@@ -108,7 +109,7 @@ export class Topics {
   recovery(threadId: string): { text: string; markup: Json } {
     const op = this.state.topicOperation(threadId)!;
     const id = threadId;
-    const reason = op.status === 'uncertain' ? 'Telegram may have created its topic, but the response was not confirmed. Automatic creation is paused to avoid duplicates.' : 'Telegram rejected topic creation. The saved Codex session has not been replaced.';
+    const reason = op.status === 'uncertain' ? 'Telegram may have created its topic, but the response was not confirmed. Automatic creation is paused to avoid duplicates.' : 'Telegram returned a topic creation error. Check whether the topic appeared before retrying. The saved Codex session has not been replaced.';
     const token = op.attempt.replaceAll('-', '');
     return { text: `${op.title}\n\n${reason}${op.error ? '\n' + op.error : ''}\nChoose an action below.\nManual recovery: create/open an empty topic and send /bind ${id}; /repair ${id} retries only topic creation.`,
       markup: { inline_keyboard: [

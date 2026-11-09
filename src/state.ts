@@ -32,6 +32,8 @@ export interface NewSessionOperation {
   id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
   choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
   reportedTopicAttempt?: string;
+  topicFirst?: boolean; targetTopic?: number; topicTitle?: string; topicAttempt?: number;
+  topicState?: 'creating' | 'retry' | 'failed' | 'uncertain' | 'ready'; topicFailure?: string; topicReport?: string;
   kind?: 'project' | 'scratch'; root?: string; cwd?: string; threadId?: string; name?: string;
   retryAt?: number; error?: string;
 }
@@ -113,6 +115,7 @@ export class State {
       this.db.prepare("UPDATE settings SET value='classic' WHERE key IN (SELECT 'view/' || threadId FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain'))").run(Number(legacyWidgets));
       this.db.exec("UPDATE widget_cards SET delivery='uncertain',failure='restart-outcome-unknown' WHERE delivery='sending'; UPDATE widget_cards SET delivery='active' WHERE delivery='editing'; UPDATE widget_cards SET failure='legacy-outcome-unknown' WHERE delivery='uncertain' AND failure IS NULL");
       if (!this.db.prepare('PRAGMA table_info(topic_operations)').all().some(column => column.name === 'error')) this.db.exec('ALTER TABLE topic_operations ADD COLUMN error TEXT');
+      this.db.exec("UPDATE topic_operations SET status='uncertain' WHERE status='failed' AND error LIKE '%BOT_TOPIC_WRONG_HOME%'");
       this.db.exec("UPDATE widget_cards SET everUncertain=1 WHERE delivery='uncertain'");
       for (const card of this.widgetCards().filter(card => interruptedWidgets.has(card.id))) {
         this.enqueue(`attention/widgets/${card.id}`, card.binding.topicId,

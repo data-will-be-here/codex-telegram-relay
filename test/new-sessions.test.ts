@@ -44,7 +44,7 @@ class Native extends FakeCodex {
   }
 }
 
-function setup(automatic = false) {
+function setup(automatic = false, legacy = false) {
   const temp = temporary(); const project = join(temp.dir, 'project'); const scratch = join(temp.dir, 'conversations');
   mkdirSync(project); mkdirSync(scratch);
   const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: process.execPath,
@@ -56,7 +56,10 @@ function setup(automatic = false) {
   const open = async (topic?: number) => {
     const update = message(100 + state.newSessions().length, topic ?? 999, '/new');
     if (topic === undefined) delete object(update.message).message_thread_id;
-    await bridge.update(update); await drain(); return state.newSessions().at(-1)!;
+    await bridge.update(update); await drain();
+    const op = state.newSessions().at(-1)!;
+    if (legacy) state.changeNewSession(op.id, op.status, { topicFirst: false });
+    return state.newSession(op.id)!;
   };
   const choose = async (index: number, updateId = 200) => {
     const op = state.newSessions().at(-1)!;
@@ -99,6 +102,113 @@ test('project selection preserves the originating binding and never copies histo
     assert.equal(f.state.binding('original-thread')!.topicId, original.topicId);
     assert.notEqual(f.state.binding(f.state.newSession(op.id)!.threadId!)!.topicId, original.topicId);
     assert.equal(f.native.writes.length, 0); assert.equal(f.state.newSession(op.id)!.cwd, f.project);
+  } finally { f.close(); }
+});
+
+test('new requests create no native session when topic delivery fails or is unknown, including after reconnect', async () => {
+  for (const code of [400, 0, 500]) {
+    const f = setup(); let attempts = 0;
+    try {
+      const call = f.telegram.call.bind(f.telegram);
+      f.telegram.call = async (method, params) => {
+        if (method === 'createForumTopic') { attempts++; throw new TelegramError(code === 400 ? 'BOT_TOPIC_WRONG_HOME' : 'Lost response', code); }
+        return call(method, params);
+      };
+      const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+      assert.equal(f.native.starts, 0); assert.equal(f.state.newSession(op.id)!.threadId, undefined);
+      assert.equal(f.state.newSession(op.id)!.topicState, 'uncertain');
+      assert.ok(f.telegram.calls.some(item => item.method === 'editMessageText' && string(item.params.text).includes('No Codex session has been created')));
+      f.state.changeNewSession(op.id, 'preparing', { retryAt: 0 }); await f.bridge.workNewSession();
+      await f.bridge.update(message(700, 999, '/new'));
+      const restarted = new Bridge(f.config, f.state, f.native, f.telegram);
+      f.state.changeNewSession(op.id, 'preparing', { retryAt: 0 }); await restarted.workNewSession(); restarted.close();
+      assert.equal(attempts, 1); assert.equal(f.native.starts, 0); assert.equal(f.state.newSessions().length, 1);
+    } finally { f.close(); }
+  }
+});
+
+test('an interrupted topic-first request stays unknown without native creation or a repeated Telegram request', async () => {
+  const f = setup();
+  try {
+    const op = await f.open(); await f.choose(0);
+    f.state.changeNewSession(op.id, 'preparing', { topicState: 'creating', topicAttempt: 1 });
+    const restarted = new Bridge(f.config, f.state, f.native, f.telegram);
+    await restarted.workNewSession(); restarted.close();
+    assert.equal(f.state.newSession(op.id)!.topicState, 'uncertain'); assert.equal(f.native.starts, 0);
+    assert.equal(f.telegram.calls.filter(item => item.method === 'createForumTopic').length, 0);
+  } finally { f.close(); }
+});
+
+test('unstarted legacy operations also confirm a topic before creating any native session', async () => {
+  const f = setup();
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'createForumTopic') throw new TelegramError('Rejected', 400); return call(method, params); };
+    const menu = await f.open(999); f.state.changeNewSession(menu.id, 'selecting', { status: 'cancelled' });
+    const legacy = { ...menu, id: 'legacy-preparing', status: 'preparing' as const, kind: 'scratch' as const, root: f.scratch, cwd: join(f.scratch, 'legacy-preparing'), choices: [] };
+    delete legacy.topicFirst; f.state.createNewSession(legacy);
+    await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(legacy.id)!.topicFirst, true); assert.equal(f.state.newSession(legacy.id)!.topicState, 'failed');
+    assert.equal(f.native.starts, 0); assert.equal(f.state.newSession(legacy.id)!.threadId, undefined);
+  } finally { f.close(); }
+});
+
+test('topic-first recovery binds an explicitly selected empty topic before the only native start', async () => {
+  const f = setup(); let attempts = 0;
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'createForumTopic') { attempts++; throw new TelegramError('BOT_TOPIC_WRONG_HOME', 400); }
+      return call(method, params);
+    };
+    const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+    const saved = f.state.newSession(op.id)!;
+    const click: Json = { update_id: 710, callback_query: { id: 'use-topic', from: { id: 42, is_bot: false },
+      data: `n:${op.token}:b${saved.topicAttempt}`, message: { message_id: f.state.promptMessage(op.menuKey), chat: { id: 42, type: 'private' }, message_thread_id: 888 } } };
+    await f.bridge.update(click);
+    await f.bridge.update(message(711, 555, '/bind')); assert.equal(f.state.newSession(op.id)!.targetTopic, undefined);
+    object(object(click.callback_query).message).message_thread_id = 999; click.update_id = 712;
+    await f.bridge.update(click); await f.drain(); assert.equal(f.native.starts, 0);
+    await f.bridge.update(message(713, 555, '/bind')); await f.bridge.workNewSession();
+    const ready = f.state.newSession(op.id)!;
+    assert.equal(ready.status, 'ready'); assert.equal(f.state.binding(ready.threadId!)!.topicId, 555);
+    assert.equal(f.native.starts, 1); assert.equal(attempts, 1); assert.equal(f.native.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('explicit topic retry is fenced by its attempt and creates native state only after a positive topic receipt', async () => {
+  const f = setup(); let attempts = 0;
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'createForumTopic') { attempts++; if (attempts < 3) throw new TelegramError('Rejected', 400); assert.equal(f.native.starts, 0); }
+      return call(method, params);
+    };
+    const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+    const click: Json = { update_id: 720, callback_query: { id: 'retry-topic', from: { id: 42, is_bot: false }, data: `n:${op.token}:r1`,
+      message: { message_id: f.state.promptMessage(op.menuKey), chat: { id: 42, type: 'private' }, message_thread_id: 999 } } };
+    await f.bridge.update(click); await f.bridge.workNewSession(); assert.equal(attempts, 2); assert.equal(f.native.starts, 0);
+    click.update_id = 721; await f.bridge.update(click); f.state.changeNewSession(op.id, 'preparing', { retryAt: 0 }); await f.bridge.workNewSession();
+    assert.equal(attempts, 2, 'a stale retry button cannot trigger a later attempt');
+    object(click.callback_query).data = `n:${op.token}:r2`; click.update_id = 722;
+    await f.bridge.update(click); await f.bridge.workNewSession();
+    assert.equal(attempts, 3); assert.equal(f.native.starts, 1); assert.equal(f.state.newSession(op.id)!.status, 'ready');
+  } finally { f.close(); }
+});
+
+test('an unbound topic reserved by an uncertain native start cannot be selected by another menu', async () => {
+  const f = setup();
+  try {
+    f.native.loseStart = true;
+    const first = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+    const reserved = f.state.newSession(first.id)!.targetTopic!; assert.ok(reserved); assert.equal(f.native.starts, 1);
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'createForumTopic') throw new TelegramError('Rejected', 400); return call(method, params); };
+    const second = await f.open(888); await f.choose(0, 730); await f.bridge.workNewSession();
+    await f.bridge.update({ update_id: 731, callback_query: { id: 'reserved', from: { id: 42, is_bot: false }, data: `n:${second.token}:b1`,
+      message: { message_id: f.state.promptMessage(second.menuKey), chat: { id: 42, type: 'private' }, message_thread_id: 888 } } });
+    await f.bridge.update(message(732, reserved, '/bind'));
+    assert.equal(f.state.newSession(second.id)!.targetTopic, undefined); assert.equal(f.native.starts, 1);
   } finally { f.close(); }
 });
 
@@ -149,7 +259,7 @@ test('an uncertain name write reuses the known native ID and preserves its store
 });
 
 test('Telegram uncertainty holds topic creation and uses existing bind recovery', async () => {
-  const f = setup();
+  const f = setup(false, true); // Operations already created by the previous native-first release.
   try {
     const call = f.telegram.call.bind(f.telegram); let creates = 0;
     f.telegram.call = async (method, params) => { if (method === 'createForumTopic') { creates++; throw new TelegramError('Lost', 0); } return call(method, params); };
@@ -164,7 +274,7 @@ test('Telegram uncertainty holds topic creation and uses existing bind recovery'
 });
 
 test('a rejected scratch topic replaces Creating session with recovery in the originating topic', async () => {
-  const f = setup(); let creates = 0;
+  const f = setup(false, true); let creates = 0;
   try {
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => {
@@ -173,6 +283,7 @@ test('a rejected scratch topic replaces Creating session with recovery in the or
     };
     const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession(); await f.drain();
     const saved = f.state.newSession(op.id)!; assert.equal(f.native.starts, 1); assert.ok(saved.threadId);
+    assert.equal(f.state.topicOperation(saved.threadId!)!.status, 'uncertain', 'WRONG_HOME must not be treated as proof that no topic appeared');
     const edit = f.telegram.calls.filter(item => item.method === 'editMessageText').at(-1)!.params;
     assert.match(string(edit.text), /session.*created|created.*session/iu);
     assert.match(string(edit.text), /topic/iu); assert.match(string(edit.text), /BOT_TOPIC_WRONG_HOME/u);
@@ -202,6 +313,58 @@ test('a rejected scratch topic replaces Creating session with recovery in the or
   } finally { f.close(); }
 });
 
+test('topic recovery restores the exact saved relay-owned session after its native connection closes', async () => {
+  const f = setup(false, true);
+  try {
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'createForumTopic') throw new TelegramError('BOT_TOPIC_WRONG_HOME', 400);
+      return call(method, params);
+    };
+    const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+    const saved = f.state.newSession(op.id)!; const topic = f.state.topicOperation(saved.threadId!)!;
+    f.native.sessions = []; // Stored native history survives; the original connection no longer loads it.
+    await f.bridge.update({ update_id: 910, callback_query: { id: 'bind-existing', from: { id: 42, is_bot: false },
+      data: `recover:${topic.attempt.replaceAll('-', '')}:b`, message: { message_id: f.state.promptMessage(op.menuKey),
+        chat: { id: 42, type: 'private' }, message_thread_id: 999 } } });
+    await f.drain();
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('selection expires in 10 minutes')));
+    assert.deepEqual(f.native.resumes, [saved.threadId]);
+    await f.bridge.update(message(911, 555, '/bind'));
+    f.state.changeNewSession(op.id, 'topic', { retryAt: 0 }); await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.state.binding(saved.threadId!)!.topicId, 555);
+    assert.equal(f.native.starts, 1); assert.equal(f.native.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('owned recovery never resumes archived, substituted or newly disallowed native sessions', async () => {
+  for (const invalid of ['archived', 'substituted', 'revoked']) {
+    const f = setup(false, true);
+    try {
+      const call = f.telegram.call.bind(f.telegram);
+      f.telegram.call = async (method, params) => {
+        if (method === 'createForumTopic') throw new TelegramError('BOT_TOPIC_WRONG_HOME', 400);
+        return call(method, params);
+      };
+      const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
+      const saved = f.state.newSession(op.id)!; const topic = f.state.topicOperation(saved.threadId!)!;
+      f.native.sessions = [];
+      const read = f.native.nonArchivedThread.bind(f.native);
+      f.native.nonArchivedThread = async id => {
+        const thread = await read(id);
+        if (invalid === 'archived') return undefined;
+        if (invalid === 'substituted') return { ...thread, id: 'another-native-session' };
+        f.config.ignoredThreadIds = [id]; return thread;
+      };
+      await f.bridge.update({ update_id: 920, callback_query: { id: 'blocked', from: { id: 42, is_bot: false },
+        data: `recover:${topic.attempt.replaceAll('-', '')}:b`, message: { message_id: f.state.promptMessage(op.menuKey),
+          chat: { id: 42, type: 'private' }, message_thread_id: 999 } } });
+      assert.deepEqual(f.native.resumes, [], invalid); assert.equal(f.native.starts, 1); assert.equal(f.native.writes.length, 0);
+      assert.equal(f.state.binding(saved.threadId!), undefined);
+    } finally { f.close(); }
+  }
+});
+
 test('a proven unsent topic request retries after three seconds using the same native session', async () => {
   const f = setup(); const realNow = Date.now; let now = realNow(); Date.now = () => now;
   let creates = 0;
@@ -212,7 +375,7 @@ test('a proven unsent topic request retries after three seconds using the same n
       return call(method, params);
     };
     const op = await f.open(); await f.choose(0); await f.bridge.workNewSession();
-    assert.equal(f.state.newSession(op.id)!.retryAt, now + 3000); assert.equal(f.native.starts, 1);
+    assert.equal(f.state.newSession(op.id)!.retryAt, now + 3000); assert.equal(f.native.starts, 0);
     now += 2999; await f.bridge.workNewSession(); assert.equal(creates, 1);
     now++; await f.bridge.workNewSession(); assert.equal(creates, 2);
     assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
