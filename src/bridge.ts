@@ -649,6 +649,10 @@ export class Bridge {
   }
 
   private async recoverTopic(callback: Json, message: Json, topicId: number | null): Promise<void> {
+    const messageId = integer(message.message_id);
+    if (!messageId || messageId < 1) {
+      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
+    }
     const match = /^recover:([a-f0-9]{32}):([br])$/u.exec(string(callback.data));
     const operation = match ? this.state.topicOperations().find(op => op.attempt.replaceAll('-', '') === match[1]) : undefined;
     const creation = operation ? this.state.findNewSession('threadId', operation.threadId) : undefined;

@@ -1,5 +1,11 @@
 # Verification record
 
+## Post-fix widget API acceptance
+
+A separate clearly labelled diagnostic card was sent to the verified existing current-session topic with TelegramClient after the fixes. Production sendWidget returned a positive widget Message receipt and the expected message_thread_id on its first attempt; editMessageWidgetData then confirmed an update to that same message. No new topic, native session, model turn, permission or view preference was created or changed. This is direct API acceptance; appearance on the physical client remains user acceptance. The earlier unknown card was not replayed.
+
+The full local suite remains333 discovered/329 passed/four skips. CI for00bded5 initially failed before creating jobs; its bounded rerun completed macOS/Node24 and Linux/Node22 successfully but ended overall failure with the other matrix jobs absent. No failing test logs were available for the missing jobs. Complete cross-platform CI is therefore not claimed for this follow-up.
+
 ## Development: topic before native session
 
 New /new operations confirm a Telegram topic before thread/start. Regression tests assert zero native sessions for topic4xx/5xx/unknown responses and interrupted requests, no repeat after reconnect, explicit empty-topic binding, attempt-fenced retries and positive topic receipt before the sole native start. Legacy fixtures retain the older native-first operation shape to verify already-created sessions remain recoverable. Final full suite:333 discovered,329 passed, four platform/opt-in skips and zero failures. Clean types/build, package checks and audit passed. The isolated real-native /new test also passed without a model turn or real Telegram writes. Two independent review axes found no remaining blocking issues. Unstarted legacy operations are upgraded before native creation; a reserved topic cannot be claimed by another pending operation. The local relay was restarted with the reviewed code; no further live topic creation was attempted after the user reported duplicate inaccessible topics.

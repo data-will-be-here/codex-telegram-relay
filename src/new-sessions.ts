@@ -113,8 +113,9 @@ export class NewSessions {
   async callback(callback: Json, message: Json, topicId: number | null): Promise<'bind' | void> {
     const match = /^n:([a-f0-9]{32}):(x|p\d+|\d+|[rbx]\d+)$/u.exec(string(callback.data));
     const op = match ? this.state.findNewSession('token', match[1]!) : undefined;
-    const sourceMessage = op && (this.state.promptMessage(op.menuKey) === integer(message.message_id) ||
-      this.state.promptMessage(`notice/new-topic-first/${op.id}/${op.topicAttempt}/${op.topicState}`) === integer(message.message_id));
+    const messageId = integer(message.message_id);
+    const sourceMessage = !!messageId && messageId > 0 && op && (this.state.promptMessage(op.menuKey) === messageId ||
+      this.state.promptMessage(`notice/new-topic-first/${op.id}/${op.topicAttempt}/${op.topicState}`) === messageId);
     if (!op || op.topicId !== topicId || !sourceMessage || op.expires < Date.now()) {
       await this.ack(callback, 'This menu expired or belongs to another topic. Send /new.'); return;
     }

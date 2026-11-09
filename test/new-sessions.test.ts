@@ -163,6 +163,9 @@ test('topic-first recovery binds an explicitly selected empty topic before the o
     };
     const op = await f.open(999); await f.choose(0); await f.bridge.workNewSession();
     const saved = f.state.newSession(op.id)!;
+    await f.bridge.update({ update_id: 709, callback_query: { id: 'missing-receipt', from: { id: 42, is_bot: false },
+      data: `n:${op.token}:b${saved.topicAttempt}`, message: { chat: { id: 42, type: 'private' }, message_thread_id: 999 } } });
+    await f.bridge.update(message(714, 556, '/bind')); assert.equal(f.state.newSession(op.id)!.targetTopic, undefined);
     const click: Json = { update_id: 710, callback_query: { id: 'use-topic', from: { id: 42, is_bot: false },
       data: `n:${op.token}:b${saved.topicAttempt}`, message: { message_id: f.state.promptMessage(op.menuKey), chat: { id: 42, type: 'private' }, message_thread_id: 888 } } };
     await f.bridge.update(click);
