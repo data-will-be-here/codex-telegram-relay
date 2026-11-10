@@ -121,7 +121,7 @@ test('short replies and approval controls keep the ordinary message path', async
     await f.drain();
     assert.equal(f.telegram.calls.filter(c => c.method === 'sendRichMessage').length, 0);
     assert.equal(f.telegram.sent().length, 2);
-    assert.ok(f.telegram.sent().at(-1)!.reply_markup);
+    assert.ok(f.telegram.sent()[0]!.reply_markup, 'approval controls take priority over ordinary replies');
     assert.equal(f.codex.writes.length, 0);
   } finally { f.close(); }
 });

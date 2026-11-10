@@ -10,10 +10,11 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 
 ### Why use it?
 
-- **Start a separate conversation (main/dev after v0.1.19).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
+- **Start a separate conversation (v0.1.20).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
-- **Check remaining account limits (main/dev after v0.1.19).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
+- **Optional live activity cards (v0.1.20).** `/view widgets` adds an updating activity card and the complete formatted final reply in a swipeable reader. Colors and text size follow the Telegram client's theme; approvals retain their normal controls.
+- **Check remaining account limits (v0.1.20).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
 - **Keep a searchable conversation archive.** Messages forwarded under your chosen mode and your Telegram replies stay in the topic, so you can return to earlier discussions and results whenever you need them.
 - **Follow several projects at once.** Each session has its own project topic. Opt into automatic discovery to include new eligible terminal and IDE sessions as they appear.
@@ -34,7 +35,7 @@ Install Codex Telegram Relay on my computer: https://github.com/data-will-be-her
 Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. If the installed release supports file exports, offer to help add artifact-delivery instructions to my AGENTS.md. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
-[Public preview v0.1.19](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.19). Start the relay directly with `npm start`. Documents the searchable Telegram conversation archive and places the Russian README link at the top. Includes the model picker, task signatures and recovery improvements from earlier releases. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.20](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.20). Adds optional theme-aware activity widgets, complete swipeable result/status readers, native table attachments, same-topic `/clear`, and four Codex-style permission presets. Improves topic creation and recovery while keeping direct `npm start`, existing pairing and searchable Telegram history. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -61,15 +62,15 @@ Your Telegram bot / private project topics
 - Live answer previews are enabled by default: eligible assistant text appears as it is generated, including native rich tables once their structure is available. `/stream off` disables previews; `/stream on` restores them immediately for all sessions. This setting persists independently of `/mode all|compact`. The complete response is saved separately through the durable outbox, even when a preview fails.
 - Answers containing headings or tables use native Telegram rich messages. Long tables split between rows with repeated headers; wide tables and oversized cells use labelled paragraphs. A definite format rejection falls back to readable row cards. Short replies, questions and approval controls retain ordinary messages. This is independent of `/mode all|compact`.
   Oversized formatted blocks may simplify inline styling to preserve their complete text within Telegram's limits.
-- Approval cards show the reason, working directory and exact command or change being requested, with relevant permission context and explicit action buttons.
+- Approval cards show the reason, working directory and command or change being requested, with relevant permission context and explicit action buttons. Large embedded code can use a clearly marked abbreviated preview; the button still approves the full original command available in Codex.
   Commands containing carriage returns or other invisible control characters use a labelled JSON-escaped representation so those characters remain visible.
 - Structured native questions show numbered choices, descriptions and inline answer buttons. You can also type an answer. Questions written only in ordinary assistant prose are delivered as text, without inferred buttons.
-- Native sandbox, network, approval and instruction settings are inherited. `/model` explicitly changes this session's model settings; `/permissions` (main/dev after v0.1.19) explicitly changes its permission profile or approval reviewer for following requests.
+- Native sandbox, network, approval and instruction settings are inherited. `/model` explicitly changes this session's model settings; `/permissions` (v0.1.20) explicitly changes its permission profile or approval reviewer for following requests.
 - Runtime npm dependencies are `ws` (native transport) and `marked` (Markdown parsing). SQLite comes with Node.
 
 Previews share roughly one update per second across the private chat; simultaneous sessions and network delays can slow individual topics. Incomplete formatting may change layout while text arrives. Very long previews show their latest part, while permanent answers retain all parts within the existing 40,000 UTF-16-unit source limit. Drafts are temporary; permanent sends retain the existing uncertainty/recovery rules. [Streaming details](docs/architecture.md#live-answer-previews).
 
-This is an initial developer release. Native transport, completion, questions, live steering and cross-client approval cancellation were qualified on Windows with CLI **0.166.0**, using a Telegram simulator. A real paired bot was subsequently checked for topic creation, bidirectional messages, formatting and native question responses. Sleep/reconnect, other native client versions and clean-machine installation still need acceptance checks. [Verification](docs/verification.md), [compatibility and limitations](docs/architecture.md).
+This remains a public preview. Native transport, completion, questions, live steering and cross-client approval cancellation were qualified on Windows with CLI **0.166.0**, using a Telegram simulator. A real paired bot was subsequently checked for topic creation, bidirectional messages, formatting and native question responses. Sleep/reconnect, other native client versions and clean-machine installation still need acceptance checks. [Verification](docs/verification.md), [compatibility and limitations](docs/architecture.md).
 
 ## Requirements
 
@@ -85,7 +86,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.19 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.20 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -116,9 +117,11 @@ codex-telegram-relay start
 
 ### Upgrade an existing installation
 
-Development fix: newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
+**Before upgrading to v0.1.20, stop the relay and back up its complete private state directory** (including SQLite sidecar files, configuration and pairing). Keep that backup private. This release automatically extends the state schema and stores mixed widget/table/file delivery plans, status snapshots and new-session/reset state. **In-place downgrade to v0.1.19 or older is unsupported even after queues drain**: old code cannot use the upgraded database layout. For rollback, stop every relay process and restore a compatible pre-upgrade backup; restoring it does not undo later Telegram/Codex actions, so reconcile post-backup deliveries and sessions before restarting. Prefer a forward fix if newer state must be preserved.
 
-Development reliability changes (after v0.1.16): observed final answers are saved before active-queue admission and survive overload/restart; `/status` shows pending finals. Saved final text consumes private disk until delivered or cancelled, so an extended outage can grow this backlog. Scope narrowing now cancels excluded queued output after restart. Discovery excludes subagents, ignored IDs and out-of-scope projects before counting its 64-session limit and warns when that limit is reached. Periodic scans run alongside message polling. Older versions do not handle the deferred backlog: clear it before downgrading.
+Since v0.1.20, newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
+
+Delivery reliability: observed final answers are saved before active-queue admission and survive overload/restart; `/status` shows pending finals. Saved final text consumes private disk until delivered or cancelled, so an extended outage can grow this backlog. Scope narrowing now cancels excluded queued output after restart. Discovery excludes subagents, ignored IDs and out-of-scope projects before counting its 64-session limit and warns when that limit is reached. Periodic scans run alongside message polling. Older versions do not handle the deferred backlog; do not use them with this release's state.
 
 Stop the relay with Ctrl+C, keeping Codex and the private relay state directory. Install the new version tag in a separate checkout using the commands above, then run `doctor` and `start` under the same OS account. If the bot is already paired, skip `setup`: the saved token, owner, topic bindings, ignored sessions and delivery progress are reused.
 
@@ -126,7 +129,7 @@ Use one relay process per private state directory. Version 0.1.13 adds durable r
 
 Version 0.1.14 enables live rich previews by default. After restarting the relay, use `/stream off` for completed messages only, or `/stream on` to restore streaming. Pairing and existing topic bindings are preserved; Codex sessions do not need restarting.
 
-Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The main/dev UI after v0.1.19 uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.
+Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The v0.1.20 UI uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.
 
 ### Agent-assisted installation
 
@@ -144,7 +147,7 @@ When installing this repository for a user, follow this workflow whether they su
 5. For an already paired installation, skip setup. Run `npm start -- sessions scope all` or `npm start -- sessions scope selected` after their choice; selected mode needs at least one root added with `npm start -- projects add /absolute/path`. Keep the token, owner, ignored IDs and topic bindings intact.
 6. Start one foreground relay with `npm start`, or ask the user to restart their already running relay. Keep the process running; do not create an unattended service without a separate request. Confirm the startup discovery mode, matching `/status`, and a topic for an eligible session. In automatic mode, ask the user to open a session in a new project, send its first prompt and check its topic appears. If a real bot check is pending, report it as pending rather than claiming success.
 
-For versions with outgoing files, explain that export is disabled by default and ask whether to enable it once locally with `files enable`. A person controlling the paired account can request files within Codex's effective permissions. Once enabled, individual files need no extra relay confirmation. Follow [Sending files back](#sending-files-back-development-version) when the user requests an artifact; `sent` is the success criterion.
+For versions with outgoing files, explain that export is disabled by default and ask whether to enable it once locally with `files enable`. A person controlling the paired account can request files within Codex's effective permissions. Once enabled, individual files need no extra relay confirmation. Follow [Sending files back](#sending-files-back) when the user requests an artifact; `sent` is the success criterion.
 
 7. **Offer to help update the user's `AGENTS.md`.** For an installed version with `send-file`, explain that this makes future agents deliver images, sketches, mockups, screenshots, videos and other review artifacts to the current session's Telegram topic. Offer a global user rule or a project-only rule, and show the proposed text with the actual local CLI path. Write it after the user chooses the scope or has already explicitly requested it; preserve existing instructions. A repository URL alone does not authorize changing global agent instructions. This documentation step does not enable file exports; respect the separate local opt-in. For older releases, explain the feature's availability rather than installing `dev` automatically.
 
@@ -155,6 +158,9 @@ When presenting a generated image, sketch, mockup, screenshot, animation, video 
 node "<ABSOLUTE_RELAY_CLI_PATH>" send-file "<ABSOLUTE_PROJECT_ARTIFACT_PATH>" --session "<CURRENT_NATIVE_SESSION_ID>"
 Route to the current interactive session. The CLI can use CODEX_THREAD_ID or a unique working-directory binding when --session is omitted; resolve ambiguity instead of guessing a topic. A local path or preview link can accompany the upload. Confirm delivery only when the receipt says sent; use files status REQUEST_ID for pending or uncertain results and inspect Telegram before any deliberate resend. Use existing export consent and native permissions; report disabled/unavailable export clearly. Keep the bot credential inside the relay and use this command rather than ad hoc Bot API scripts.
 ```
+
+<a id="sending-files-back"></a>
+<a id="sending-files-back-development-version"></a>
 
 ### Sending files back (v0.1.17)
 
@@ -212,7 +218,7 @@ Restart the relay afterwards. Project paths are resolved before containment chec
 
 ## Telegram controls
 
-The main/dev interface after v0.1.19 uses English for all relay-generated menus, buttons, notifications and approval-preview warnings, regardless of the Telegram app language. User messages, Codex replies, question options and native descriptions keep their original language.
+The v0.1.20 interface uses English for all relay-generated menus, buttons, notifications and approval-preview warnings, regardless of the Telegram app language. User messages, Codex replies, question options and native descriptions keep their original language.
 
 Setup and each relay start synchronize the English command menu with `setMyCommands` for the owner's private chat only, including the legacy Russian scope so existing installations stop showing mixed languages. Each installation uses its own paired owner ID from local configuration. The same command list powers `/help`. Menu synchronization is optional: a failure does not stop message delivery, and the next start retries it. `doctor` remains read-only. Commands always require the configured owner in their private chat, even if someone types a command without seeing the menu.
 
@@ -220,16 +226,18 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
-| `/new` | Create a conversation without a project, or in a connected project (main/dev after v0.1.19) |
+| `/new` | Create a conversation without a project, or in a connected project (v0.1.20) |
+| `/clear` | Start a fresh conversation in this topic, preserving Telegram history (v0.1.20) |
 | `/status` | Show connection and uncertain-delivery counts |
-| `/limits` | Show fresh account limits and reset times (main/dev after v0.1.19) |
+| `/limits` | Show fresh account limits and reset times (v0.1.20) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
 | `/stream`, `/stream on`, `/stream off` | Show or change live answer previews for all sessions; no restart required |
 | `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
 | `/model` | Choose this session's model, reasoning effort and speed |
-| `/permissions` | Show and change this session's native permissions (main/dev after v0.1.19) |
+| `/permissions` | Show and change this session's native permissions (v0.1.20) |
+| `/view`, `/view classic`, `/view widgets` | Choose Classic or experimental Widgets for all topics (v0.1.20) |
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
@@ -241,17 +249,41 @@ Topic-creation failure notices offer “Topic appeared — bind” and “Topic 
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
 
-## Session permissions with /permissions (main/dev after v0.1.19)
+## Experimental activity widgets (v0.1.20)
 
-Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. Typical profiles are Read-only, Workspace and Full Access; custom profiles appear automatically. Managed restrictions remain authoritative.
+Send `/view` in any topic or directly in the bot chat and choose `Classic` or `Widgets · experimental`, or use `/view widgets` directly. Classic is the default. One relay-wide preference applies to all current and future sessions and survives restarts. It applies to following turns; running turns keep their original view. `/view classic` restores the classic view for all topics. On first upgrade from per-session preferences, Widgets is retained if any saved session had it enabled; later global choices take precedence. `/status` shows the shared view. No local opt-in, separate web server or Telegram Mini App setup is needed.
+
+A turn lasting more than about a second can produce one activity card. It updates in place with the project/task, status, elapsed time, structured-plan counters, a brief assistant progress summary and up to three recent actions. Safe details distinguish file basenames, known command runners and tool names; raw command arguments, tool payload/output and reasoning are excluded. Failed commands do not automatically label the whole turn failed. No iteration budget, ETA or overall percentage is invented. Native task/plan text keeps its language; service labels are English.
+
+The card uses Telegram's message-bubble palette and native text tokens, including live theme/font changes and safe-area insets. Larger fonts reduce detail. Progress text uses the available data budget, ends at a sentence or word with an explicit ellipsis when shortened, and has a local More/Less control when more loaded text fits. Current status opens the complete saved progress explanation in a separate immutable widget, using the result reader's local pages or sequential overflow parts. It is a snapshot at the time of the click, titled Current status with a neutral blue marker. Repeating a click on the same revision reuses its delivery; a newer revision can open a new snapshot. The last part offers Text version. Existing Current step buttons open the same reader. It is a fixed, sandboxed mini-HTML template with bounded private `chat_data`, no external assets, shared state or widget-origin requests. Files, questions and full approvals keep their existing delivery paths. The card does not approve, change permissions or interrupt work.
+
+`/view` preserves the saved `/mode` and `/stream` preferences. During a widget turn, commentary and answer drafts stay out of ordinary text messages. Completion first tries an entire table-free formatted reply in one result widget, with local swipe/arrows and a current/total page counter. If that full reader exceeds the measured 32768-source-byte or 4000-zlib9-byte budget, the entire reply instead becomes short sequential widget parts: read them by scrolling the chat, with no pages or horizontal navigation inside a part. A table-free reply can exceed the byte budget even when its text is visually short: the fixed reader code also counts. Overflow parts use a larger density budget and choose the latest useful paragraph or complete-sentence boundary, preserving all text. Each flow card shows its complete part; on narrow screens or very large client text it reduces the body font only as needed (down to 12px) to stay within Telegram's 600px ceiling. Replies containing Markdown tables use an ordered mixed result: text widgets before a table, a native rich-table message, then text widgets after it. All text widgets in that mixed reply read vertically without inner pages. Tables retain rows, columns, headers, emphasis, code and supported links; long tables split by rows with repeated headers. Tables beyond the safe native limits, or definitely rejected by Telegram, use complete generated HTML attachments rather than labeled prose. The attachments contain only reply data, with no local source-file reads. Ordinary text mode is unchanged. Only the first message shows completion and enables a notification, including replies beginning with a table or HTML file; widget part numbers retain their position in the delivery sequence. The project label wraps at the upper left while the part number stays at the upper right. Native tables and HTML attachments omit the project/Part header and instead show only Attachment N · Table. All text is embedded in immutable HTML and remains readable with the relay offline, without a model turn. Activity cards keep More/Less.
+
+The last result part offers Text version as an optional formatted text copy; existing Full answer buttons continue working. That copy requires the relay and its saved state. A definite widget rejection switches remaining unsent parts to text. Unknown sends are never replayed and use one complete text backup; already acknowledged result parts are not reposted. New questions/approval controls take priority over continuing a long result series. A failed activity card releases its latest suppressed summary once.
+
+Full-answer caches are private local state retained independently of the seven-day delivery queue, so old buttons remain usable while their exact topic/project binding remains eligible. Up to 10,000 replies are retained; at capacity new results use ordinary text instead of discarding old answers. Removing the local state removes this archive and its buttons' content.
+
+The implementation targets production Bot API 10.4/private topics. New activity cards have a Classic for all topics button and no explanatory caption beneath them. Rendering depends on the Telegram client. Quiet active cards are checked against recent native history, at most four per discovery pass and no more often than every 15 seconds per card, with bounded RPC timeouts. A missed completion settles the existing card and delivers the final reply once without regressing a newer baseline. Successful checks refresh live status; finished cards show a stable Finished footer. Unknown initial sends are never replayed, and uncertain receipts remain protected from pruning. Existing sent HTML is immutable: the new footer/layout applies to new cards; editing data cannot upgrade the old template. [Protocol and validation](docs/architecture.md#activity-widgets).
+
+Proven connection failures before a widget request is sent are retried after three seconds. If an initial send has an unknown outcome, it is never replayed automatically and Classic is selected for following turns in all topics. `/view widgets` enables future cards. Safe diagnostic categories are retained locally; raw transport errors and bot URLs are not stored.
+
+## Session permissions with /permissions (v0.1.20)
+
+Send `/permissions` in an attached session topic to see its current settings and a fresh catalog of allowed native profiles. No local opt-in is needed; Codex must support the native profile/settings APIs. The menu matches the CLI: Ask for approval, Approve for me, Full Access and Read Only, followed by custom profiles. Only choices allowed by the native catalog, feature flags and managed requirements are offered.
 
 An ordinary profile applies on selection. Full Access first shows a warning and requires separate confirmation: local commands may modify files outside the project and access the network without approval prompts. Custom profiles also require confirmation with their native description. Changes persist for following requests in this same session, including local requests. An active turn or pending approval, other sessions and global configuration are unaffected.
 
-The separate approval-reviewer screen offers manual or native automatic review when Codex enables and permits it. Automatic review keeps the sandbox. Profile changes preserve the selected reviewer. Full Access uses no approval prompts, so the reviewer screen is hidden until an interactive profile is selected again. Codex rejects choices forbidden by its effective policy.
+Ask for approval selects the workspace profile with user approval review. Approve for me selects the same workspace profile with native automatic review; it does not grant Full Access. Both use on-request approval policy. Full Access selects unrestricted access with no approval prompts; Read Only selects the read-only profile with on-request user review. Each standard choice applies the complete profile/policy/reviewer preset, and the current marker compares all three. Custom profiles preserve the existing policy and reviewer. Codex remains authoritative.
 
 Opening, paging and cancelling never change settings. Buttons expire after ten minutes and belong only to the original message, topic and connection. A local settings change invalidates an earlier selection. Unknown write outcomes are never automatically repeated: check permissions in Codex before another selection. [Protocol and verification](docs/architecture.md#session-permission-selection).
 
-## New conversations with /new (main/dev after v0.1.19)
+## Fresh conversation in the current topic: /clear (v0.1.20)
+
+Send `/clear` without arguments in a saved session topic to start a new empty conversation in the same canonical directory. Telegram messages and the previous native transcript remain available. No new Telegram topic is created and no model task is started. An open terminal stays on the previous native session; the bot reports the new session ID. The new conversation uses Codex's project/default model and permissions, and the relay-wide Classic/Widgets preference is preserved. A verified non-archived unloaded conversation can also be cleared without resuming its old terminal; active work, pending input, deliveries and unverifiable history still block the switch. Refusals identify the concrete blocker.
+
+The current session must be idle, with no pending questions/approvals or queued deliveries/uploads. During the switch new input and settings controls are blocked. A definite creation rejection keeps the original topic usable. Unknown creation outcomes are reconciled by an operation marker without replaying creation; known IDs survive attachment or local persistence failures. After the atomic handoff the old session is excluded from automatic relay discovery and its old controls cannot change the new session. Saved Full answer buttons remain readable in the same eligible topic/project lineage. Native files/history are not deleted, archived or reverted. Explicitly moved or unrelated topic bindings invalidate the historical read route.
+
+## New conversations with /new (v0.1.20)
 
 `/new` works out of the box, including existing installations without a `newSessions` configuration section. The relay automatically prepares `codex-telegram-conversations` beside its private data directory, keeping workspace files separate from the bot token and state database. If that location lies inside a Git repository, the default is `~/Codex/Conversations`. No `new enable` or manual directory creation is required.
 
@@ -270,14 +302,18 @@ Send `/new` in any owner-private topic, an unbound topic, or without a topic. Th
 
 Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **No project**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
 
-Creation uses the existing Codex connection (`thread/start` then `thread/name/set`), without a synthetic prompt or model turn. Naming saves the empty thread before its topic is created. `/model` is available before the first task. Qualified on Codex CLI 0.166.0, including empty-history reads and recovery after a separate App Server restart. Ordinary cold terminal sessions still require their first local message. Native permissions, model defaults and project configuration are inherited; Codex may initialize project trust under its own rules.
+The relay first creates and confirms a Telegram topic. Only then does it create the Codex session through the existing connection (`thread/start` then `thread/name/set`), without a synthetic prompt or model turn. A failed or unknown topic request creates no Codex session. The menu offers explicit retry, cancellation, or selection of an existing empty topic followed by `/bind`. Proven pre-connect failures retry after three seconds; unknown requests never replay automatically. `/model` is available before the first task. Ordinary cold terminal sessions still require their first local message. Native permissions, model defaults and project configuration are inherited; Codex may initialize project trust under its own rules.
 
 The computer, relay and background Codex process must be running; a terminal window per conversation and the Windows GUI app are unnecessary. The current proxy does not start the daemon. Creation runs beside messaging and uploads. Duplicate clicks cannot repeat a start. Lost responses are reconciled by exact operation metadata, never automatically retried as a new start. Known IDs survive naming/topic failures; uncertain Telegram topic creation uses `/bind` and `/repair`. Archived sessions are not unarchived or replaced. [Protocol and recovery](docs/architecture.md#new-conversation-creation).
+
+For older operations that already created a Codex session before its topic, the original `/new` menu shows the saved session ID and recovery actions. Repeating `/new` returns to those actions. Recovery reuses that same native session; it never creates a replacement. Existing saved sessions are retained.
+
+Recovery controls can restore an unloaded conversation created by `/new` from its exact saved ID, after verifying its non-archived history and allowed workspace. A terminal prompt is not required. Ordinary unowned terminal sessions keep their existing readiness checks. `BOT_TOPIC_WRONG_HOME` is treated as an unknown creation outcome: check Telegram before retrying, since an error response is not proof that no topic is visible. The relay never derives topic IDs from names or message IDs.
 
 ## Account limits
 
 
-Available on `main`/`dev` after v0.1.19, `/limits` works in the paired owner's private chat and any topic, including one without an attached session. Each invocation reads `account/rateLimits/read` through the existing native connection and replies in the same place. The limits belong to the active Codex account, not the individual session. No model turn is created.
+Available since v0.1.20, `/limits` works in the paired owner's private chat and any topic, including one without an attached session. Each invocation reads `account/rateLimits/read` through the existing native connection and replies in the same place. The limits belong to the active Codex account, not the individual session. No model turn is created.
 
 The response shows the actual quota groups and window durations returned by Codex; it does not assume both a five-hour and a weekly window exist. Remaining percentages, reset dates in the relay computer's explicitly labelled timezone, relative time, and the snapshot time are displayed. Plan, credits and spending restrictions appear when provided; a backend-reported restriction remains visible even with a positive percentage. Unknown fields stay unavailable, and a passed reset timestamp does not imply recovered quota. Very large lists are explicitly shortened. Repeat `/limits` for a fresh snapshot; there are no background alerts.
 
@@ -300,7 +336,7 @@ One temporarily unavailable Codex session does not stop discovery or relaying fo
 
 In v0.1.17, replaying the same pending approval after reconnect or relay restart refreshes the existing card's buttons instead of posting another card. Distinct native requests and changed proposals remain separate. If the original send has no confirmed receipt, another copy is not sent automatically; answer that request in Codex. Existing cards from an older version lack the required identity, so the first replay after upgrading may create one new card. [Investigation and checks](docs/research/repeated-approval-cards-2026-11-05.md).
 
-In source checkouts newer than v0.1.19, long supported approvals arrive as numbered messages (`1/3`, `2/3`, `3/3`) with collapsed review blocks that expand on tap, the same request reference and project/task signature. Large embedded scripts and fenced code examples use short code blocks of at most six lines, including the omission marker, in a single compact approval card; ordinary command arguments remain complete; large quoted context may also be abbreviated, and repeated policy code points to the command preview. Several source examples share a budget; excess examples have an omission notice. Compact code cards keep the normal code formatting and buttons without collapsible quotations. A visible warning states that the button approves the complete original command available in Codex. Proposed file changes and requested permissions remain complete. Decision buttons appear on the final part after every part has a confirmed receipt. Restarting resumes only the remaining confirmed-safe work after Codex revalidates the pending request; an unknown send outcome requires checking Codex. This change is newer than v0.1.19.
+Since v0.1.20, long supported approvals arrive as numbered messages (`1/3`, `2/3`, `3/3`) with collapsed review blocks that expand on tap, the same request reference and project/task signature. Large embedded scripts and fenced code examples use short code blocks of at most six lines, including the omission marker, in a single compact approval card; ordinary command arguments remain complete; large quoted context may also be abbreviated, and repeated policy code points to the command preview. Several source examples share a budget; excess examples have an omission notice. Compact code cards keep the normal code formatting and buttons without collapsible quotations. A visible warning states that the button approves the complete original command available in Codex. Proposed file changes and requested permissions remain complete. Decision buttons appear on the final part after every part has a confirmed receipt. Restarting resumes only the remaining confirmed-safe work after Codex revalidates the pending request; an unknown send outcome requires checking Codex. Available in v0.1.20.
 
 Topic creation is journaled before calling Telegram. If the response is lost, creation pauses to avoid duplicate topics, including after restarting the relay. The bot sends recovery instructions: use `/bind SESSION_ID` inside the topic if it appeared, or `/repair SESSION_ID` to explicitly retry if it did not. These commands require the paired owner and never submit an instruction to Codex.
 

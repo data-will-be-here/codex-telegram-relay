@@ -41,6 +41,12 @@ export function linkable(url: URL): boolean {
 
 /** Parse CommonMark/GFM into text and Telegram entities; never interpret raw HTML. */
 export function renderMarkdown(source: string): FormattedText {
+  try { return renderMarkdownTokens(Lexer.lex(source, { gfm: true }), source); }
+  catch { return { text: source, entities: [] }; }
+}
+
+/** Preserve already-resolved reference links when one answer is partitioned between output formats. */
+export function renderMarkdownTokens(tokens: Token[], source = tokens.map(token => token.raw).join('')): FormattedText {
   let text = '';
   const spans: Entity[] = [];
   const add = (type: Entity['type'], write: () => void, extra: Pick<Entity, 'url' | 'language'> = {}): void => {
@@ -105,7 +111,7 @@ export function renderMarkdown(source: string): FormattedText {
       }
     }
   };
-  try { visit(Lexer.lex(source, { gfm: true })); }
+  try { visit(tokens); }
   catch { return { text: source, entities: [] }; }
   text = text.trimEnd();
   if (!text.trim()) return { text: source, entities: [] };
@@ -153,6 +159,10 @@ export function splitMessage(text: string, limit = 3500): string[] {
 
 export function formatMessages(source: string, markdown: boolean, limit = 3500): FormattedText[] {
   const rendered = markdown ? renderMarkdown(source) : { text: source, entities: [] };
+  return splitFormatted(rendered, limit);
+}
+
+export function splitFormatted(rendered: FormattedText, limit = 3500): FormattedText[] {
   let offset = 0;
   return splitMessage(rendered.text, limit).map(text => {
     const start = offset; offset += text.length;

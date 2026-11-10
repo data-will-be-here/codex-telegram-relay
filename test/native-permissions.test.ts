@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CodexClient, RpcError } from '../src/codex.js';
 import { findCodex } from '../src/config.js';
-import { permissionSignature } from '../src/permission-settings.js';
 import { PermissionPicker } from '../src/permission-picker.js';
 import { State } from '../src/state.js';
 import { Outbox } from '../src/telegram.js';
@@ -49,7 +48,7 @@ test('native /permissions: confirmed profiles and reviewer persist across restar
   };
   const stop = async () => {
     if (!child || child.exitCode !== null) return;
-    const running = child; const exited = new Promise<void>(resolve => running.once('exit', () => resolve()));
+    const running = child; const exited = new Promise<void>(resolve => running.once('close', () => resolve()));
     running.stdin.end(); const timer = setTimeout(() => running.kill(), 3000); await exited; clearTimeout(timer);
   };
   try {
@@ -77,9 +76,15 @@ test('native /permissions: confirmed profiles and reviewer persist across restar
     let snapshot = await native.permissionCatalog(threadId, project);
     assert.equal(object(snapshot.settings.activePermissionProfile).id, ':danger-full-access');
     assert.equal(snapshot.settings.approvalPolicy, 'never');
-    await native.updatePermissions(threadId, { permissions: ':workspace', approvalPolicy: 'on-request' }, permissionSignature(snapshot.settings));
-    snapshot = await native.permissionCatalog(threadId, project);
-    await native.updatePermissions(threadId, { approvalsReviewer: 'auto_review' }, permissionSignature(snapshot.settings));
+    for (const mode of ['Ask for approval', 'Approve for me']) {
+      await picker.open(binding); while (await outbox.flushOne()) { /* Deliver a fresh scoped menu. */ }
+      const menu = telegram.calls.filter(call => call.method === 'sendMessage').at(-1)!;
+      await click(buttons(menu.params.reply_markup).find(button => string(button.text).includes(mode))!.callback_data);
+      snapshot = await native.permissionCatalog(threadId, project);
+      assert.equal(object(snapshot.settings.activePermissionProfile).id, ':workspace');
+      assert.equal(snapshot.settings.approvalPolicy, 'on-request');
+      assert.equal(snapshot.settings.approvalsReviewer, mode === 'Approve for me' ? 'auto_review' : 'user');
+    }
     assert.equal(readFileSync(configFile, 'utf8'), initialConfig);
     assert.deepEqual(await native.turns(threadId), []);
     await stop(); await boot(); await native.attach(threadId);

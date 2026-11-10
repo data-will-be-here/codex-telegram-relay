@@ -25,7 +25,7 @@ export function temporary(): { dir: string; close: () => void } {
   return { dir, close: () => {
     const target = realpathSync(dir);
     if (dirname(target) !== resolve(base) || !basename(target).startsWith('codex-relay-test-')) throw new Error('Unsafe test cleanup path.');
-    rmSync(target, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } };
 }
 
@@ -93,7 +93,7 @@ export class FakeTelegram implements Telegram {
   async call(method: string, params: Json = {}): Promise<unknown> {
     this.calls.push({ method, params });
     if (method === 'createForumTopic') return { message_thread_id: ++this.topic };
-    if (method === 'sendMessage' || method === 'sendRichMessage') return { message_id: ++this.message };
+    if (method === 'sendMessage' || method === 'sendRichMessage' || method === 'sendWidget') return { message_id: ++this.message };
     return true;
   }
   sent(): Json[] { return this.calls.filter(c => c.method === 'sendMessage').map(c => c.params); }

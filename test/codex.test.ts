@@ -81,6 +81,10 @@ test('new thread creation and naming send only cwd, persistence and correlation 
       { cwd: process.cwd(), ephemeral: false, threadSource: 'codex-telegram-relay:new:operation' });
     assert.deepEqual(records.find(record => record.method === 'thread/name/set')!.params,
       { threadId: 'new-thread', name: 'New conversation' });
+    await c.createThread(process.cwd(), 'codex-telegram-relay:new:clear-operation', 'clear');
+    const after = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(after.filter(record => record.method === 'thread/start').at(-1)!.params,
+      { cwd: process.cwd(), ephemeral: false, threadSource: 'codex-telegram-relay:new:clear-operation', sessionStartSource: 'clear' });
     assert.equal(records.some(record => record.method === 'turn/start' || record.method === 'thread/fork'), false);
   } finally { c.close(); }
 });

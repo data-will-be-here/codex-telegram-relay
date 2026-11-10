@@ -86,7 +86,7 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
     await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.19' },
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.20' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
     });
     socket.send(JSON.stringify({ method: 'initialized' }));
@@ -163,8 +163,8 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
-  async createThread(cwd: string, marker: string): Promise<Json> {
-    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker })).thread);
+  async createThread(cwd: string, marker: string, source?: 'clear'): Promise<Json> {
+    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker, ...(source ? { sessionStartSource: source } : {}) })).thread);
   }
   async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
   async nonArchivedThread(threadId: string): Promise<Json | undefined> {
@@ -310,10 +310,10 @@ export class CodexClient extends EventEmitter implements Codex {
     if (thread.id === threadId) this.cachePermissions(threadId, { ...result, sandboxPolicy: result.sandbox });
     return thread;
   }
-  async turns(threadId: string): Promise<Json[]> {
+  async turns(threadId: string, timeoutMs?: number): Promise<Json[]> {
     try {
       // Display summaries retain agent replies while excluding enormous historical tool outputs.
-      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' })).data).map(object);
+      return array(object(await this.call('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'summary' }, timeoutMs)).data).map(object);
     } catch (error) {
       // A reserved rollout path is not proof of materialization. Keep this state distinct from readable empty history.
       if (error instanceof RpcError && !error.uncertain &&

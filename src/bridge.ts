@@ -11,6 +11,9 @@ import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
 import { ModelPicker } from './model-picker.js';
 import { PermissionPicker } from './permission-picker.js';
+import { Widgets, ViewPicker } from './widgets.js';
+import { resultParts } from './widget-result.js';
+import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
@@ -52,6 +55,10 @@ export class Bridge {
   private topics: Topics;
   private models: ModelPicker;
   private permissions: PermissionPicker;
+  private widgets: Widgets;
+  private widgetChecks = new Map<string, number>();
+  private views: ViewPicker;
+  private closed = false;
   private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
@@ -59,15 +66,43 @@ export class Bridge {
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
-    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding));
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
+    this.widgets = new Widgets(state, this.generation);
+    this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async () => {
+      for (const binding of this.state.bindings()) {
+        if (!this.attached.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId)) continue;
+        let turns: Json[];
+        try { turns = await this.codex.turns(binding.threadId); }
+        catch { continue; } // A temporarily unavailable session must not block this relay-wide preference.
+        const current = this.state.binding(binding.threadId);
+        if (current?.topicId !== binding.topicId || current.cwd !== binding.cwd || !this.attached.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId)) continue;
+        this.widgets.recover(current, turns);
+      }
+    });
   }
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
   workNewSession(): Promise<void> { return this.newSessions.tick(); }
-  close(): void { this.newSessions.close(); }
+  close(): void { this.closed = true; this.widgets.close(); this.newSessions.close(); }
+  widgetDelivery(): WidgetDeliveryGuard {
+    for (const card of this.state.activeWidgets(this.generation)) {
+      const id = card.binding.threadId; const turnId = card.turnId;
+      const prompts = [...this.prompts.values()].filter(prompt => prompt.binding.threadId === id && prompt.request.params.threadId === id &&
+        (!prompt.request.params.turnId || prompt.request.params.turnId === turnId) && this.pending(prompt));
+      this.widgets.waiting(id, prompts.filter(prompt => prompt.request.method.endsWith('/requestApproval')).length,
+        prompts.filter(prompt => prompt.questions.length > 0).length);
+    }
+    return { generation: this.generation, allowed: async card => {
+      if (this.closed || card.generation !== this.generation) return false;
+      try { return !!await this.settingsThread(card.binding) && !this.closed; } catch { return false; }
+    } };
+  }
   private async connectCreated(binding: Binding): Promise<void> {
+    for (const id of this.attached) if (this.state.retiredSession(id)) {
+      this.attached.delete(id); this.drafts.finish(id); await this.retireTopicPrompts(id);
+    }
     if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
     if (binding.lastTurn === null) this.state.baseline(binding.threadId, '-');
     this.attached.add(binding.threadId);
@@ -81,16 +116,60 @@ export class Bridge {
   }
 
   private async settingsThread(binding: Binding): Promise<Json | undefined> {
-    const eligible = (): boolean => this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
-      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId);
+    const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId) && !this.state.resettingTopic(binding.topicId);
     if (!eligible()) return;
     const thread = await this.codex.read(binding.threadId, 1000);
     if (eligible() && string(thread.cwd) === binding.cwd && this.allowed(binding.cwd, binding.threadId) &&
         ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
   }
 
+  private async clearBlocker(binding: Binding): Promise<string | undefined> {
+    const routed = (): boolean => !this.closed && !this.state.retiredSession(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+    const blocker = (): string | undefined => !routed() ? 'The saved topic or directory is no longer eligible.' :
+      this.state.sessionDeliveryBusy(binding.threadId) ? 'Messages or files are still being delivered. Wait for delivery and retry /clear.' :
+      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? 'Answer the pending question or approval, then retry /clear.' : undefined;
+    const initial = blocker(); if (initial) return initial;
+    const thread = await this.codex.read(binding.threadId);
+    if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true || thread.canAcceptDirectInput === false ||
+        !['cli', 'vscode', 'appServer'].includes(string(thread.source))) return 'The saved conversation is no longer eligible.';
+    const status = string(object(thread.status).type);
+    if (status === 'notLoaded') {
+      const saved = await this.codex.nonArchivedThread?.(binding.threadId);
+      if (!saved || saved.id !== binding.threadId || saved.cwd !== binding.cwd || saved.parentThreadId || saved.ephemeral === true || saved.canAcceptDirectInput === false ||
+          !['cli', 'vscode', 'appServer'].includes(string(saved.source))) return 'The saved conversation is archived or unavailable.';
+      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return 'The Codex task is still active. Finish it and retry /clear.';
+    } else if (status !== 'idle') return 'The Codex task is still active. Finish it and retry /clear.';
+    const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
+    const turns = await this.codex.turns(binding.threadId);
+    const changed = blocker(); if (changed) return changed;
+    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return 'The conversation changed during the check. Retry /clear.';
+    if (turns.some(turn => turn.status === 'inProgress')) return 'The Codex task is still active. Finish it and retry /clear.';
+    const latest = turns.find(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
+    if (!latest && baseline && baseline !== '-') return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
+    if (latest && latest.id !== this.state.binding(binding.threadId)?.lastTurn) {
+      const index = baseline && baseline !== '-' ? turns.findIndex(turn => turn.id === baseline) : turns.length;
+      if (index <= turns.indexOf(latest)) return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
+      const missed = turns.slice(0, index).filter(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
+      for (const turn of missed.reverse()) await this.complete(binding, turn, { baseline, advance: false });
+      if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
+      return 'A completed reply is being recovered. Wait for delivery and retry /clear.';
+    }
+    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return 'Answer the pending question in Codex, then retry /clear.';
+    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? 'The conversation changed during the check. Retry /clear.' :
+      this.state.reply(binding.threadId) ? 'A submitted instruction is still awaiting its result. Wait and retry /clear.' : undefined);
+  }
+
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
   streamEvent(method: string, params: Json): void {
+    if (['turn/started', 'turn/plan/updated', 'turn/completed', 'item/started', 'item/completed'].includes(method)) {
+      const activityThread = string(params.threadId) || string(object(params.thread).id);
+      const activityBinding = this.state.binding(activityThread);
+      if (!this.closed && activityBinding && this.attached.has(activityThread) && !this.state.topicOperation(activityThread) &&
+          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) this.widgets.observe(activityBinding, method, params);
+    }
     if (!['item/started', 'item/agentMessage/delta', 'item/completed', 'turn/completed'].includes(method)) return;
     const threadId = string(params.threadId);
     const binding = this.state.binding(threadId);
@@ -117,6 +196,7 @@ export class Bridge {
         const reply = this.state.reply(binding.threadId);
         return this.state.streamingEnabled() && this.attached.has(binding.threadId) && current?.topicId === binding.topicId &&
           !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+          !(this.widgets.usesCard(binding.threadId, turnId)) &&
           (!phase || phase === 'final_answer' || this.state.messageMode() === 'all' || !!reply && (!reply.turnId || reply.turnId === turnId));
       };
       if (!eligible()) return false;
@@ -141,7 +221,7 @@ export class Bridge {
     this.discovering = true;
     try {
       const nameVersions = new Map(this.nameVersions);
-      const readSessions = () => this.codex.list(session => !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      const readSessions = () => this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
       let sessions = await readSessions();
       if (await this.newSessions.restore(sessions.map(session => session.id))) sessions = await readSessions();
       const loaded = new Set(sessions.map(s => s.id));
@@ -185,7 +265,38 @@ export class Bridge {
       }
       await this.discoverAgents();
       await this.flushApproval();
+      await this.reconcileWidgets();
     } finally { this.discovering = false; }
+  }
+
+  private async reconcileWidgets(): Promise<void> {
+    const now = Date.now();
+    const active = this.state.activeWidgets(this.generation).filter(card => ['new', 'active', 'sending', 'editing'].includes(card.delivery));
+    const ids = new Set(active.map(card => card.id));
+    for (const id of this.widgetChecks.keys()) if (!ids.has(id)) this.widgetChecks.delete(id);
+    const allowed = (binding: Binding): boolean => !this.closed && this.attached.has(binding.threadId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.state.topicOperation(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+    const due = active.filter(card => now - card.snapshot.updatedAt >= 15_000 && now - (this.widgetChecks.get(card.id) ?? 0) >= 15_000 && allowed(card.binding))
+      .sort((a, b) => (this.widgetChecks.get(a.id) ?? 0) - (this.widgetChecks.get(b.id) ?? 0)).slice(0, 4);
+    for (const card of due) {
+      this.widgetChecks.set(card.id, now);
+      try {
+        const turns = await this.codex.turns(card.binding.threadId, 3000);
+        const current = this.state.widgetCard(card.binding.threadId, card.turnId);
+        if (!allowed(card.binding) || current?.revision !== card.revision) continue;
+        const turnIndex = turns.findIndex(turn => turn.id === card.turnId);
+        const turn = turns[turnIndex];
+        if (turn && ['completed', 'failed', 'interrupted'].includes(string(turn.status))) {
+          const baseline = this.state.binding(card.binding.threadId)!.lastTurn;
+          const previousIndex = turns.findIndex(turn => turn.id === baseline);
+          await this.complete(card.binding, turn, { baseline, advance: baseline === null || baseline === '-' || baseline === card.turnId || previousIndex > turnIndex });
+        }
+        if (allowed(card.binding)) this.widgets.reconcile(card, turns);
+      } catch {
+        if (allowed(card.binding)) this.widgets.reconcile(card, []);
+      }
+    }
   }
 
   private async discoverAgents(): Promise<void> {
@@ -224,6 +335,7 @@ export class Bridge {
 
   async catchUp(binding: Binding): Promise<void> {
     const turns = await this.codex.turns(binding.threadId);
+    this.widgets.recover(binding, turns);
     const saved = this.state.binding(binding.threadId)?.lastTurn;
     const missed: Json[] = [];
     for (const turn of turns) {
@@ -273,7 +385,7 @@ export class Bridge {
         const reply = this.state.reply(threadId);
         const matchingReply = reply && (!reply.turnId || reply.turnId === params.turnId);
         const all = this.state.messageMode() === 'all';
-        if ((all || matchingReply) && await this.stillAllowed(binding)) {
+        if ((all || matchingReply) && !this.widgets.usesCard(threadId, string(params.turnId)) && await this.stillAllowed(binding)) {
           const itemId = string(item.id) || createHash('sha256').update(string(item.text)).digest('hex');
           const key = all ? `assistant/${threadId}/${string(params.turnId)}/${itemId}` : `reply/${threadId}/${reply!.inputId}`;
           this.state.enqueue(key, binding.topicId, string(item.text));
@@ -288,21 +400,36 @@ export class Bridge {
     }
   }
 
-  private async complete(binding: Binding, turn: Json): Promise<void> {
+  private async complete(binding: Binding, turn: Json, recovery?: { baseline: string | null; advance: boolean }): Promise<void> {
     const turnId = string(turn.id);
     if (!turnId) return;
     const status = string(turn.status);
     if (!['completed', 'failed', 'interrupted'].includes(status)) return;
-    if (!await this.stillAllowed(binding)) return;
+    const previous = recovery?.baseline ?? this.state.binding(binding.threadId)?.lastTurn ?? null;
+    if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     let text = finalAnswer(turn) || this.finals.get(`${binding.threadId}/${turnId}`) || '';
     if (!text) {
-      const snapshot = (await this.codex.turns(binding.threadId)).find(t => t.id === turnId);
+      const snapshot = (await this.codex.turns(binding.threadId, recovery ? 3000 : undefined)).find(t => t.id === turnId);
       if (snapshot) text = finalAnswer(snapshot);
+      if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     }
+    const currentBinding = this.state.binding(binding.threadId);
+    if (this.closed || currentBinding?.topicId !== binding.topicId || currentBinding.cwd !== binding.cwd || this.state.topicOperation(binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) return;
     const header = status === 'completed' ? '✅ Turn finished' : status === 'interrupted' ? '⏹ Turn interrupted' : '❌ Turn failed';
     const error = string(object(turn.error).message);
-    this.state.enqueue(`final/${binding.threadId}/${turnId}`, binding.topicId, `${header}\n\n${text || error || 'See the terminal for details.'}`);
-    this.state.baseline(binding.threadId, turnId);
+    const key = `final/${binding.threadId}/${turnId}`; const exists = this.state.deliveryExists(key);
+    const body = `${header}\n\n${text || error || 'See the terminal for details.'}`;
+    let widget = false;
+    const progress = this.widgets.widgetTurn(binding.threadId, turnId);
+    if (!exists && progress) {
+      const token = randomBytes(16).toString('hex');
+      const result = { ...progress, kind: 'result' as const, snapshot: { ...progress.snapshot, status: status === 'completed' ? 'done' as const : status as 'failed' | 'interrupted',
+        finishedAt: progress.snapshot.finishedAt ?? (typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()),
+        updatedAt: Date.now(), progressText: (text || error || 'See the terminal for details.').slice(0, 40_000), plan: null, activities: [] } };
+      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts(result, text || error || 'See the terminal for details.', token));
+    }
+    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
+    if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
     this.finals.delete(`${binding.threadId}/${turnId}`);
@@ -456,13 +583,20 @@ export class Bridge {
         await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('n:')) {
-        await this.newSessions.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+        if (await this.newSessions.callback(callback, message, topic) === 'bind') this.pendingBind = undefined;
+        this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('m:')) {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('p:')) {
         this.state.finish(id, await this.permissions.callback(callback, message, topic)); return;
+      }
+      if (Object.keys(callback).length && string(callback.data).startsWith('v:')) {
+        await this.views.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
+      if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
+        await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
@@ -486,6 +620,11 @@ export class Bridge {
       this.notice(topicId, commandHelp()); return;
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
+    if (/^\/clear(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (text !== '/clear' || !binding) { this.notice(topicId, 'Send /clear without arguments inside an attached session topic.'); return; }
+      await this.newSessions.clear(binding); return;
+    }
     if (/^\/limits(?:\s|$)/u.test(text)) {
       if (text !== '/limits') { this.notice(topicId, 'Use /limits without arguments.'); return; }
       try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
@@ -495,7 +634,7 @@ export class Bridge {
     if (text === '/sessions') {
       this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
+    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nView for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
@@ -506,6 +645,7 @@ export class Bridge {
       const [command, supplied, extra] = text.split(/\s+/u);
       let prefix = supplied;
       let selectedBind: typeof this.pendingBind;
+      if (command === '/bind' && !prefix && !this.pendingBind && await this.newSessions.bindPending(topicId)) return;
       if (command === '/bind' && !prefix && this.pendingBind) {
         const pending = this.pendingBind;
         if (pending.expires < Date.now() || this.state.topicOperation(pending.threadId)?.attempt !== pending.attempt) {
@@ -529,7 +669,8 @@ export class Bridge {
         }
         await this.codex.turns(session.id); // Explicit recovery must respect the same first-message gate as discovery.
         if (selectedBind) {
-          const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+          let live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+          if (!live && await this.newSessions.recoverOwned(session.id)) live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
           if (!live || live.cwd !== session.cwd || !this.allowed(live.cwd, session.id) || this.config.ignoredThreadIds?.includes(session.id))
             throw new Error('The session is no longer available in the selected project. Resume it in Codex and retry recovery.');
           if (this.pendingBind !== selectedBind || selectedBind.expires < Date.now() || this.state.topicOperation(session.id)?.attempt !== selectedBind.attempt)
@@ -560,6 +701,13 @@ export class Bridge {
       if (!count) this.notice(topicId, 'No current questions. Requests from before connection may still need the terminal.');
       return;
     }
+    if (/^\/view(?:\s|$)/u.test(text)) {
+      const choice = text.split(/\s+/u);
+      if (choice.length > 2 || choice[1] !== undefined && !['classic', 'widgets'].includes(choice[1])) {
+        this.notice(topicId, 'Use /view, /view classic or /view widgets.'); return;
+      }
+      await this.views.open(topicId, choice[1] as 'classic' | 'widgets' | undefined); return;
+    }
     if (/^\/permissions(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
       if (!binding) { this.notice(topicId, 'Open an attached session topic and send /permissions.'); return; }
@@ -589,6 +737,26 @@ export class Bridge {
     await this.sendInput(binding, inputId, prompt);
   }
 
+  private async answerCallback(callback: Json, message: Json, topicId: number | null): Promise<void> {
+    const token = /^a:([a-f0-9]{32})$/u.exec(string(callback.data))?.[1];
+    const answer = token ? this.state.widgetAnswer(token) : undefined;
+    const valid = (): boolean => {
+      const current = topicId === null ? undefined : this.state.topic(topicId);
+      return !!answer && !!current && !this.closed && answer.messageId !== null && answer.messageId === integer(message.message_id) &&
+        topicId === answer.binding.topicId && this.state.historicalAnswerBinding(answer.binding) &&
+        !this.config.ignoredThreadIds?.includes(answer.binding.threadId) && this.allowed(answer.binding.cwd, answer.binding.threadId) &&
+        !this.config.ignoredThreadIds?.includes(current.threadId) && !this.state.topicOperation(current.threadId) && this.allowed(current.cwd, current.threadId);
+    };
+    const authorized = valid();
+    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!authorized ? { text: 'This answer is no longer available in this topic.' } : {}) }); }
+    catch { /* A read-only cached reply does not depend on Telegram accepting the acknowledgement. */ }
+    if (authorized && valid() && answer) {
+      const current = this.state.topic(topicId!)!;
+      const click = createHash('sha256').update(string(callback.id)).digest('hex');
+      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId);
+    }
+  }
+
   private async connectionStatus(binding: Binding): Promise<string> {
     if (this.config.ignoredThreadIds?.includes(binding.threadId)) return 'This session is ignored. Re-enable it locally before reconnecting.';
     if (!this.allowed(binding.cwd, binding.threadId)) return 'This session is outside your selected projects. Select its project locally before reconnecting.';
@@ -605,23 +773,33 @@ export class Bridge {
   }
 
   private async recoverTopic(callback: Json, message: Json, topicId: number | null): Promise<void> {
+    const messageId = integer(message.message_id);
+    if (!messageId || messageId < 1) {
+      await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
+    }
     const match = /^recover:([a-f0-9]{32}):([br])$/u.exec(string(callback.data));
     const operation = match ? this.state.topicOperations().find(op => op.attempt.replaceAll('-', '') === match[1]) : undefined;
-    if (!operation || topicId !== null || !['failed', 'uncertain'].includes(operation.status) ||
-        integer(message.message_id) !== this.state.promptMessage(`topic-problem/${operation.attempt}`)) {
+    const creation = operation ? this.state.findNewSession('threadId', operation.threadId) : undefined;
+    const originalMenu = creation?.status === 'topic' && creation.topicId === topicId && integer(message.message_id) === this.state.promptMessage(creation.menuKey);
+    const recoveryNotice = operation && topicId === null && integer(message.message_id) === this.state.promptMessage(`topic-problem/${operation.attempt}`);
+    const creationNotice = creation && operation && creation.topicId === topicId &&
+      [this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}`), this.state.promptMessage(`notice/new-topic/${creation.id}/${operation.attempt}/${operation.status}`)].includes(integer(message.message_id));
+    if (!operation || !['failed', 'uncertain'].includes(operation.status) || !(originalMenu || recoveryNotice || creationNotice)) {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This recovery action is no longer available.' }); return;
     }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
     try {
       const session = this.topics.resolve(operation.threadId);
-      const live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+      let live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
+      if (!live && await this.newSessions.recoverOwned(session.id)) live = (await this.codex.list(s => s.id === session.id)).find(s => s.id === session.id);
       if (!live || live.cwd !== session.cwd) throw new Error('Resume this session locally in Codex before recovering the topic.');
       await this.codex.turns(session.id);
       const current = this.state.topicOperation(session.id);
       if (current?.attempt !== operation.attempt || !['failed', 'uncertain'].includes(current.status)) throw new Error('The recovery state has changed. Check /sessions.');
       if (match![2] === 'b') {
+        this.newSessions.clearPendingBind();
         this.pendingBind = { threadId: session.id, attempt: operation.attempt, expires: Date.now() + 10 * 60 * 1000 };
-        this.state.enqueue(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`, null, operation.cwd, session.id);
+        this.state.enqueueOwnerNotice(`notice/recovery/${randomUUID()}`, topicId, `${operation.title}\nOpen the topic that appeared and send /bind without an ID. The selection expires in 10 minutes; no Codex instruction will be sent.`);
       } else {
         const binding = await this.topics.retry(session.id);
         if (binding) {
@@ -806,11 +984,17 @@ export class Bridge {
     prompt.index = missing >= 0 ? missing : prompt.questions.length - 1;
   }
   private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
+    const current = (): boolean => !this.closed && !this.state.resettingTopic(binding.topicId) &&
+      this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId);
+    if (!current()) throw new RpcError('This topic is switching conversations. Wait for completion; no instruction was sent.', false);
     const thread = await this.codex.read(binding.threadId);
     if (!this.allowed(string(thread.cwd), binding.threadId)) throw new RpcError('Native session moved outside configured roots.', false);
+    if (!current() || thread.cwd !== binding.cwd) throw new RpcError('Native session or topic changed. No instruction was sent.', false);
     const status = string(object(thread.status).type);
     if (status === 'active') {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
+      if (!current()) throw new RpcError('The topic changed. No instruction was sent.', false);
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
       await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt));
     } else if (status === 'idle') {
@@ -862,8 +1046,8 @@ export class Bridge {
     const key = 'attention/' + createHash('sha256').update(identity).digest('hex');
     this.state.enqueue(key, binding.topicId, text);
   }
-  private async stillAllowed(binding: Binding): Promise<boolean> {
-    const current = await this.codex.read(binding.threadId);
+  private async stillAllowed(binding: Binding, timeoutMs?: number): Promise<boolean> {
+    const current = await this.codex.read(binding.threadId, timeoutMs);
     if (this.allowed(string(current.cwd), binding.threadId)) return true;
     this.attached.delete(binding.threadId);
     this.notice(binding.topicId, 'This native session moved outside your selected projects. Relaying is paused; select that project locally to reconnect it.');
