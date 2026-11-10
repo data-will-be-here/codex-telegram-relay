@@ -90,16 +90,16 @@ function fitsDocument(html: string): boolean {
 
 export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true): string {
   const data = { context: projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel).replace(/^» /u, ''),
-    status: card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted',
+    status: card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted',
     part, total, text: message.text, entities: message.entities };
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font:var(--tg-text-font-size)/var(--tg-text-line-height) system-ui;color:var(--tg-theme-text-color)}
 main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-bottom))}.topline{display:flex;align-items:flex-start;gap:8px;margin-bottom:.65em}.context{flex:1;min-width:0;color:var(--tg-theme-hint-color);font-size:min(.8em,16px);overflow-wrap:anywhere}
-header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:min(.8em,16px)}
+header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.status{color:var(--tg-theme-link-color)}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:min(.8em,16px)}
 #content,#measure{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text;touch-action:pan-y}#measure{position:absolute;left:0;top:0;visibility:hidden;pointer-events:none}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
 nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
 ${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #content{overflow:visible;touch-action:auto}'}
-</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
+</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${card.kind === 'status' ? 'status' : card.snapshot.status}">${card.kind === 'status' ? '●' : card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
 }
 
 type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };
@@ -152,7 +152,7 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     }
     flush();
   }
-  const completion = card.snapshot.status === 'done' ? '✅ Answer ready' : card.snapshot.status === 'failed' ? '❌ Turn failed' : '⏹ Turn interrupted';
+  const completion = card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? '✅ Answer ready' : card.snapshot.status === 'failed' ? '❌ Turn failed' : '⏹ Turn interrupted';
   const materialize = (draft: ResultDraft, index: number): RichDeliveryPart => {
     const part = index + 1; const total = drafts.length;
     const resultMeta = { part, total, ...(index === 0 ? { completion } : {}) };

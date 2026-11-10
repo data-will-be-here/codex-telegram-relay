@@ -12,7 +12,7 @@ export interface WidgetSnapshot {
 export interface WidgetCard {
   id: string; token: string; generation: string; binding: Binding; turnId: string; view: ViewMode;
   revision: number; createdAt: number; snapshot: WidgetSnapshot;
-  kind?: 'result';
+  kind?: 'result' | 'status';
 }
 export interface WidgetDelivery extends WidgetCard {
   delivery: 'new' | 'sending' | 'active' | 'editing' | 'uncertain' | 'disabled' | 'retired';

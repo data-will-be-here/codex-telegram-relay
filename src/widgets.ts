@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import { type State } from './state.js';
 import { array, object, string, type Binding, type Json, type Telegram } from './types.js';
 import { widgetLabel, widgetPreview } from './widget-template.js';
+import { resultParts } from './widget-result.js';
 import { type WidgetActivity, type WidgetCard, type WidgetDelivery, type ViewMode } from './widget-types.js';
 
 const finalStatuses = new Map([['completed', 'done'], ['failed', 'failed'], ['interrupted', 'interrupted']] as const);
@@ -220,7 +221,11 @@ export class ViewPicker {
       const card = this.state.widgetCard(binding.threadId, fallback.turnId);
       if (!card || card.id !== fallback.id || card.delivery === 'retired' || card.messageId !== messageId) return;
       const text = card.snapshot.progressText || card.snapshot.summary || card.snapshot.plan?.current || 'No progress explanation is available yet.';
-      this.state.enqueue(`attention/widget-step/${card.id}/${randomUUID()}`, binding.topicId, `Current step\n\n${text}`, null, binding.cwd, binding.threadId);
+      const key = `attention/widget-answer/status/${card.id}/${card.revision}`;
+      const token = randomBytes(16).toString('hex');
+      const body = `Current status\n\n${text}`;
+      if (!this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts({ ...card, kind: 'status' }, text, token)))
+        this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
       return;
     }
     await this.prepare();

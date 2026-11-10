@@ -180,7 +180,7 @@ export class Outbox {
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
             html: WIDGET_HTML, chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
-            reply_markup: { inline_keyboard: [[{ text: 'Current step', callback_data: `v:${card.token}:d` }, { text: 'Classic for all topics', callback_data: `v:${card.token}:c` }]] } }));
+            reply_markup: { inline_keyboard: [[{ text: 'Current status', callback_data: `v:${card.token}:d` }, { text: 'Classic for all topics', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
           this.acceptWidgetReceipt(card.id, card.revision, id);

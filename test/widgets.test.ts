@@ -205,7 +205,7 @@ test('Russian progress uses available data space instead of stopping halfway thr
   } finally { f.close(); }
 });
 
-test('Current step reveals the complete progress text only on an authorized card click', async () => {
+test('Current status opens a complete immutable progress widget only on an authorized card click', async () => {
   const f = await setup();
   try {
     f.state.setViewMode('widgets'); await f.start();
@@ -222,8 +222,49 @@ test('Current step reveals the complete progress text only on an authorized card
     await f.bridge.update(click(801, 102)); await f.bridge.update(click(802, 101, 99)); await f.bridge.update(click(803, 101, 42, 1)); await f.drain();
     assert.equal(f.telegram.sent().some(message => string(message.text).includes(text)), false);
     await f.bridge.update(click(804)); await f.drain();
-    assert.ok(f.telegram.sent().some(message => string(message.text).includes(text)));
+    const readers = f.telegram.calls.filter(call => call.method === 'sendWidget' && string(call.params.html).includes('Current status'));
+    assert.equal(readers.length, 1);
+    assert.ok(string(readers[0]!.params.html).includes(text));
+    assert.match(string(readers[0]!.params.html), /id="nav"/u);
+    assert.match(string(readers[0]!.params.html), /class="badge status">●/u);
+    assert.doesNotMatch(string(readers[0]!.params.html), /class="badge done"|"status":"Answer ready"|"status":"Turn interrupted"/u);
+    assert.equal(f.telegram.sent().some(message => string(message.text).includes(text)), false);
+    const copy = string(object((object(readers[0]!.params.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data);
+    const answer = f.state.widgetAnswer(copy.slice(2))!; assert.ok(answer.text.includes(text));
+    await f.bridge.update(click(805)); await f.drain();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget' && string(call.params.html).includes('Current status')).length, 1, 'Repeated clicks on the same revision reuse the saved snapshot');
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'next-progress', type: 'agentMessage', phase: 'commentary', text: 'Newer explanation' } });
+    assert.ok(f.state.widgetAnswer(copy.slice(2))!.text.includes(text), 'An existing status reader must not change when live progress changes');
+    await f.bridge.update(click(806)); await f.drain();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget' && string(call.params.html).includes('Current status')).length, 2);
+    assert.ok(f.telegram.calls.some(call => call.method === 'sendWidget' && string(call.params.html).includes('Newer explanation')));
+    await f.bridge.update({ update_id: 807, callback_query: { id: 'status-text-copy', from: { id: 42 }, data: copy,
+      message: { message_id: answer.messageId, chat: { id: 42, type: 'private' }, message_thread_id: 101 } } }); await f.drain();
+    assert.ok(f.telegram.sent().some(message => string(message.text).includes(text)), 'The explicit text copy retains the original snapshot');
     assert.equal(f.state.viewMode(), 'widgets'); assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('an unknown Current status widget send uses one complete text backup without replaying the widget', async () => {
+  const f = await setup(); let attempts = 0;
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const text = '**Checking delivery.** ' + 'The saved explanation remains available. '.repeat(35);
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text } });
+    f.advance(); await f.flush(); await f.drain();
+    const card = f.state.widgetCard('thread-a', 'live')!;
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'sendWidget' && string(params?.html).includes('Current status')) { attempts++; throw new TelegramError('Unknown delivery', 0); }
+      return call(method, params);
+    };
+    const click = (id: number) => ({ update_id: id, callback_query: { id: String(id), from: { id: 42 }, data: `v:${card.token}:d`,
+      message: { message_id: card.messageId, chat: { id: 42, type: 'private' }, message_thread_id: 101 } } });
+    await f.bridge.update(click(810)); await f.drain(); f.advance(); await f.drain();
+    await f.bridge.update(click(811)); await f.drain();
+    assert.equal(attempts, 1);
+    assert.equal(f.telegram.sent().filter(message => string(message.text).includes('Current status') && string(message.text).includes('The saved explanation remains available.')).length, 1);
+    assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
 
