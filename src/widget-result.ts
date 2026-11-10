@@ -4,6 +4,10 @@ import { widgetData } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
 
+// The complete measured document includes the reader, styles and escaped model data.
+// Keep 96 bytes below Telegram's 4096-byte zlib limit without splitting fitting answers at 3800.
+const MAX_COMPRESSED_BYTES = 4000;
+
 const payload = (value: unknown): string => JSON.stringify(value).replace(/</gu, '\\u003c').replace(/>/gu, '\\u003e')
   .replace(/&/gu, '\\u0026').replace(/\u2028/gu, '\\u2028').replace(/\u2029/gu, '\\u2029');
 
@@ -76,7 +80,7 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
   const chunks: FormattedText[] = [formatted(source)];
   for (let index = 0; index < chunks.length; index++) {
     const chunk = chunks[index]!; const html = resultDocument(card, chunk, index + 1, chunks.length);
-    if (Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= 3800) continue;
+    if (Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= MAX_COMPRESSED_BYTES) continue;
     if (chunk.text.length < 2) throw new Error('A result widget exceeded its safe document budget.');
     const middle = cut(chunk.text, Math.floor(chunk.text.length / 2));
     if (middle >= chunk.text.length) throw new Error('A result widget exceeded its safe document budget.');

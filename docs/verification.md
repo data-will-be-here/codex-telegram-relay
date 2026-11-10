@@ -1,5 +1,11 @@
 # Verification record
 
+## Real answer fitting the server budget
+
+The owner's three-section Russian reading test reproduced two separate widgets despite fitting Telegram's compressed-document ceiling. A new red regression uses that exact generated sample, rather than repetitive filler. The reader budget is now 4000 measured zlib9 bytes, retaining 96 bytes below the 4096-byte server ceiling. Oversized documents still split without losing text or formatting. This changes document admission only; the paging and gesture implementation is unchanged.
+
+The exact sample passed official WidgetHost/QuickJS phone gesture arbitration as one document with 1/3 pages at 320px/20px in both light and dark themes. Horizontal next/back, arrows, vertical chat scrolling and zero bot queries were checked. The page count depends on client width/font; three pages is a measured reference, not a universal count. Full local suite: 383 discovered, 379 passed, four skips, zero failures; typecheck, package checks and production dependency audit passed. Physical client appearance remains a separate acceptance check.
+
 ## Shared view preference for all topics
 
 A red regression showed that `/view widgets` in one topic left other sessions in Classic. `/view` now stores one relay-wide preference, available from any owner-private topic or the root chat; `/status` and command/card labels name that scope. First-time migration preserves a legacy Widgets opt-in and later explicit global choices survive restart. Existing running turns retain their captured view, including active turns recovered in other attached projects before a switch. Unavailable native reads do not block the preference, and binding/scope is rechecked after awaited preparation.

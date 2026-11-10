@@ -44,7 +44,7 @@ test('untrusted text stays data in a fixed reader and every document fits server
   const parts = resultParts(card, source, 'a'.repeat(32));
   for (const part of parts) {
     const html = string(part.params.html); const data = resultPayload(html);
-    assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 3800);
+    assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 4096);
     assert.ok(Buffer.byteLength(string(part.params.chat_data)) <= 900);
     assert.equal(part.params.allow_queries, false); assert.equal(part.params.is_shared, false);
     assert.equal(part.params.public_data, undefined); assert.ok(!string(data.text).includes('\ufffd'));
@@ -59,7 +59,7 @@ test('unsupported or long link targets remain readable without exceeding a docum
   const text = parts.map(part => resultPayload(string(part.params.html)).text).join('');
   assert.ok(text.includes('http://example.com/a')); assert.ok(text.includes('mailto:a@example.com'));
   assert.ok(text.includes('https://example.com/' + 'x'.repeat(6000)));
-  parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 3800));
+  parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 4096));
 });
 
 test('only real payload limits split an oversized answer, with no missing text or repeated completion heading', () => {
@@ -70,8 +70,15 @@ test('only real payload limits split an oversized answer, with no missing text o
   assert.match(string(parts[0]!.params.html), /class="badge done">✓/u);
   for (const [index, part] of parts.entries()) {
     const html = string(part.params.html);
-    assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 3800);
+    assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 4096);
     assert.equal(html.includes('<h3 id="status">'), index === 0);
     assert.equal(part.params.disable_notification, index !== 0);
   }
+});
+
+test("the actual three-section Russian reading test stays in one document", () => {
+  const source = "**Проверка текста и оформления**\n\nЭто тестовый ответ для проверки чтения внутри одной карточки. Текст должен оставаться чётким, абзацы — отделяться друг от друга, а выделенные заголовки — помогать ориентироваться. Размер текста и цвета должны соответствовать настройкам Telegram. Внизу карточки находятся стрелки и счётчик страниц.\n\n**Проверка переключения страниц**\n\nПопробуй провести пальцем влево, а затем вправо. Карточка должна переключать страницы без новых сообщений в переписке. Тот же результат должен получаться при нажатии стрелок внизу. Вертикальное движение пальца должно прокручивать переписку. При возвращении назад текст должен оставаться прежним.\n\n**Проверка завершения ответа**\n\nЭто заключительная часть тестового ответа. Проверь, что последние предложения доступны полностью, строки не обрезаются снизу, а счётчик показывает последнюю страницу. Затем вернись к началу: перед заголовком Answer ready должна находиться зелёная галочка. Последняя строка этого ответа: **тест успешно дошёл до конца**.";
+  const parts = resultParts(card, source, "a".repeat(32));
+  assert.equal(parts.length, 1, "the full real-world sample fits below the Telegram compressed limit");
+  assert.equal(resultPayload(string(parts[0]!.params.html)).text, renderMarkdown(source).text);
 });
