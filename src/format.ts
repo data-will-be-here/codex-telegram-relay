@@ -40,7 +40,7 @@ export function linkable(url: URL): boolean {
 }
 
 /** Parse CommonMark/GFM into text and Telegram entities; never interpret raw HTML. */
-export function renderMarkdown(source: string): FormattedText {
+export function renderMarkdown(source: string, tableLayout: 'code' | 'records' = 'code'): FormattedText {
   let text = '';
   const spans: Entity[] = [];
   const add = (type: Entity['type'], write: () => void, extra: Pick<Entity, 'url' | 'language'> = {}): void => {
@@ -92,7 +92,24 @@ export function renderMarkdown(source: string): FormattedText {
           break;
         }
         case 'list_item': children(token.tokens); break;
-        case 'table': newline(); add('pre', () => { text += token.raw.trimEnd(); }); newline(); break;
+        case 'table': {
+          newline();
+          if (tableLayout === 'code') add('pre', () => { text += token.raw.trimEnd(); });
+          else for (const row of token.rows) {
+            if (text && !text.endsWith('\n\n')) text += text.endsWith('\n') ? '\n' : '\n\n';
+            row.forEach((cell, index) => {
+              if (index === 0 && cell.text.trim()) add('bold', () => children(cell.tokens));
+              else {
+                const heading = token.header[index];
+                add('bold', () => { if (heading?.text.trim()) children(heading.tokens); else text += `Column ${index + 1}`; });
+                text += ': ';
+                if (cell.text.trim()) children(cell.tokens); else text += '—';
+              }
+              newline();
+            });
+          }
+          newline(); break;
+        }
         case 'space': if (text && !text.endsWith('\n\n')) text += text.endsWith('\n') ? '\n' : '\n\n'; break;
         case 'br': text += '\n'; break;
         case 'hr': newline(); text += '────────\n'; break;

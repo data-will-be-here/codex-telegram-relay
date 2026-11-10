@@ -37,6 +37,8 @@ test('a complete formatted answer stays in one locally paged document when it fi
   assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
   assert.equal(parts.slice(0, -1).some(part => part.params.reply_markup), false);
   assert.ok(parts.at(-1)!.params.reply_markup);
+  assert.match(string(parts[0]!.params.html), /id="nav"/u);
+  assert.match(string(parts[0]!.params.html), /pointerup/u);
 });
 
 test('untrusted text stays data in a fixed reader and every document fits server budgets', () => {
@@ -62,6 +64,21 @@ test('unsupported or long link targets remain readable without exceeding a docum
   parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 4096));
 });
 
+test('widget tables become labeled records with inline formatting instead of a raw Markdown code block', () => {
+  const source = '| Item | Damage | Effect | Cooldown |\n|---|---:|---|---|\n| **Example A** | Up to **220** | Slow by **25%** | `12 s` |\n| Example B | 160 | [Details](https://example.com/details) | 8 s |';
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  const payloads = parts.map(part => resultPayload(string(part.params.html)));
+  const text = payloads.map(data => data.text).join('');
+  assert.ok(text.includes('Damage: Up to 220'));
+  assert.ok(text.includes('Effect: Slow by 25%'));
+  assert.ok(text.includes('Cooldown: 12 s'));
+  assert.doesNotMatch(text, /\|---|\*\*|\| Item/u);
+  assert.ok(payloads.some(data => JSON.stringify(data.entities).includes('text_link')));
+  assert.ok(payloads.some(data => JSON.stringify(data.entities).includes('bold')));
+  assert.ok(payloads.every(data => !JSON.stringify(data.entities).includes('"type":"pre"')));
+  assert.ok(renderMarkdown(source).entities.some(entity => entity.type === 'pre'), 'classic fallback retains its existing table representation');
+});
+
 test('only real payload limits split an oversized answer, with no missing text or repeated completion heading', () => {
   const source = Array.from({ length: 1200 }, (_, index) => `Section ${index}: ${createHash('sha256').update(String(index)).digest('hex')} 🧪.\n`).join('');
   const parts = resultParts(card, source, 'a'.repeat(32));
@@ -72,6 +89,7 @@ test('only real payload limits split an oversized answer, with no missing text o
     const html = string(part.params.html);
     assert.ok(Buffer.byteLength(html) <= 32768); assert.ok(deflateSync(html, { level: 9 }).length <= 4096);
     assert.equal(html.includes('<h3 id="status">'), index === 0);
+    assert.doesNotMatch(html, /id="nav"|id="page"|pointerup/u, 'overflow parts must read sequentially without nested paging');
     assert.equal(part.params.disable_notification, index !== 0);
   }
 });

@@ -1,5 +1,11 @@
 # Verification record
 
+## Paged single results and sequential overflow cards
+
+Two red regressions captured the reported behavior: overflow parts still contained nested page controls, and widget tables displayed raw Markdown in a monospace block. A fitting complete reply retains one local paged reader. Once the full reader exceeds its byte budget, the entire result uses short flow cards with no arrows, page counter or horizontal gesture handler. Every part embeds all its text; line-density bounds and bounded client layout fitting keep it visible below the bubble ceiling, reducing the content font only as needed with a 12px floor. Part numbering wraps independently of the first completion heading. Notification and completion heading remain first-only.
+
+Widget results opt into labeled table records with parsed inline emphasis, code and links; Classic rendering is unchanged. The official pinned WidgetHost/QuickJS/renderer passed 54 combinations of widths 200/320/430, light/dark, fonts 20/32/64 and first/continuation/dense-code samples. Every flow part's visible DOM text matched its complete embedded text, with no page controls, horizontal overflow or runtime errors; a separate RTL 80px safe-area change also fit. Table records were qualified in light/dark and previews inspected. This is official-runtime qualification, not a physical-client confirmation of the new layouts. Full local suite: 384 discovered, 380 passed, four skips, zero failures. Clean install/build, typecheck, distribution/dry-run checks and production dependency audit passed.
+
 ## Real answer fitting the server budget
 
 The owner's three-section Russian reading test reproduced two separate widgets despite fitting Telegram's compressed-document ceiling. A new red regression uses that exact generated sample, rather than repetitive filler. The reader budget is now 4000 measured zlib9 bytes, retaining 96 bytes below the 4096-byte server ceiling. Oversized documents still split without losing text or formatting. This changes document admission only; the paging and gesture implementation is unchanged.

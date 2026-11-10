@@ -8,6 +8,19 @@ import { type RichDeliveryPart } from './state.js';
 // Keep 96 bytes below Telegram's 4096-byte zlib limit without splitting fitting answers at 3800.
 const MAX_COMPRESSED_BYTES = 4000;
 
+/** Bound flow cards by visual density, then fit the complete part to the client's actual font. */
+function flowLimit(text: string): number {
+  let lines = 1; let column = 0; let offset = 0;
+  for (const char of text) {
+    const cost = /[\u2e80-\u9fff\uac00-\ud7af]/u.test(char) || char.length > 1 ? 2 : 1;
+    if (char === '\n') { lines++; column = 0; }
+    else if ((column += cost) > 30) { lines++; column = cost; }
+    if (lines > 12) break;
+    offset += char.length;
+  }
+  return cut(text, offset);
+}
+
 const payload = (value: unknown): string => JSON.stringify(value).replace(/</gu, '\\u003c').replace(/>/gu, '\\u003e')
   .replace(/&/gu, '\\u0026').replace(/\u2028/gu, '\\u2028').replace(/\u2029/gu, '\\u2029');
 
@@ -23,7 +36,7 @@ function cut(text: string, limit: number): number {
   const prefix = text.slice(0, limit);
   const paragraph = prefix.lastIndexOf('\n\n');
   const sentence = [...prefix.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s)/gu)].at(-1);
-  let end = paragraph >= limit / 2 ? paragraph + 2 : sentence && sentence.index + sentence[0].length >= limit / 2 ?
+  let end = paragraph >= limit * .7 ? paragraph + 2 : sentence && sentence.index + sentence[0].length >= limit * .7 ?
     sentence.index + sentence[0].length : Math.max(prefix.lastIndexOf('\n'), prefix.lastIndexOf(' '));
   if (end < limit / 2) end = limit;
   if (/[\uD800-\uDBFF]$/u.test(text.slice(0, end))) end--;
@@ -31,7 +44,7 @@ function cut(text: string, limit: number): number {
 }
 
 function formatted(source: string): FormattedText {
-  const message = renderMarkdown(source);
+  const message = renderMarkdown(source, 'records');
   // The widget SDK opens HTTPS links up to 256 normalized characters. Keep other targets readable.
   const unsupported = message.entities.filter(entity => entity.type === 'text_link' &&
     (!entity.url?.startsWith('https://') || encodeURI(entity.url).length > 256)).sort((a, b) => b.offset - a.offset);
@@ -49,11 +62,13 @@ function formatted(source: string): FormattedText {
 
 /** Fixed reader code; model text is a safely serialized data literal and enters DOM through textContent.
  * Future pages are measured offscreen, one per frame, without replacing the visible page. */
-const READER = String.raw`var points=[0],at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)});var pages=[0],page=0,done=false,width=0,epoch=0,target=-1;
-function el(id){return document.getElementById(id)}
+const RENDER = String.raw`function el(id){return document.getElementById(id)}
 el('context').textContent=D.context;if(D.part===1)el('status').textContent=D.status;el('part').textContent=D.total>1?'Part '+D.part+'/'+D.total:'';
 function draw(a,b,body){body=body||el('content');body.textContent='';var head=(D.text.match(/^\n+/)||[''])[0].length,tail=D.text.length-(D.text.match(/\n+$/)||[''])[0].length;var marks=[a,b];if(head>a&&head<b)marks.push(head);if(tail>a&&tail<b)marks.push(tail);D.entities.forEach(function(e){var l=Math.max(a,e.offset),r=Math.min(b,e.offset+e.length);if(r>l){marks.push(l);marks.push(r)}});marks=Array.from(new Set(marks)).sort(function(x,y){return x-y});for(var i=0;i<marks.length-1;i++){var l=marks[i],r=marks[i+1],active=D.entities.filter(function(e){return e.offset<=l&&e.offset+e.length>=r});var node=document.createElement('span');node.textContent=D.text.slice(l,r);active.forEach(function(e){var tag={bold:'strong',italic:'em',strikethrough:'del',code:'code',pre:'code',text_link:'a'}[e.type];if(!tag)return;var wrap=document.createElement(tag);if(e.type==='pre')wrap.className='pre';if(e.type==='text_link'&&e.url&&e.url.indexOf('https://')===0)wrap.setAttribute('href',e.url);wrap.appendChild(node);node=wrap});if(r<=head||l>=tail)node.style.display='none';body.appendChild(node)}}
-function append(){var body=el('measure'),start=pages[pages.length-1],low=start+1,high=points.length-1,best=start;if(start>=points.length-1){pages.push(start);done=true;return}while(low<=high){var mid=Math.floor((low+high)/2);draw(points[start],points[mid],body);if(body.scrollHeight<=body.clientHeight+1){best=mid;low=mid+1}else high=mid-1}var end=Math.max(start+1,best);if(end<points.length-1){var text=D.text.slice(points[start],points[end]),matches=Array.from(text.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s)/g)),sentence=matches.length?matches[matches.length-1]:null,boundary=text.lastIndexOf('\n\n')+2;if(boundary<text.length*.7)boundary=sentence?sentence.index+sentence[0].length:0;if(boundary<text.length*.7)boundary=Math.max(text.lastIndexOf('\n')+1,text.lastIndexOf(' ')+1);if(boundary>text.length*.7){var offset=points[start]+boundary;while(end>start+1&&points[end]>offset)end--}}draw(points[start],points[end],body);while(end>start+1&&body.scrollHeight>body.clientHeight+1){end=start+Math.floor((end-start)/2);draw(points[start],points[end],body)}pages.push(end);done=end>=points.length-1;if(target>=start&&target<end){page=pages.length-2;target=-1}}
+`;
+
+const READER = String.raw`var points=[0],at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)});var pages=[0],page=0,done=false,width=0,epoch=0,target=-1;
+` + RENDER + String.raw`function append(){var body=el('measure'),start=pages[pages.length-1],low=start+1,high=points.length-1,best=start;if(start>=points.length-1){pages.push(start);done=true;return}while(low<=high){var mid=Math.floor((low+high)/2);draw(points[start],points[mid],body);if(body.scrollHeight<=body.clientHeight+1){best=mid;low=mid+1}else high=mid-1}var end=Math.max(start+1,best);if(end<points.length-1){var text=D.text.slice(points[start],points[end]),matches=Array.from(text.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s)/g)),sentence=matches.length?matches[matches.length-1]:null,boundary=text.lastIndexOf('\n\n')+2;if(boundary<text.length*.7)boundary=sentence?sentence.index+sentence[0].length:0;if(boundary<text.length*.7)boundary=Math.max(text.lastIndexOf('\n')+1,text.lastIndexOf(' ')+1);if(boundary>text.length*.7){var offset=points[start]+boundary;while(end>start+1&&points[end]>offset)end--}}draw(points[start],points[end],body);while(end>start+1&&body.scrollHeight>body.clientHeight+1){end=start+Math.floor((end-start)/2);draw(points[start],points[end],body)}pages.push(end);done=end>=points.length-1;if(target>=start&&target<end){page=pages.length-2;target=-1}}
 function paint(){draw(points[pages[page]],points[pages[page+1]]);el('back').disabled=page===0;el('next').disabled=done&&page===pages.length-2;el('page').textContent=(page+1)+'/'+(done?pages.length-1:'…');el('nav').style.display=done&&pages.length===2?'none':'flex';el('content').setAttribute('aria-busy','false')}
 function build(ticket){if(ticket!==epoch||done)return;append();paint();if(!done)requestAnimationFrame(function(){build(ticket)})}
 function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var ticket=++epoch;target=pages[page]||0;pages=[0];page=0;done=false;body.style.maxHeight='';el('nav').style.display='flex';el('page').textContent='1/…';var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className=font>=40?'large':'';draw(0,0);body.style.maxHeight=Math.max(48,580-el('card').getBoundingClientRect().height)+'px';el('measure').style.width=width+'px';el('measure').style.maxHeight=body.style.maxHeight;append();paint();if(!done)requestAnimationFrame(function(){build(ticket)})}
@@ -62,7 +77,16 @@ el('back').onclick=function(){move(-1)};el('next').onclick=function(){move(1)};
 var drag=null,swiped=false;el('content').addEventListener('pointerdown',function(e){swiped=false;drag=e.button===0?{id:e.pointerId,x:e.clientX,y:e.clientY,time:Date.now()}:null});el('content').addEventListener('pointercancel',function(){drag=null});el('content').addEventListener('pointerup',function(e){var d=drag;drag=null;if(!d||d.id!==e.pointerId)return;var x=e.clientX-d.x,y=e.clientY-d.y;if(Math.abs(x)>=40&&Math.abs(x)>Math.abs(y)*1.3&&Date.now()-d.time<1500){swiped=true;move(x<0?1:-1);e.preventDefault()}});el('content').addEventListener('click',function(e){if(swiped){e.preventDefault();e.stopPropagation();swiped=false}},true);
 TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAreaChanged',fit);new ResizeObserver(function(){if(el('content').clientWidth!==width)fit()}).observe(document.body);fit();TelegramWidget.ready();`;
 
-export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number): string {
+/** Flow parts have no page controls or horizontal gesture claim; all their text remains visible. */
+const FLOW = RENDER + String.raw`draw(0,D.text.length);var width=0;
+function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className='flow'+(font>=40?' large':'');body.style.fontSize='';var max=parseFloat(getComputedStyle(body).fontSize)||font*.95;if(el('card').getBoundingClientRect().height>580){var low=12,high=max;for(var i=0;i<9;i++){var mid=(low+high)/2;body.style.fontSize=mid+'px';if(el('card').getBoundingClientRect().height<=580)low=mid;else high=mid}body.style.fontSize=low+'px'}body.setAttribute('aria-busy','false')}
+TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAreaChanged',fit);new ResizeObserver(function(){if(el('content').clientWidth!==width)fit()}).observe(document.body);fit();TelegramWidget.ready();`;
+
+function fitsDocument(html: string): boolean {
+  return Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= MAX_COMPRESSED_BYTES;
+}
+
+export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true): string {
   const data = { context: projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel).replace(/^» /u, ''),
     status: card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted',
     part, total, text: message.text, entities: message.entities };
@@ -72,21 +96,31 @@ main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-
 header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:.85em}
 #content,#measure{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text;touch-action:pan-y}#measure{position:absolute;left:0;top:0;visibility:hidden;pointer-events:none}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
 nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large .context{display:none}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large #part{font-size:.45em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
-</style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? `<span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3>` : ''}<span id="part"></span></header><section id="content"></section><nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav></main><section id="measure" aria-hidden="true"></section><script>var D=${payload(data)};${READER}</script></body></html>`;
+${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #part{order:-1;flex-basis:100%;margin-left:0;text-align:right;font-size:12px}.flow .context{font-size:min(.8em,16px)}.flow #content{overflow:visible;touch-action:auto}'}
+</style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? `<span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3>` : ''}<span id="part"></span></header><section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
 }
 
 /** Every rendered character is preserved; fixed document/code and independent local paging survive relay shutdown. */
 export function resultParts(card: WidgetCard, source: string, token: string): RichDeliveryPart[] {
-  const chunks: FormattedText[] = [formatted(source)];
+  const message = formatted(source);
+  const whole = resultDocument(card, message, 1, 1);
+  const paged = fitsDocument(whole);
+  const chunks: FormattedText[] = [];
+  if (paged) chunks.push(message);
+  else for (let start = 0; start < message.text.length;) {
+    const end = start + flowLimit(message.text.slice(start));
+    chunks.push(clip(message, start, end)); start = end;
+  }
+  if (!chunks.length) chunks.push(message);
   for (let index = 0; index < chunks.length; index++) {
-    const chunk = chunks[index]!; const html = resultDocument(card, chunk, index + 1, chunks.length);
-    if (Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= MAX_COMPRESSED_BYTES) continue;
+    const chunk = chunks[index]!; const html = resultDocument(card, chunk, index + 1, chunks.length, paged);
+    if (fitsDocument(html)) continue;
     if (chunk.text.length < 2) throw new Error('A result widget exceeded its safe document budget.');
     const middle = cut(chunk.text, Math.floor(chunk.text.length / 2));
     if (middle >= chunk.text.length) throw new Error('A result widget exceeded its safe document budget.');
     chunks.splice(index, 1, clip(chunk, 0, middle), clip(chunk, middle, chunk.text.length)); index = -1;
   }
-  return chunks.map((chunk, index) => ({ method: 'sendWidget', params: { html: resultDocument(card, chunk, index + 1, chunks.length),
+  return chunks.map((chunk, index) => ({ method: 'sendWidget', params: { html: resultDocument(card, chunk, index + 1, chunks.length, paged),
     chat_data: widgetData(card), allow_queries: false, is_shared: false, disable_notification: index !== 0,
     ...(index === chunks.length - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) },
     fallback: chunk.text, fallbackText: chunk }));

@@ -320,7 +320,7 @@ test('a multipart result retries only the unsent card and persists a middle rece
   const f = await setup(); let attempts = 0; let failWrite = true;
   try {
     f.state.setViewMode('widgets'); await f.start();
-    const text = 'A complete section with useful details. '.repeat(3000) + 'MULTIPART_TAIL';
+    const text = 'A complete section with useful details. '.repeat(1000) + 'MULTIPART_TAIL';
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text }] } });
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params) => { if (method === 'sendWidget' && ++attempts === 2) throw new TelegramError('Pre-connect failure', 0, undefined, true); return call(method, params); };
@@ -344,7 +344,7 @@ test('restart resumes an acknowledged result suffix but never replays an in-flig
   try {
     f.state.setViewMode('widgets'); await f.start();
     const saved = f.state.widgetCard('thread-a', 'live')!;
-    const text = 'Preserved complete result section. '.repeat(3000) + 'RECOVERY_TAIL';
+    const text = 'Preserved complete result section. '.repeat(1000) + 'RECOVERY_TAIL';
     const parts = resultParts({ ...saved, kind: 'result', snapshot: { ...saved.snapshot, status: 'done' } }, text, 'f'.repeat(32));
     assert.ok(parts.length > 2);
     for (const phase of ['acknowledged', 'unknown', 'legacy']) {
@@ -400,7 +400,7 @@ test('a new native question is delivered before continuing a long result series'
   const f = await setup();
   try {
     f.state.setViewMode('widgets'); await f.start();
-    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(3000) }] } });
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Long result paragraph. '.repeat(1500) }] } });
     await f.outbox.flushOne(); assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
     f.codex.pending.add('question');
     await f.bridge.request({ id: 'question', method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', turnId: 'next',
