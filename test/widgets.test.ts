@@ -368,7 +368,7 @@ test('a rejected native table changes only that part to HTML and retries a faile
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } });
     await f.drain(); assert.equal(uploads.length, 1); f.advance(1000); await f.drain();
     assert.equal(uploads.length, 1); assert.match(uploads[0]!.html, /<table>/u);
-    assert.ok(string(uploads[0]!.params.caption).includes('Attachment 1 · Table\nItem, Value'));
+    assert.equal(string(uploads[0]!.params.caption), 'Attachment 1 · Table');
     assert.doesNotMatch(string(uploads[0]!.params.caption), /» |Part \d+\/\d+/u);
     assert.equal(uploads[0]!.params.message_thread_id, 101); assert.equal(f.state.viewMode(), 'widgets');
     assert.equal(f.telegram.calls.filter(item => item.method === 'sendWidget').length, 2);

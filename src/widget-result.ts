@@ -102,26 +102,7 @@ ${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{fle
 </style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
 }
 
-type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart; summary: string } | { kind: 'document'; html: string; fallback: string; summary: string };
-
-function tableSummary(tokens: Token[], depth = 0): string {
-  if (depth > 32) return '';
-  for (const raw of tokens) {
-    const token = raw as MarkedToken;
-    if (token.type === 'table') {
-      const text = token.header.map(cell => renderMarkdownTokens(cell.tokens).text.trim()).filter(Boolean).join(', ').replace(/\s+/gu, ' ');
-      const chars = Array.from(text);
-      if (chars.length <= 90) return text;
-      const prefix = chars.slice(0, 89).join('');
-      const boundary = prefix.lastIndexOf(' ');
-      return (boundary >= 60 ? prefix.slice(0, boundary) : prefix) + '…';
-    }
-    const children = token.type === 'blockquote' ? token.tokens : token.type === 'list' ? token.items.flatMap(item => item.tokens) : [];
-    const summary = tableSummary(children, depth + 1);
-    if (summary) return summary;
-  }
-  return '';
-}
+type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };
 
 function containsTable(raw: Token, depth = 0): boolean {
   const token = raw as MarkedToken;
@@ -162,12 +143,11 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     for (const item of tokens!) {
       if (!containsTable(item)) { text.push(item); continue; }
       flush();
-      const summary = tableSummary([item]);
       try {
-        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part, summary })));
+        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part })));
       } catch (error) {
         if (!(error instanceof RichTableTooLarge)) throw error;
-        drafts.push({ kind: 'document', html: richTokenDocument([item]), fallback: item.raw, summary });
+        drafts.push({ kind: 'document', html: richTokenDocument([item]), fallback: item.raw });
       }
     }
     flush();
@@ -182,14 +162,14 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
       chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
     const attachment = drafts.slice(0, index + 1).filter(item => item.kind !== 'widget').length;
     const title = `Attachment ${attachment} · Table`;
-    const tableCaption = [index === 0 ? completion : '', title, draft.summary].filter(Boolean).join('\n');
+    const tableCaption = [index === 0 ? completion : '', title].filter(Boolean).join('\n');
     if (draft.kind === 'document') return { method: 'sendDocument', resultMeta, params: { ...common, caption: tableCaption },
       document: { name: `table-${attachment}.html`, html: draft.html }, fallback: draft.fallback };
     const body = draft.part.richMessage.blocks.slice(1);
     const richMessage: RichPart['richMessage'] = { ...draft.part.richMessage, blocks: [
       ...(index === 0 ? [{ type: 'paragraph' as const, text: { type: 'bold' as const, text: completion } }] : []),
       { type: 'paragraph', text: { type: 'bold', text: title } },
-      ...(draft.summary ? [{ type: 'paragraph' as const, text: { type: 'italic' as const, text: draft.summary } }] : []), ...body,
+      ...body,
     ] };
     return { method: 'sendRichMessage', resultMeta, params: { ...common, rich_message: richMessage }, fallback: draft.part.fallback,
       tableDocument: richDocument(richMessage.blocks), tableCaption };
