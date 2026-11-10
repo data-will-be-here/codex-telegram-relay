@@ -94,15 +94,34 @@ export function resultDocument(card: WidgetCard, message: FormattedText, part: n
     part, total, text: message.text, entities: message.entities };
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font:var(--tg-text-font-size)/var(--tg-text-line-height) system-ui;color:var(--tg-theme-text-color)}
-main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-bottom))}.context{color:var(--tg-theme-hint-color);font-size:.8em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:.85em}
+main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-bottom))}.topline{display:flex;align-items:flex-start;gap:8px;margin-bottom:.65em}.context{flex:1;min-width:0;color:var(--tg-theme-hint-color);font-size:min(.8em,16px);overflow-wrap:anywhere}
+header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;height:2em;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color);flex-shrink:0}.done{color:#22a35a}@media(prefers-color-scheme:dark){.done{color:#65d991}}.failed{color:var(--tg-theme-destructive-text-color)}h3{margin:0;font-size:1.05em;min-width:0;overflow-wrap:anywhere}#part{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--tg-theme-hint-color);font-size:min(.8em,16px)}
 #content,#measure{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text;touch-action:pan-y}#measure{position:absolute;left:0;top:0;visibility:hidden;pointer-events:none}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
-nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large .context{display:none}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large #part{font-size:.45em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
-${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #part{order:-1;flex-basis:100%;margin-left:0;text-align:right;font-size:12px}.flow .context{font-size:min(.8em,16px)}.flow #content{overflow:visible;touch-action:auto}'}
-</style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? `<span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3>` : ''}<span id="part"></span></header><section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
+nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
+${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #content{overflow:visible;touch-action:auto}'}
+</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
 }
 
-type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };
+type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart; summary: string } | { kind: 'document'; html: string; fallback: string; summary: string };
+
+function tableSummary(tokens: Token[], depth = 0): string {
+  if (depth > 32) return '';
+  for (const raw of tokens) {
+    const token = raw as MarkedToken;
+    if (token.type === 'table') {
+      const text = token.header.map(cell => renderMarkdownTokens(cell.tokens).text.trim()).filter(Boolean).join(', ').replace(/\s+/gu, ' ');
+      const chars = Array.from(text);
+      if (chars.length <= 90) return text;
+      const prefix = chars.slice(0, 89).join('');
+      const boundary = prefix.lastIndexOf(' ');
+      return (boundary >= 60 ? prefix.slice(0, boundary) : prefix) + '…';
+    }
+    const children = token.type === 'blockquote' ? token.tokens : token.type === 'list' ? token.items.flatMap(item => item.tokens) : [];
+    const summary = tableSummary(children, depth + 1);
+    if (summary) return summary;
+  }
+  return '';
+}
 
 function containsTable(raw: Token, depth = 0): boolean {
   const token = raw as MarkedToken;
@@ -143,11 +162,12 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     for (const item of tokens!) {
       if (!containsTable(item)) { text.push(item); continue; }
       flush();
+      const summary = tableSummary([item]);
       try {
-        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part })));
+        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part, summary })));
       } catch (error) {
         if (!(error instanceof RichTableTooLarge)) throw error;
-        drafts.push({ kind: 'document', html: richTokenDocument([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel), fallback: item.raw });
+        drafts.push({ kind: 'document', html: richTokenDocument([item]), fallback: item.raw, summary });
       }
     }
     flush();
@@ -158,18 +178,18 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     const resultMeta = { part, total, ...(index === 0 ? { completion } : {}) };
     const common = { disable_notification: index !== 0,
       ...(index === total - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) };
-    const tableCaption = `${projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel)}
-${index === 0 ? completion : ''}
-Part ${part}/${total} · Table (HTML)`;
     if (draft.kind === 'widget') return { method: 'sendWidget', resultMeta, params: { ...common, html: resultDocument(card, draft.message, part, total, paged),
       chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
+    const attachment = drafts.slice(0, index + 1).filter(item => item.kind !== 'widget').length;
+    const title = `Attachment ${attachment} · Table`;
+    const tableCaption = [index === 0 ? completion : '', title, draft.summary].filter(Boolean).join('\n');
     if (draft.kind === 'document') return { method: 'sendDocument', resultMeta, params: { ...common, caption: tableCaption },
-      document: { name: 'table.html', html: draft.html }, fallback: draft.fallback };
-    const [header, ...body] = draft.part.richMessage.blocks;
+      document: { name: `table-${attachment}.html`, html: draft.html }, fallback: draft.fallback };
+    const body = draft.part.richMessage.blocks.slice(1);
     const richMessage: RichPart['richMessage'] = { ...draft.part.richMessage, blocks: [
-      ...(header ? [header] : []),
       ...(index === 0 ? [{ type: 'paragraph' as const, text: { type: 'bold' as const, text: completion } }] : []),
-      ...(total > 1 ? [{ type: 'paragraph' as const, text: `Part ${part}/${total}` }] : []), ...body,
+      { type: 'paragraph', text: { type: 'bold', text: title } },
+      ...(draft.summary ? [{ type: 'paragraph' as const, text: { type: 'italic' as const, text: draft.summary } }] : []), ...body,
     ] };
     return { method: 'sendRichMessage', resultMeta, params: { ...common, rich_message: richMessage }, fallback: draft.part.fallback,
       tableDocument: richDocument(richMessage.blocks), tableCaption };

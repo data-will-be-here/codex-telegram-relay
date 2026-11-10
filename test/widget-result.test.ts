@@ -72,6 +72,9 @@ test('a mixed answer keeps native tables between unpaged text widgets', () => {
   assert.ok(string(resultPayload(string(parts[2]!.params.html)).text).includes('After the table.'));
   assert.ok(JSON.stringify(parts[1]!.params.rich_message).includes('"type":"table"'));
   assert.ok(JSON.stringify(parts[1]!.params.rich_message).includes('"type":"bold"'));
+  const table = JSON.stringify(parts[1]!.params.rich_message);
+  assert.ok(table.includes('Attachment 1 · Table')); assert.ok(table.includes('Item, Damage, Effect'));
+  assert.doesNotMatch(table, /» |Part \d+\/\d+/u);
   for (const part of parts.filter(part => part.method === 'sendWidget')) assert.doesNotMatch(string(part.params.html), /id="nav"|pointerup/u);
   assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
   assert.ok(parts.at(-1)!.params.reply_markup);
@@ -103,6 +106,10 @@ test('long native tables repeat headers and preserve every row without widget re
   assert.deepEqual(rows, Array.from({ length: 500 }, (_, index) => `row-${index}`));
   assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
   assert.equal(parts.filter(part => JSON.stringify(part.params.rich_message).includes('Answer ready')).length, 1);
+  parts.forEach((part, index) => {
+    assert.ok(JSON.stringify(part.params.rich_message).includes(`Attachment ${index + 1} · Table`));
+    assert.doesNotMatch(JSON.stringify(part.params.rich_message), /» |Part \d+\/\d+/u);
+  });
 });
 
 test('wide tables become complete safe HTML attachments instead of flattened labels', () => {
@@ -114,6 +121,9 @@ test('wide tables become complete safe HTML attachments instead of flattened lab
   assert.equal((html.match(/<th>/gu) || []).length, 24); assert.equal((html.match(/<td>/gu) || []).length, 24);
   assert.doesNotMatch(html, /<script[\s>]/iu); assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/u);
   assert.ok(string(parts[0]!.params.caption).includes('✅ Answer ready')); assert.ok(parts[0]!.params.reply_markup);
+  assert.match(string(parts[0]!.params.caption), /Attachment 1 · Table\nColumn 0/u);
+  assert.doesNotMatch(string(parts[0]!.params.caption), /» |Part \d+\/\d+/u);
+  assert.doesNotMatch(html, /» /u);
 });
 
 test('deep quoted tables keep native cells instead of turning back into literal Markdown', () => {

@@ -152,8 +152,8 @@ export function richDocument(items: RichPart['richMessage']['blocks']): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Table</title><style>body{font:16px/1.5 system-ui;margin:24px;color:#222;background:#fff}table{border-collapse:collapse;margin:1em 0}th,td{border:1px solid #bbb;padding:8px 12px;vertical-align:top;text-align:left}th{background:#eee}pre,code{font-family:monospace;white-space:pre-wrap}a{color:#0671c9}</style></head><body>${render(items)}</body></html>`;
 }
 
-export function richTokenDocument(tokens: Token[], cwd?: string | null, sessionName?: string | null, projectLabel?: string): string {
-  return richDocument([{ type: 'paragraph', text: projectHeader(cwd, sessionName, projectLabel) }, ...blocks(tokens)]);
+export function richTokenDocument(tokens: Token[]): string {
+  return richDocument(blocks(tokens));
 }
 
 export function richTokenMessages(tokens: Token[], cwd?: string | null, sessionName?: string | null, projectLabel?: string, strictTables = false): RichPart[] {

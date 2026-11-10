@@ -367,7 +367,9 @@ test('a rejected native table changes only that part to HTML and retries a faile
     f.state.acceptRichPart = (...args) => { if (args[1] === 1 && fail) { fail = false; throw new Error('Local receipt write failed'); } return accept(...args); };
     await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } });
     await f.drain(); assert.equal(uploads.length, 1); f.advance(1000); await f.drain();
-    assert.equal(uploads.length, 1); assert.match(uploads[0]!.html, /<table>/u); assert.ok(string(uploads[0]!.params.caption).includes('Part 2/3'));
+    assert.equal(uploads.length, 1); assert.match(uploads[0]!.html, /<table>/u);
+    assert.ok(string(uploads[0]!.params.caption).includes('Attachment 1 · Table\nItem, Value'));
+    assert.doesNotMatch(string(uploads[0]!.params.caption), /» |Part \d+\/\d+/u);
     assert.equal(uploads[0]!.params.message_thread_id, 101); assert.equal(f.state.viewMode(), 'widgets');
     assert.equal(f.telegram.calls.filter(item => item.method === 'sendWidget').length, 2);
     assert.equal(f.telegram.sent().some(item => string(item.text).includes('AFTER_TABLE')), false);
