@@ -17,7 +17,7 @@ function flowLimit(text: string): number {
     const cost = /[\u2e80-\u9fff\uac00-\ud7af]/u.test(char) || char.length > 1 ? 2 : 1;
     if (char === '\n') { lines++; column = 0; }
     else if ((column += cost) > 30) { lines++; column = cost; }
-    if (lines > 12) break;
+    if (lines > 27) break;
     offset += char.length;
   }
   return cut(text, offset);
@@ -37,10 +37,10 @@ function cut(text: string, limit: number): number {
   if (text.length <= limit) return text.length;
   const prefix = text.slice(0, limit);
   const paragraph = prefix.lastIndexOf('\n\n');
-  const sentence = [...prefix.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s)/gu)].at(-1);
-  let end = paragraph >= limit * .7 ? paragraph + 2 : sentence && sentence.index + sentence[0].length >= limit * .7 ?
-    sentence.index + sentence[0].length : Math.max(prefix.lastIndexOf('\n'), prefix.lastIndexOf(' '));
-  if (end < limit / 2) end = limit;
+  const sentence = [...prefix.matchAll(/[.!?](?:[»”"')\]]*)?(?=\s|$)/gu)].at(-1);
+  const boundary = Math.max(paragraph >= 0 ? paragraph + 2 : 0, sentence ? sentence.index + sentence[0].length : 0);
+  let end = boundary >= limit * .25 ? boundary : Math.max(prefix.lastIndexOf('\n'), prefix.lastIndexOf(' '));
+  if (end < limit * .25) end = limit;
   if (/[\uD800-\uDBFF]$/u.test(text.slice(0, end))) end--;
   return end || (text.codePointAt(0)! > 0xffff ? 2 : 1);
 }
@@ -81,7 +81,7 @@ TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAr
 
 /** Flow parts have no page controls or horizontal gesture claim; all their text remains visible. */
 const FLOW = RENDER + String.raw`draw(0,D.text.length);var width=0;
-function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className='flow'+(font>=40?' large':'');body.style.fontSize='';var max=parseFloat(getComputedStyle(body).fontSize)||font*.95;if(el('card').getBoundingClientRect().height>580){var low=12,high=max;for(var i=0;i<9;i++){var mid=(low+high)/2;body.style.fontSize=mid+'px';if(el('card').getBoundingClientRect().height<=580)low=mid;else high=mid}body.style.fontSize=low+'px'}body.setAttribute('aria-busy','false')}
+function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className='flow'+(font>=40?' large':'');body.style.fontSize='';body.style.lineHeight='';var max=parseFloat(getComputedStyle(body).fontSize)||font*.95;if(el('card').getBoundingClientRect().height>580){var low=12,high=max;for(var i=0;i<9;i++){var mid=(low+high)/2;body.style.fontSize=mid+'px';if(el('card').getBoundingClientRect().height<=580)low=mid;else high=mid}body.style.fontSize=low+'px';if(el('card').getBoundingClientRect().height>580)body.style.lineHeight='1.2'}body.setAttribute('aria-busy','false')}
 TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAreaChanged',fit);new ResizeObserver(function(){if(el('content').clientWidth!==width)fit()}).observe(document.body);fit();TelegramWidget.ready();`;
 
 function fitsDocument(html: string): boolean {

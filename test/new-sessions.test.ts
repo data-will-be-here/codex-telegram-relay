@@ -624,6 +624,63 @@ test('/clear switches the same topic to one empty conversation and keeps the old
   } finally { f.close(); }
 });
 
+test('/clear can replace a verified unloaded idle conversation without resuming the old client', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    f.native.threads.set(old.threadId, { id: old.threadId, cwd: old.cwd, source: 'vscode', status: { type: 'notLoaded' }, ephemeral: false });
+    f.native.sessions = [];
+    await f.bridge.discover(); await f.drain();
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    assert.equal(f.native.starts, 1);
+    assert.notEqual(f.state.topic(old.topicId)!.threadId, old.threadId);
+    assert.equal(f.native.resumes.includes(old.threadId), true); // Initial discovery only.
+    assert.equal(f.native.resumes.filter(id => id === old.threadId).length, 1);
+  } finally { f.close(); }
+});
+
+test('/clear refuses archived, mismatched or newly active unloaded snapshots', async () => {
+  for (const invalid of ['archived', 'id', 'cwd', 'agent', 'ephemeral', 'active', 'scope', 'binding', 'history']) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      const thread = { id: old.threadId, cwd: old.cwd, source: 'vscode', status: { type: 'notLoaded' }, ephemeral: false };
+      f.native.threads.set(old.threadId, thread); f.native.sessions = [];
+      await f.bridge.discover(); await f.drain();
+      if (invalid === 'history') f.native.histories.set(old.threadId, []);
+      f.native.nonArchivedThread = async () => {
+        if (invalid === 'archived') return undefined;
+        if (invalid === 'scope') f.config.ignoredThreadIds = [old.threadId];
+        if (invalid === 'binding') f.state.installTopic(old.threadId, old.topicId + 1, old.cwd, 'Moved topic');
+        return { ...thread, ...(invalid === 'id' ? { id: 'other' } : {}), ...(invalid === 'cwd' ? { cwd: f.scratch } : {}),
+          ...(invalid === 'agent' ? { parentThreadId: 'parent' } : {}), ...(invalid === 'ephemeral' ? { ephemeral: true } : {}),
+          ...(invalid === 'active' ? { status: { type: 'active' } } : {}) };
+      };
+      await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+      assert.equal(f.native.starts, 0, invalid);
+      if (invalid !== 'binding') assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+      assert.equal(f.state.resettingTopic(old.topicId), false);
+    } finally { f.close(); }
+  }
+});
+
+test('/clear permits verified empty unloaded history but rejects a baseline change during the final question check', async () => {
+  for (const scenario of ['empty', 'changed']) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      if (scenario === 'empty') {
+        f.state.baseline(old.threadId, '-'); f.native.histories.set(old.threadId, []);
+        f.native.threads.set(old.threadId, { id: old.threadId, cwd: old.cwd, source: 'cli', ephemeral: false, status: { type: 'notLoaded' } });
+        f.native.sessions = []; await f.bridge.discover(); await f.drain();
+      } else Object.assign(f.native, { asyncQuestions: async () => { f.state.baseline(old.threadId, 'new-baseline'); return []; } });
+      await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+      assert.equal(f.native.starts, scenario === 'empty' ? 1 : 0, scenario);
+      if (scenario === 'changed') assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    } finally { f.close(); }
+  }
+});
+
 test('/clear refuses active turns, pending approvals, delivery work and unavailable native sessions', async () => {
   for (const busy of ['active', 'turn', 'approval', 'delivery', 'read']) {
     const f = setup();

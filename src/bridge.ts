@@ -66,7 +66,7 @@ export class Bridge {
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
-    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearAllowed(binding));
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
     this.widgets = new Widgets(state, this.generation);
@@ -124,29 +124,42 @@ export class Bridge {
         ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
   }
 
-  private async clearAllowed(binding: Binding): Promise<boolean> {
-    const routed = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.state.retiredSession(binding.threadId) &&
+  private async clearBlocker(binding: Binding): Promise<string | undefined> {
+    const routed = (): boolean => !this.closed && !this.state.retiredSession(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
       !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
-    const eligible = (): boolean => routed() && !this.state.sessionDeliveryBusy(binding.threadId) &&
-      ![...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt));
-    if (!eligible()) return false;
+    const blocker = (): string | undefined => !routed() ? 'The saved topic or directory is no longer eligible.' :
+      this.state.sessionDeliveryBusy(binding.threadId) ? 'Messages or files are still being delivered. Wait for delivery and retry /clear.' :
+      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? 'Answer the pending question or approval, then retry /clear.' : undefined;
+    const initial = blocker(); if (initial) return initial;
     const thread = await this.codex.read(binding.threadId);
-    if (thread.cwd !== binding.cwd || string(object(thread.status).type) !== 'idle') return false;
+    if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true || thread.canAcceptDirectInput === false ||
+        !['cli', 'vscode', 'appServer'].includes(string(thread.source))) return 'The saved conversation is no longer eligible.';
+    const status = string(object(thread.status).type);
+    if (status === 'notLoaded') {
+      const saved = await this.codex.nonArchivedThread?.(binding.threadId);
+      if (!saved || saved.id !== binding.threadId || saved.cwd !== binding.cwd || saved.parentThreadId || saved.ephemeral === true || saved.canAcceptDirectInput === false ||
+          !['cli', 'vscode', 'appServer'].includes(string(saved.source))) return 'The saved conversation is archived or unavailable.';
+      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return 'The Codex task is still active. Finish it and retry /clear.';
+    } else if (status !== 'idle') return 'The Codex task is still active. Finish it and retry /clear.';
     const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
     const turns = await this.codex.turns(binding.threadId);
-    if (!eligible() || this.state.binding(binding.threadId)?.lastTurn !== baseline || turns.some(turn => turn.status === 'inProgress')) return false;
+    const changed = blocker(); if (changed) return changed;
+    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return 'The conversation changed during the check. Retry /clear.';
+    if (turns.some(turn => turn.status === 'inProgress')) return 'The Codex task is still active. Finish it and retry /clear.';
     const latest = turns.find(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
+    if (!latest && baseline && baseline !== '-') return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
     if (latest && latest.id !== this.state.binding(binding.threadId)?.lastTurn) {
       const index = baseline && baseline !== '-' ? turns.findIndex(turn => turn.id === baseline) : turns.length;
-      if (index <= turns.indexOf(latest)) return false;
+      if (index <= turns.indexOf(latest)) return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
       const missed = turns.slice(0, index).filter(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
       for (const turn of missed.reverse()) await this.complete(binding, turn, { baseline, advance: false });
       if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
-      return false;
+      return 'A completed reply is being recovered. Wait for delivery and retry /clear.';
     }
-    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return false;
-    return eligible() && !this.state.reply(binding.threadId);
+    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return 'Answer the pending question in Codex, then retry /clear.';
+    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? 'The conversation changed during the check. Retry /clear.' :
+      this.state.reply(binding.threadId) ? 'A submitted instruction is still awaiting its result. Wait and retry /clear.' : undefined);
   }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */

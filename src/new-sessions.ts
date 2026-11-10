@@ -27,7 +27,7 @@ export class NewSessions {
   private pendingTopicBind: { id: string; attempt: number; expires: number } | undefined;
   constructor(private readonly config: Config, private readonly state: State, private readonly codex: Codex,
     private readonly telegram: Telegram, private readonly topics: Topics,
-    private readonly connected: (binding: Binding) => Promise<void>, private readonly clearAllowed: (binding: Binding) => Promise<boolean> = async () => false) { newSessionDefaults(config, state.home); }
+    private readonly connected: (binding: Binding) => Promise<void>, private readonly clearBlocker: (binding: Binding) => Promise<string | undefined> = async () => 'The session cannot be verified.') { newSessionDefaults(config, state.home); }
 
   close(): void { this.closed = true; }
   clearPendingBind(): void { this.pendingTopicBind = undefined; }
@@ -52,9 +52,10 @@ export class NewSessions {
       expires: Date.now() + LIFETIME, cwd: binding.cwd, root: binding.cwd, kind: this.state.ownsScratch(binding.cwd, binding.threadId) ? 'scratch' : 'project' };
     this.state.createNewSession(op);
     try {
-      if (!this.operationAllowed(op) || !await this.clearAllowed(binding)) {
+      const blocker = !this.operationAllowed(op) ? 'The saved topic or directory is no longer eligible.' : await this.clearBlocker(binding);
+      if (blocker) {
         this.state.changeNewSession(id, 'checking', { status: 'failed' });
-        this.notice(binding.topicId, 'Cannot clear this session now. Finish the running task, answer pending questions/approvals and wait for queued deliveries, then retry /clear.'); return;
+        this.notice(binding.topicId, `Cannot clear this session now. ${blocker}`); return;
       }
       this.state.changeNewSession(id, 'checking', { status: 'preparing' });
       this.notice(binding.topicId, 'Starting a fresh conversation in this topic. Telegram history and the previous Codex session are preserved.');
@@ -340,7 +341,7 @@ export class NewSessions {
     try {
       if (!this.creationEnabled() || !this.operationAllowed(op)) throw new Error('The directory was removed, changed or is no longer allowed. Check settings locally.');
       if (op.status === 'preparing') {
-        if (op.reset && !await this.clearAllowed(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
+        if (op.reset && await this.clearBlocker(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
         if (op.topicFirst === undefined) save({ topicFirst: true });
         const loaded = await this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) &&
           allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)));
@@ -354,7 +355,7 @@ export class NewSessions {
           if (this.closed || this.config.newSessions?.enabled === false || !this.operationAllowed(op)) throw new Error('The directory is no longer allowed. No Codex session was created.');
           if (this.topicOccupied(op.targetTopic!, op.id)) throw new Error('The selected topic is already bound or reserved. No Codex session was created.');
         }
-        if (op.reset && !await this.clearAllowed(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
+        if (op.reset && await this.clearBlocker(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
         if (this.closed || !this.creationEnabled() || !this.operationAllowed(op)) throw new Error('Session creation or its directory is no longer allowed. No Codex session was created.');
         save({ status: 'starting' });
         let thread: Json;
@@ -397,7 +398,7 @@ export class NewSessions {
         if (this.closed) return;
         save({ status: 'topic' });
         if (op.reset && !this.state.binding(op.threadId!)) {
-          if (!await this.clearAllowed(op.reset)) {
+          if (await this.clearBlocker(op.reset)) {
             save({ retryAt: Date.now() + 5000 });
             this.state.enqueueOwnerNotice(`notice/clear-wait/${op.id}`, op.topicId, 'The new conversation is saved. Waiting for the previous session and its deliveries to become idle before switching this topic. No replacement will be created.');
             return;

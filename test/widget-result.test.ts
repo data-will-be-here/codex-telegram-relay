@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { resultParts } from '../src/widget-result.js';
 import { renderMarkdown } from '../src/format.js';
 import { type WidgetCard } from '../src/widget-types.js';
@@ -62,6 +63,15 @@ test('unsupported or long link targets remain readable without exceeding a docum
   assert.ok(text.includes('http://example.com/a')); assert.ok(text.includes('mailto:a@example.com'));
   assert.ok(text.includes('https://example.com/' + 'x'.repeat(6000)));
   parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 4096));
+});
+
+test('a representative table-free terminal answer uses at most three complete sequential parts when the full reader exceeds its byte budget', () => {
+  const source = readFileSync(new URL('../../test/fixtures/widget-terminal-exit-answer.md', import.meta.url), 'utf8');
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.ok(parts.length <= 3, `Expected at most three cards, got ${parts.length}`);
+  const texts = parts.map(part => string(resultPayload(string(part.params.html)).text));
+  assert.equal(texts.join(''), renderMarkdown(source).text);
+  for (const text of texts.slice(0, -1)) assert.match(text.trimEnd(), /[.!?][»”"')\]]*$/u, 'Prefer a complete sentence over an arbitrary word boundary');
 });
 
 test('a mixed answer keeps native tables between unpaged text widgets', () => {
