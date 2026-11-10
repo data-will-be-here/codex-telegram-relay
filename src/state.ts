@@ -11,7 +11,12 @@ const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
 const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
-export interface RichDeliveryPart { method: 'sendRichMessage' | 'sendMessage' | 'sendWidget'; params: Json; fallback?: string; fallbackText?: FormattedText; }
+export interface RichDeliveryPart {
+  method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument'; params: Json;
+  fallback?: string; fallbackText?: FormattedText;
+  document?: { name: string; html: string }; tableDocument?: string; tableCaption?: string;
+  resultMeta?: { part: number; total: number; completion?: string };
+}
 export interface Delivery {
   projectLabel?: string | undefined;
   sessionName?: string | null;
@@ -330,7 +335,7 @@ export class State {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   widgetAnswer(token: string): { binding: Binding; text: string; messageId: number | null } | undefined {
-    const row = this.db.prepare(`SELECT a.binding,a.text,COALESCE(a.messageId,CASE WHEN json_extract(o.richPlan,'$[0].method')='sendWidget' THEN o.messageId END) AS receipt
+    const row = this.db.prepare(`SELECT a.binding,a.text,COALESCE(a.messageId,CASE WHEN o.nextPart>=json_array_length(o.richPlan) THEN o.messageId END) AS receipt
       FROM widget_answers a LEFT JOIN outbox o ON o.key=a.deliveryKey WHERE a.token=?`).get(token);
     return row ? { binding: JSON.parse(string(row.binding)) as Binding, text: string(row.text), messageId: typeof row.receipt === 'number' ? row.receipt : null } : undefined;
   }
@@ -537,7 +542,7 @@ export class State {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id);
-      this.db.prepare(`UPDATE widget_answers SET messageId=? WHERE deliveryKey IN (SELECT key FROM outbox WHERE id=? AND json_extract(richPlan,'$[0].method')='sendWidget')`).run(messageId, id);
+      this.db.prepare('UPDATE widget_answers SET messageId=? WHERE deliveryKey IN (SELECT key FROM outbox WHERE id=?)').run(messageId, id);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }

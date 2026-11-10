@@ -316,6 +316,160 @@ test('final widgets embed the formatted complete answer and number all parts ins
   } finally { f.close(); }
 });
 
+const mixedTableSource = 'BEFORE_TABLE\n\n| Item | Value |\n|---|---|\n| Example | **42** |\n\nAFTER_TABLE';
+const wideResultTable = (): string => {
+  const cells = Array.from({ length: 21 }, (_, index) => `column-${index}`);
+  return `| ${cells.join(' | ')} |\n| ${cells.map(() => '---').join(' | ')} |\n| ${cells.map((_, index) => `value-${index}`).join(' | ')} |`;
+};
+
+test('widget finals automatically deliver text, a native table and text with one notification and one cached result', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } });
+    await f.drain();
+    const parts = f.telegram.calls.filter(call => ['sendWidget', 'sendRichMessage'].includes(call.method));
+    assert.deepEqual(parts.map(part => part.method), ['sendWidget', 'sendRichMessage', 'sendWidget']);
+    assert.ok(parts.every(part => part.params.message_thread_id === 101));
+    assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
+    assert.ok(JSON.stringify(parts[1]!.params.rich_message).includes('"type":"table"'));
+    const token = string(object((object(parts[2]!.params.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data).slice(2);
+    const answer = f.state.widgetAnswer(token)!; assert.ok(answer.messageId! > 0); assert.ok(answer.text.includes(mixedTableSource));
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('table-only finals save a usable last receipt and keep the explicit Text version control', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: '| A | B |\n|---|---|\n| One | Two |' }] } });
+    await f.drain();
+    const result = f.telegram.calls.find(call => call.method === 'sendRichMessage')!.params;
+    assert.ok(JSON.stringify(result.rich_message).includes('✅ Answer ready'));
+    const data = string(object((object(result.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data);
+    const answer = f.state.widgetAnswer(data.slice(2))!; assert.ok(answer.messageId! > 0);
+    await f.bridge.update({ update_id: 990, callback_query: { id: 'table-copy', data, from: { id: 42 }, message: {
+      message_id: answer.messageId, chat: { id: 42, type: 'private' }, message_thread_id: 101 } } }); await f.drain();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendRichMessage').length, 2);
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('a rejected native table changes only that part to HTML and retries a failed receipt locally', async () => {
+  const f = await setup(); const uploads: { params: Json; html: string }[] = []; let fail = true;
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendRichMessage') { f.telegram.calls.push({ method, params: params ?? {} }); throw new TelegramError('Unsupported rich table', 400); } return call(method, params); };
+    Object.assign(f.telegram, { upload: async (_method: string, params: Json, file: { bytes: Buffer }) => { uploads.push({ params, html: file.bytes.toString('utf8') }); return { message_id: ++f.telegram.message }; } });
+    const accept = f.state.acceptRichPart.bind(f.state);
+    f.state.acceptRichPart = (...args) => { if (args[1] === 1 && fail) { fail = false; throw new Error('Local receipt write failed'); } return accept(...args); };
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } });
+    await f.drain(); assert.equal(uploads.length, 1); f.advance(1000); await f.drain();
+    assert.equal(uploads.length, 1); assert.match(uploads[0]!.html, /<table>/u); assert.ok(string(uploads[0]!.params.caption).includes('Part 2/3'));
+    assert.equal(uploads[0]!.params.message_thread_id, 101); assert.equal(f.state.viewMode(), 'widgets');
+    assert.equal(f.telegram.calls.filter(item => item.method === 'sendWidget').length, 2);
+    assert.equal(f.telegram.sent().some(item => string(item.text).includes('AFTER_TABLE')), false);
+  } finally { f.close(); }
+});
+
+test('an unknown native table POST is never repeated or reformatted as another native send in the backup', async () => {
+  const f = await setup(); let attempts = 0;
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendRichMessage') { attempts++; throw new TelegramError('Unknown outcome', 0); } return call(method, params); };
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } });
+    await f.drain(); f.advance(); await f.drain();
+    assert.equal(attempts, 1); assert.equal(f.telegram.calls.filter(item => item.method === 'sendWidget').length, 1);
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('BEFORE_TABLE') && string(item.text).includes('AFTER_TABLE')));
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+test('a rejected widget preserves native tables, the completion heading and sequence numbers in text fallback', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendWidget') throw new TelegramError('Widget unsupported', 400); return call(method, params); };
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: mixedTableSource }] } }); await f.drain();
+    const texts = f.telegram.sent();
+    assert.ok(texts.some(item => string(item.text).includes('✅ Answer ready') && string(item.text).includes('Part 1/3') && string(item.text).includes('BEFORE_TABLE')));
+    assert.ok(texts.some(item => string(item.text).includes('Part 3/3') && string(item.text).includes('AFTER_TABLE')));
+    assert.equal(texts.filter(item => string(item.text).includes('Answer ready')).length, 1);
+    assert.ok(f.telegram.calls.some(item => item.method === 'sendRichMessage' && JSON.stringify(item.params.rich_message).includes('"type":"table"')));
+  } finally { f.close(); }
+});
+
+test('unknown or malformed generated table upload receipts never authorize another file POST', async () => {
+  for (const malformed of [false, true]) {
+    const f = await setup(); let uploads = 0;
+    try {
+      f.state.setViewMode('widgets'); await f.start();
+      Object.assign(f.telegram, { upload: async () => { uploads++; if (malformed) return {}; throw new TelegramError('Upload outcome unknown', 0); } });
+      await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: wideResultTable() }] } });
+      await f.drain(); f.advance(); await f.drain();
+      assert.equal(uploads, 1); assert.ok(f.telegram.sent().some(item => string(item.text).includes('value-20')));
+      assert.equal(f.telegram.calls.some(item => item.method === 'sendRichMessage'), false);
+      assert.deepEqual(f.codex.writes, []);
+    } finally { f.close(); }
+  }
+});
+
+test('a confirmed middle document receipt resumes only the last widget after restart', async () => {
+  const f = await setup(); const temp = temporary(); let state: State | undefined;
+  try {
+    const binding = f.state.binding('thread-a')!; const token = 'f'.repeat(32);
+    const source = `Before.\n\n${wideResultTable()}\n\nAfter.`;
+    const parts = resultParts({ id: 'result', token, generation: 'test', kind: 'result', view: 'widgets', binding, turnId: 'test', revision: 1, createdAt: 1,
+      snapshot: { status: 'done', startedAt: 1, finishedAt: 2, updatedAt: 2, plan: null, activities: [] } }, source, token);
+    assert.deepEqual(parts.map(part => part.method), ['sendWidget', 'sendDocument', 'sendWidget']);
+    const home = join(temp.dir, 'mixed-receipt'); state = new State(home); state.installTopic(binding.threadId, binding.topicId, binding.cwd, binding.title);
+    state.enqueueWidgetAnswer('final/thread-a/mixed-receipt', binding, source, token, parts);
+    const delivery = state.next()!; state.sending(delivery.id); state.acceptRichPart(delivery.id, 0, 2001);
+    state.retryDelivery(delivery.id, 0); state.sending(delivery.id); state.acceptRichPart(delivery.id, 1, 2002);
+    state.close(); state = new State(home);
+    let uploads = 0; Object.assign(f.telegram, { upload: async () => { uploads++; return { message_id: 2003 }; } });
+    const before = f.telegram.calls.length; const outbox = new Outbox(state, f.telegram, f.bridge.config, 0);
+    while (await outbox.flushOne()) { /* Only the definitely-unsent last part can send. */ }
+    assert.equal(uploads, 0); assert.equal(f.telegram.calls.slice(before).filter(item => item.method === 'sendWidget').length, 1);
+    assert.ok(state.widgetAnswer(token)!.messageId! > 0);
+  } finally { state?.close(); temp.close(); f.close(); }
+});
+
+test('scope revocation cancels an unsent generated table document before upload', async () => {
+  const f = await setup(); let uploads = 0;
+  try {
+    f.state.setViewMode('widgets'); await f.start(); Object.assign(f.telegram, { upload: async () => { uploads++; return { message_id: 2001 }; } });
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: wideResultTable() }] } });
+    f.bridge.config.ignoredThreadIds = ['thread-a']; await f.drain();
+    assert.equal(uploads, 0);
+  } finally { f.close(); }
+});
+
+test('native rejection is persisted as a document before restart can send the file', async () => {
+  const f = await setup(); const temp = temporary(); let state: State | undefined; let uploads = 0;
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const base = f.state.widgetCard('thread-a', 'live')!; const binding = base.binding; const token = 'f'.repeat(32);
+    const parts = resultParts({ ...base, kind: 'result', snapshot: { ...base.snapshot, status: 'done' } }, mixedTableSource, token);
+    const home = join(temp.dir, 'converted-table'); state = new State(home); state.installTopic(binding.threadId, binding.topicId, binding.cwd, binding.title);
+    state.enqueueWidgetAnswer('final/thread-a/converted-table', binding, mixedTableSource, token, parts);
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => { if (method === 'sendRichMessage') throw new TelegramError('Table unsupported', 400); return call(method, params); };
+    Object.assign(f.telegram, { upload: async () => { uploads++; return { message_id: ++f.telegram.message }; } });
+    const outbox = new Outbox(state, f.telegram, f.bridge.config, 0);
+    await outbox.flushOne(); await outbox.flushOne();
+    assert.equal(uploads, 0); assert.equal(state.next()!.richPlan![1]!.method, 'sendDocument');
+    state.close(); state = new State(home); const restarted = new Outbox(state, f.telegram, f.bridge.config, 0);
+    while (await restarted.flushOne()) { /* Persisted conversion sends exactly one file, then the final widget. */ }
+    assert.equal(uploads, 1); assert.ok(state.widgetAnswer(token)!.messageId! > 0);
+    assert.equal(f.telegram.calls.filter(item => item.method === 'sendWidget').length, 2);
+  } finally { state?.close(); temp.close(); f.close(); }
+});
+
 test('a multipart result retries only the unsent card and persists a middle receipt without another POST', async () => {
   const f = await setup(); let attempts = 0; let failWrite = true;
   try {

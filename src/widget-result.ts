@@ -1,5 +1,7 @@
 import { deflateSync } from 'node:zlib';
-import { renderMarkdown, projectHeader, type FormattedText } from './format.js';
+import { Lexer, type MarkedToken, type Token } from 'marked';
+import { renderMarkdown, renderMarkdownTokens, projectHeader, type FormattedText } from './format.js';
+import { richTokenMessages, richDocument, richTokenDocument, RichTableTooLarge, type RichPart } from './rich.js';
 import { widgetData } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
@@ -43,8 +45,8 @@ function cut(text: string, limit: number): number {
   return end || (text.codePointAt(0)! > 0xffff ? 2 : 1);
 }
 
-function formatted(source: string): FormattedText {
-  const message = renderMarkdown(source, 'records');
+function formatted(source: string | Token[]): FormattedText {
+  const message = typeof source === 'string' ? renderMarkdown(source) : renderMarkdownTokens(source);
   // The widget SDK opens HTTPS links up to 256 normalized characters. Keep other targets readable.
   const unsupported = message.entities.filter(entity => entity.type === 'text_link' &&
     (!entity.url?.startsWith('https://') || encodeURI(entity.url).length > 256)).sort((a, b) => b.offset - a.offset);
@@ -100,28 +102,85 @@ ${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{fle
 </style></head><body><main id="card"><div id="context" class="context"></div><header>${part === 1 ? `<span class="badge ${card.snapshot.status}">${card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3>` : ''}<span id="part"></span></header><section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
 }
 
-/** Every rendered character is preserved; fixed document/code and independent local paging survive relay shutdown. */
-export function resultParts(card: WidgetCard, source: string, token: string): RichDeliveryPart[] {
-  const message = formatted(source);
-  const whole = resultDocument(card, message, 1, 1);
-  const paged = fitsDocument(whole);
-  const chunks: FormattedText[] = [];
-  if (paged) chunks.push(message);
-  else for (let start = 0; start < message.text.length;) {
+type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };
+
+function containsTable(raw: Token, depth = 0): boolean {
+  const token = raw as MarkedToken;
+  if (depth > 32) return false;
+  return token.type === 'table' || token.type === 'blockquote' && token.tokens.some(child => containsTable(child, depth + 1)) ||
+    token.type === 'list' && token.items.some(item => item.tokens.some(child => containsTable(child, depth + 1)));
+}
+
+function flowDrafts(message: FormattedText): ResultDraft[] {
+  const parts: ResultDraft[] = [];
+  for (let start = 0; start < message.text.length;) {
     const end = start + flowLimit(message.text.slice(start));
-    chunks.push(clip(message, start, end)); start = end;
+    parts.push({ kind: 'widget', message: clip(message, start, end) }); start = end;
   }
-  if (!chunks.length) chunks.push(message);
-  for (let index = 0; index < chunks.length; index++) {
-    const chunk = chunks[index]!; const html = resultDocument(card, chunk, index + 1, chunks.length, paged);
-    if (fitsDocument(html)) continue;
-    if (chunk.text.length < 2) throw new Error('A result widget exceeded its safe document budget.');
-    const middle = cut(chunk.text, Math.floor(chunk.text.length / 2));
-    if (middle >= chunk.text.length) throw new Error('A result widget exceeded its safe document budget.');
-    chunks.splice(index, 1, clip(chunk, 0, middle), clip(chunk, middle, chunk.text.length)); index = -1;
+  return parts;
+}
+
+/** Partition the resolved Markdown tree, keeping real tables separate from literal code and reference definitions. */
+export function resultParts(card: WidgetCard, source: string, token: string): RichDeliveryPart[] {
+  let tokens: Token[] | undefined;
+  try { tokens = Lexer.lex(source, { gfm: true }); } catch { /* Fixed text rendering remains the safe fallback. */ }
+  const mixed = tokens?.some(item => containsTable(item)) ?? false;
+  const drafts: ResultDraft[] = [];
+  let paged = false;
+  if (!mixed) {
+    const message = formatted(tokens ?? source);
+    paged = fitsDocument(resultDocument(card, message, 1, 1));
+    drafts.push(...(paged ? [{ kind: 'widget' as const, message }] : flowDrafts(message)));
+    if (!drafts.length) drafts.push({ kind: 'widget', message });
+  } else {
+    let text: Token[] = [];
+    const flush = (): void => {
+      if (!text.some(item => !['space', 'def'].includes(item.type))) { text = []; return; }
+      const message = formatted(text);
+      if (message.text.trim()) drafts.push(...flowDrafts(message));
+      text = [];
+    };
+    for (const item of tokens!) {
+      if (!containsTable(item)) { text.push(item); continue; }
+      flush();
+      try {
+        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part })));
+      } catch (error) {
+        if (!(error instanceof RichTableTooLarge)) throw error;
+        drafts.push({ kind: 'document', html: richTokenDocument([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel), fallback: item.raw });
+      }
+    }
+    flush();
   }
-  return chunks.map((chunk, index) => ({ method: 'sendWidget', params: { html: resultDocument(card, chunk, index + 1, chunks.length, paged),
-    chat_data: widgetData(card), allow_queries: false, is_shared: false, disable_notification: index !== 0,
-    ...(index === chunks.length - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) },
-    fallback: chunk.text, fallbackText: chunk }));
+  const completion = card.snapshot.status === 'done' ? '✅ Answer ready' : card.snapshot.status === 'failed' ? '❌ Turn failed' : '⏹ Turn interrupted';
+  const materialize = (draft: ResultDraft, index: number): RichDeliveryPart => {
+    const part = index + 1; const total = drafts.length;
+    const resultMeta = { part, total, ...(index === 0 ? { completion } : {}) };
+    const common = { disable_notification: index !== 0,
+      ...(index === total - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) };
+    const tableCaption = `${projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel)}
+${index === 0 ? completion : ''}
+Part ${part}/${total} · Table (HTML)`;
+    if (draft.kind === 'widget') return { method: 'sendWidget', resultMeta, params: { ...common, html: resultDocument(card, draft.message, part, total, paged),
+      chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
+    if (draft.kind === 'document') return { method: 'sendDocument', resultMeta, params: { ...common, caption: tableCaption },
+      document: { name: 'table.html', html: draft.html }, fallback: draft.fallback };
+    const [header, ...body] = draft.part.richMessage.blocks;
+    const richMessage: RichPart['richMessage'] = { ...draft.part.richMessage, blocks: [
+      ...(header ? [header] : []),
+      ...(index === 0 ? [{ type: 'paragraph' as const, text: { type: 'bold' as const, text: completion } }] : []),
+      ...(total > 1 ? [{ type: 'paragraph' as const, text: `Part ${part}/${total}` }] : []), ...body,
+    ] };
+    return { method: 'sendRichMessage', resultMeta, params: { ...common, rich_message: richMessage }, fallback: draft.part.fallback,
+      tableDocument: richDocument(richMessage.blocks), tableCaption };
+  };
+  // Global part numbers are included before measuring; splitting never changes an accepted delivery.
+  for (let index = 0; index < drafts.length; index++) {
+    const draft = drafts[index]!;
+    if (draft.kind !== 'widget' || fitsDocument(String(materialize(draft, index).params.html))) continue;
+    const middle = cut(draft.message.text, Math.floor(draft.message.text.length / 2));
+    if (!middle || middle >= draft.message.text.length) throw new Error('A result widget exceeded its safe document budget.');
+    drafts.splice(index, 1, { kind: 'widget', message: clip(draft.message, 0, middle) }, { kind: 'widget', message: clip(draft.message, middle, draft.message.text.length) }); index = -1;
+  }
+  return drafts.map(materialize);
 }

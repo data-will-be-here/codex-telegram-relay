@@ -40,14 +40,14 @@ function inline(tokens: Token[], depth = 0): RichText {
 function blocks(tokens: Token[], depth = 0): RichBlock[] {
   return tokens.flatMap((raw): RichBlock[] => {
     const token = raw as MarkedToken;
-    if (depth >= 4) return [{ type: 'paragraph', text: token.raw }];
+    if (depth > 32) return [{ type: 'paragraph', text: token.raw }];
     switch (token.type) {
       case 'space': case 'def': return [];
       case 'heading': return [{ type: 'heading', size: token.depth, text: inline(token.tokens) }];
       case 'paragraph': case 'text': return [{ type: 'paragraph', text: token.tokens ? inline(token.tokens) : token.text }];
       case 'code': return [{ type: 'pre', text: token.text, ...(token.lang && /^[\w+-]{1,32}$/u.test(token.lang) ? { language: token.lang } : {}) }];
       case 'hr': return [{ type: 'divider' }];
-      case 'blockquote': return [{ type: 'blockquote', blocks: blocks(token.tokens, depth + 1) }];
+      case 'blockquote': return depth >= 4 ? blocks(token.tokens, depth + 1) : [{ type: 'blockquote', blocks: blocks(token.tokens, depth + 1) }];
       case 'list': return token.items.flatMap((item, index) => [
         ...listItem(item.tokens, `${token.ordered ? `${Number(token.start) + index}.` : '•'}${item.task ? item.checked ? ' ☑' : ' ☐' : ''}`, depth + 1),
       ]);
@@ -125,18 +125,53 @@ export function richMessages(source: string, cwd?: string | null, force = false,
   let tokens: Token[];
   try { tokens = Lexer.lex(source, { gfm: true }); } catch { return undefined; }
   if (!force && !structured(tokens)) return undefined;
+  return richTokenMessages(tokens, cwd, sessionName, projectLabel);
+}
+
+export class RichTableTooLarge extends Error {}
+
+/** Static generated attachment: model HTML remains escaped text; no scripts, external styles or assets. */
+export function richDocument(items: RichPart['richMessage']['blocks']): string {
+  const escape = (value: string): string => value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;').replace(/'/gu, '&#39;');
+  const text = (value: RichText): string => {
+    if (typeof value === 'string') return escape(value).replace(/\n/gu, '<br>');
+    if (Array.isArray(value)) return value.map(text).join('');
+    const tag = { bold: 'strong', italic: 'em', strikethrough: 'del', code: 'code', url: 'a' }[value.type];
+    return `<${tag}${value.type === 'url' && value.url ? ` href="${escape(value.url)}" rel="noreferrer"` : ''}>${text(value.text)}</${tag}>`;
+  };
+  const render = (list: RichBlock[]): string => list.map(block => {
+    if (block.type === 'divider') return '<hr>';
+    if (block.type === 'blockquote') return `<blockquote>${render(block.blocks)}</blockquote>`;
+    if (block.type === 'table') return `<table>${block.cells.map(row => `<tr>${row.map(cell => {
+      const tag = cell.is_header ? 'th' : 'td';
+      return `<${tag}>${text(cell.text)}</${tag}>`;
+    }).join('')}</tr>`).join('')}</table>`;
+    const tag = block.type === 'pre' ? 'pre' : block.type === 'heading' ? 'h2' : 'p';
+    return `<${tag}>${text(block.text)}</${tag}>`;
+  }).join('\n');
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Table</title><style>body{font:16px/1.5 system-ui;margin:24px;color:#222;background:#fff}table{border-collapse:collapse;margin:1em 0}th,td{border:1px solid #bbb;padding:8px 12px;vertical-align:top;text-align:left}th{background:#eee}pre,code{font-family:monospace;white-space:pre-wrap}a{color:#0671c9}</style></head><body>${render(items)}</body></html>`;
+}
+
+export function richTokenDocument(tokens: Token[], cwd?: string | null, sessionName?: string | null, projectLabel?: string): string {
+  return richDocument([{ type: 'paragraph', text: projectHeader(cwd, sessionName, projectLabel) }, ...blocks(tokens)]);
+}
+
+export function richTokenMessages(tokens: Token[], cwd?: string | null, sessionName?: string | null, projectLabel?: string, strictTables = false): RichPart[] {
   const content = blocks(tokens);
   const header: RichBlock = { type: 'paragraph', text: { type: 'italic', text: projectHeader(cwd, sessionName, projectLabel) } };
   // Count serialized UTF-8 bytes and all objects conservatively, below Telegram's text/block ceilings.
-  const fits = (items: RichBlock[]): boolean => validColumns(items) && countObjects([header, ...items]) <= 300 &&
-    Buffer.byteLength(JSON.stringify({ blocks: [header, ...items], skip_entity_detection: true })) <= 24000;
+  const fits = (items: RichBlock[]): boolean => validColumns(items) && countObjects([header, ...items]) <= (strictTables ? 290 : 300) &&
+    Buffer.byteLength(JSON.stringify({ blocks: [header, ...items], skip_entity_detection: true })) <= (strictTables ? 23200 : 24000);
   const fragments = (block: RichBlock): RichBlock[] => {
     if (fits([block])) return [block];
     if (block.type === 'table') {
       const [head = [], ...rows] = block.cells;
-      const cards = (body: Cell[][]): RichBlock[] => body.flatMap(row => row.map((cell, index) => ({
+      const cards = (body: Cell[][]): RichBlock[] => {
+        if (strictTables) throw new RichTableTooLarge('This table requires a complete HTML attachment.');
+        return body.flatMap(row => row.map((cell, index) => ({
         type: 'paragraph' as const, text: `${plain(head[index]?.text ?? `Column ${index + 1}`)}: ${plain(cell.text)}`,
       }))).flatMap(item => fragments(item));
+      };
       if (head.length > 20 || !fits([{ ...block, cells: [head] }])) return cards(rows.length ? rows : [head]);
       const result: RichBlock[] = []; let batch = [head];
       for (const row of rows) {

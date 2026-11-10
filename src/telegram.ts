@@ -250,7 +250,7 @@ export class Outbox {
         }
         if (changed) this.state.saveRichPlan(delivery.id, delivery.richPlan);
       }
-      const rich = !delivery.richPlan && response ? richMessages(delivery.text, project, false, delivery.sessionName, delivery.projectLabel) : undefined;
+      const rich = !delivery.richPlan && response && !delivery.key.startsWith('attention/final-widget-fallback/') ? richMessages(delivery.text, project, false, delivery.sessionName, delivery.projectLabel) : undefined;
       if (delivery.richPlan || rich) {
         const result = await this.richDelivery(delivery, rich, project, approval);
         if (result.complete) {
@@ -323,7 +323,8 @@ export class Outbox {
         while (true) {
           this.check(delivery);
           try {
-            messageId = integer(object(await this.telegram.call(part.method, params)).message_id) ?? null;
+            const sent = part.method === 'sendDocument' ? await this.uploadResultDocument(part, params) : await this.telegram.call(part.method, params);
+            messageId = integer(object(sent).message_id) ?? null;
             if (result && (!messageId || messageId < 1)) throw new TelegramError('Result part receipt was not confirmed.', 0);
             break;
           }
@@ -343,6 +344,16 @@ export class Outbox {
         }
       } catch (error) {
         if (error instanceof DeliveryCancelled) throw error;
+        // A definite native-table rejection can safely change only this unsent part to a generated attachment.
+        if (part.method === 'sendRichMessage' && part.tableDocument && error instanceof TelegramError && [400, 404].includes(error.status) && !isMissingTopic(error)) {
+          part.method = 'sendDocument';
+          part.document = { name: 'table.html', html: part.tableDocument };
+          part.params = { caption: part.tableCaption ?? 'Table (HTML)', disable_notification: part.params.disable_notification,
+            ...(part.params.reply_markup ? { reply_markup: part.params.reply_markup } : {}) };
+          delete part.tableDocument;
+          this.persistAnswer(delivery.id, () => { this.state.saveRichPlan(delivery.id, parts); this.state.retryDelivery(delivery.id, Date.now()); });
+          return { messageId, complete: false };
+        }
         const unknownResult = result && (!(error instanceof TelegramError) || error.status === 0 || error.status >= 500);
         if ((part.method === 'sendWidget' && part.fallback !== undefined || unknownResult) && !isMissingTopic(error)) {
           const rejected = error instanceof TelegramError && error.status >= 400 && error.status < 500;
@@ -351,9 +362,22 @@ export class Outbox {
             return { messageId, complete: false };
           }
           const limit = 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2;
-          const remaining = parts.slice(index).flatMap(item => item.fallbackText ? splitFormatted(item.fallbackText, limit) : formatMessages(item.fallback ?? delivery.text, true, limit));
-          parts.splice(index, parts.length - index, ...remaining.map(chunk => ({ method: 'sendMessage' as const,
-            params: { ...withProjectHeader(chunk, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true } } })));
+          const remaining = parts.slice(index).flatMap((item): RichDeliveryPart[] => {
+            if (item.method !== 'sendWidget') return [item];
+            const text = item.fallbackText ? splitFormatted(item.fallbackText, limit) : formatMessages(item.fallback ?? delivery.text, true, limit);
+            return text.map((chunk, chunkIndex) => {
+              const meta = item.resultMeta;
+              const label = meta ? meta.total === 1 && text.length > 1 ? `Part ${chunkIndex + 1}/${text.length}` : `Part ${meta.part}/${meta.total}${chunkIndex ? ' (continued)' : ''}` : '';
+              const heading = [chunkIndex === 0 ? meta?.completion : undefined, label].filter(Boolean).join('\n');
+              const prefix = heading ? heading + '\n\n' : '';
+              const formatted = { text: prefix + chunk.text, entities: chunk.entities.map(entity => ({ ...entity, offset: entity.offset + prefix.length })) };
+              return { method: 'sendMessage', params: {
+              ...withProjectHeader(formatted, project, delivery.sessionName, delivery.projectLabel), link_preview_options: { is_disabled: true },
+              disable_notification: chunkIndex > 0 || item.params.disable_notification === true,
+              ...(chunkIndex === text.length - 1 && item.params.reply_markup ? { reply_markup: item.params.reply_markup } : {}),
+            } }; });
+          });
+          parts.splice(index, parts.length - index, ...remaining);
           this.persistAnswer(delivery.id, () => {
             if (delivery.sourceThreadId) this.state.setViewMode('classic');
             this.state.saveRichPlan(delivery.id, parts); this.state.retryDelivery(delivery.id, Date.now());
@@ -394,5 +418,10 @@ export class Outbox {
       if (approval && index < parts.length - 1) return { messageId, complete: false };
     }
     return { messageId, complete: true };
+  }
+
+  private uploadResultDocument(part: RichDeliveryPart, params: Json): Promise<unknown> {
+    if (!part.document || !this.telegram.upload) throw new Error('Generated table upload is unavailable.');
+    return this.telegram.upload('sendDocument', params, { name: part.document.name, bytes: Buffer.from(part.document.html, 'utf8') }, new AbortController().signal);
   }
 }

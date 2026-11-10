@@ -64,19 +64,64 @@ test('unsupported or long link targets remain readable without exceeding a docum
   parts.forEach(part => assert.ok(deflateSync(string(part.params.html), { level: 9 }).length <= 4096));
 });
 
-test('widget tables become labeled records with inline formatting instead of a raw Markdown code block', () => {
-  const source = '| Item | Damage | Effect | Cooldown |\n|---|---:|---|---|\n| **Example A** | Up to **220** | Slow by **25%** | `12 s` |\n| Example B | 160 | [Details](https://example.com/details) | 8 s |';
+test('a mixed answer keeps native tables between unpaged text widgets', () => {
+  const source = 'Before the table.\n\n| Item | Damage | Effect |\n|---|---:|---|\n| **Example A** | **220** | [Details](https://example.com/details) |\n\nAfter the table.';
   const parts = resultParts(card, source, 'a'.repeat(32));
-  const payloads = parts.map(part => resultPayload(string(part.params.html)));
-  const text = payloads.map(data => data.text).join('');
-  assert.ok(text.includes('Damage: Up to 220'));
-  assert.ok(text.includes('Effect: Slow by 25%'));
-  assert.ok(text.includes('Cooldown: 12 s'));
-  assert.doesNotMatch(text, /\|---|\*\*|\| Item/u);
-  assert.ok(payloads.some(data => JSON.stringify(data.entities).includes('text_link')));
-  assert.ok(payloads.some(data => JSON.stringify(data.entities).includes('bold')));
-  assert.ok(payloads.every(data => !JSON.stringify(data.entities).includes('"type":"pre"')));
-  assert.ok(renderMarkdown(source).entities.some(entity => entity.type === 'pre'), 'classic fallback retains its existing table representation');
+  assert.deepEqual(parts.map(part => part.method), ['sendWidget', 'sendRichMessage', 'sendWidget']);
+  assert.ok(string(resultPayload(string(parts[0]!.params.html)).text).includes('Before the table.'));
+  assert.ok(string(resultPayload(string(parts[2]!.params.html)).text).includes('After the table.'));
+  assert.ok(JSON.stringify(parts[1]!.params.rich_message).includes('"type":"table"'));
+  assert.ok(JSON.stringify(parts[1]!.params.rich_message).includes('"type":"bold"'));
+  for (const part of parts.filter(part => part.method === 'sendWidget')) assert.doesNotMatch(string(part.params.html), /id="nav"|pointerup/u);
+  assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
+  assert.ok(parts.at(-1)!.params.reply_markup);
+});
+
+test('table parsing preserves resolved references and does not treat fenced table syntax as a real table', () => {
+  const source = '[Before][ref]\n\n| Item | Link |\n|---|---|\n| Value | [Table link][ref] |\n\n[After][ref]\n\n[ref]: https://example.com/resolved';
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.deepEqual(parts.map(part => part.method), ['sendWidget', 'sendRichMessage', 'sendWidget']);
+  for (const part of parts) assert.ok(JSON.stringify(part.params).includes('https://example.com/resolved'));
+  const tableOnly = resultParts(card, '| Link |\n|---|\n| [Value][ref] |\n\n[ref]: https://example.com/resolved', 'a'.repeat(32));
+  assert.deepEqual(tableOnly.map(part => part.method), ['sendRichMessage'], 'reference definitions must not create a trailing widget');
+  const literal = resultParts(card, '```md\n| A | B |\n|---|---|\n| 1 | 2 |\n```', 'a'.repeat(32));
+  assert.ok(literal.every(part => part.method === 'sendWidget'));
+  assert.ok(string(resultPayload(string(literal[0]!.params.html)).text).includes('| A | B |'));
+});
+
+test('long native tables repeat headers and preserve every row without widget records', () => {
+  const source = '| Row | Value |\n|---|---|\n' + Array.from({ length: 500 }, (_, index) => `| row-${index} | **value-${index}** |`).join('\n');
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.ok(parts.length > 1); assert.ok(parts.every(part => part.method === 'sendRichMessage'));
+  const rows = parts.flatMap(part => {
+    const blocks = object(part.params.rich_message).blocks as Json[];
+    assert.ok(Buffer.byteLength(JSON.stringify(part.params.rich_message)) <= 24000);
+    return blocks.filter(block => block.type === 'table').flatMap(block => {
+      const cells = block.cells as Json[][]; assert.equal(cells[0]![0]!.is_header, true); return cells.slice(1).map(row => row[0]!.text);
+    });
+  });
+  assert.deepEqual(rows, Array.from({ length: 500 }, (_, index) => `row-${index}`));
+  assert.equal(parts.filter(part => part.params.disable_notification === false).length, 1);
+  assert.equal(parts.filter(part => JSON.stringify(part.params.rich_message).includes('Answer ready')).length, 1);
+});
+
+test('wide tables become complete safe HTML attachments instead of flattened labels', () => {
+  const columns = Array.from({ length: 24 }, (_, index) => `Column ${index}`);
+  const source = `| ${columns.join(' | ')} |\n| ${columns.map(() => '---').join(' | ')} |\n| ${columns.map((_, index) => index === 23 ? '`<script>bad()</script>`' : `cell-${index}`).join(' | ')} |`;
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.equal(parts.length, 1); assert.equal(parts[0]!.method, 'sendDocument');
+  const html = parts[0]!.document!.html;
+  assert.equal((html.match(/<th>/gu) || []).length, 24); assert.equal((html.match(/<td>/gu) || []).length, 24);
+  assert.doesNotMatch(html, /<script[\s>]/iu); assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/u);
+  assert.ok(string(parts[0]!.params.caption).includes('✅ Answer ready')); assert.ok(parts[0]!.params.reply_markup);
+});
+
+test('deep quoted tables keep native cells instead of turning back into literal Markdown', () => {
+  const source = ['| A | B |', '|---|---|', '| one | **two** |'].map(line => '> > > > > ' + line).join('\n');
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  assert.equal(parts.length, 1); assert.equal(parts[0]!.method, 'sendRichMessage');
+  assert.ok(JSON.stringify(parts[0]!.params.rich_message).includes('"type":"table"'));
+  assert.doesNotMatch(JSON.stringify(parts[0]!.params.rich_message), /\|---\|/u);
 });
 
 test('only real payload limits split an oversized answer, with no missing text or repeated completion heading', () => {
