@@ -1,5 +1,11 @@
 # Verification record
 
+## Release v0.1.20 preparation
+
+Package/lockfile and native client metadata agree on 0.1.20. Both READMEs install the release tag, identify released commands and experimental global Widgets consistently, and describe current-status snapshots, native-table attachments, global view preservation and explicit approval previews. The stopped-relay private-state backup and unsupported in-place downgrade are documented in both languages: v0.1.19 positional topic-operation inserts cannot use the extended database schema even with drained queues. Stable file-export/security anchors retain legacy aliases. All 41 local Markdown file/anchor references across README, README.ru, CONTRIBUTING, SECURITY and architecture passed.
+
+Release local checks: clean npm ci, build/typecheck, 402 discovered tests (398 passed, four skips, zero failures), zero production dependency vulnerabilities, package allowlist/dry-run and diff checks. Required Windows/Linux/macOS CI on Node 22/24 gates the release PR and final main commit before tag/publication. Public-preview and compatibility limits remain explicit.
+
 ## Full current-status reader
 
 Activity Current status (including existing Current step callbacks) now opens the complete saved progress explanation through the durable result-document queue. Status-kind snapshots use a neutral blue marker and Current status heading, without implying task completion. Fitting snapshots use local pages; oversized or mixed-table snapshots share the final-reader partitioning and delivery recovery. Exact card/revision keys deduplicate repeat clicks while later revisions can create new immutable snapshots. Text version reads the captured explanation, not newer live progress. The existing 16,000 UTF-16-unit progress retention bound remains explicit.
