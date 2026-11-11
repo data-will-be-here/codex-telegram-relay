@@ -2,7 +2,7 @@ import { deflateSync } from 'node:zlib';
 import { Lexer, type MarkedToken, type Token } from 'marked';
 import { renderMarkdown, renderMarkdownTokens, projectHeader, type FormattedText } from './format.js';
 import { richTokenMessages, richDocument, richTokenDocument, RichTableTooLarge, type RichPart } from './rich.js';
-import { widgetData, widgetCaption } from './widget-template.js';
+import { widgetData, widgetSessionCaption } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
 import { type ScreenOptions } from './screen-types.js';
@@ -174,7 +174,7 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     const common = { disable_notification: index !== 0,
       ...(index === total - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) };
     if (draft.kind === 'widget') return { method: 'sendWidget', resultMeta, params: { ...common, html: resultDocument(card, draft.message, part, total, paged),
-      caption: widgetCaption(index ? `Part ${part}/${total}` : completion, card.binding.title),
+      caption: widgetSessionCaption(index ? `Part ${part}/${total}` : completion, card.binding),
       chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
     const attachment = drafts.slice(0, index + 1).filter(item => item.kind !== 'widget').length;
     const title = `Attachment ${attachment} · Table`;

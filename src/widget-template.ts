@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { type WidgetCard } from './widget-types.js';
+import { type Binding } from './types.js';
 import { renderMarkdown } from './format.js';
 
 const normalized = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/gu, ' ').trim();
@@ -36,6 +37,12 @@ type PreviewStyle = [number, number, number];
 export function widgetCaption(title: string, text = ''): string {
   const chars = Array.from(normalized(title + (text ? ' · ' + text : '')));
   return chars.length > 180 ? chars.slice(0, 179).join('') + '…' : chars.join('');
+}
+
+export function widgetSessionCaption(title: string, binding: Binding): string {
+  const project = binding.projectLabel || basename(binding.cwd);
+  const task = binding.sessionName || binding.threadId.slice(0, 8);
+  return widgetCaption(title, [project, task].filter(Boolean).join(' · '));
 }
 
 /** Map Markdown entity offsets through the same whitespace normalization as the live preview. */

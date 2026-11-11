@@ -6,7 +6,7 @@ import { formatMessages, splitFormatted, withoutFormatting, projectHeader, withP
 import { approvalParts } from './approvals.js';
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { richMessages, type RichPart } from './rich.js';
-import { WIDGET_HTML, widgetData, widgetCaption } from './widget-template.js';
+import { WIDGET_HTML, widgetData, widgetSessionCaption } from './widget-template.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 export { splitMessage } from './format.js';
 
@@ -179,7 +179,7 @@ export class Outbox {
           this.acceptWidgetReceipt(card.id, card.revision, card.messageId!);
         } else {
           const result = object(await this.telegram.call('sendWidget', { chat_id: this.config.ownerId, message_thread_id: card.binding.topicId,
-            html: WIDGET_HTML, caption: widgetCaption('Codex activity', card.binding.title), chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
+            html: WIDGET_HTML, caption: widgetSessionCaption('Working', card.binding), chat_data: data, allow_queries: false, is_shared: false, disable_notification: true,
             reply_markup: { inline_keyboard: [[{ text: 'Current status', callback_data: `v:${card.token}:d` }, { text: 'Classic for all topics', callback_data: `v:${card.token}:c` }]] } }));
           const id = integer(result.message_id);
           if (!id || id < 1) throw new TelegramError('Widget send receipt was not confirmed.', 0);
