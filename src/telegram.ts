@@ -234,7 +234,9 @@ export class Outbox {
       const project = delivery.projectCwd ?? binding?.cwd;
       const approval = delivery.key.startsWith('prompt/approval/');
       const response = /^(?:final|reply|assistant|attention\/widget-answer|attention\/widget-step)\//u.test(delivery.key);
-      const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName, delivery.projectLabel) : undefined;
+      const review = !delivery.richPlan && approval ? approvalParts(delivery.text, delivery.key.split('/').at(-1)!, project, delivery.sessionName, delivery.projectLabel) ??
+        formatMessages(delivery.text, true, 3500 - projectHeader(project, delivery.sessionName, delivery.projectLabel).length - 2)
+          .map(part => withProjectHeader(part, project, delivery.sessionName, delivery.projectLabel)) : undefined;
       if (review) {
         delivery.richPlan = review.map(part => ({ method: 'sendMessage', params: { ...part, link_preview_options: { is_disabled: true } } }));
         this.state.saveRichPlan(delivery.id, delivery.richPlan);
@@ -317,7 +319,7 @@ export class Outbox {
       const part = parts[index]!;
       const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
-      if (!approval && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
+      if ((!approval || parts.length === 1) && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
       try {
         let retries = 0;
         while (true) {
@@ -325,7 +327,7 @@ export class Outbox {
           try {
             const sent = part.method === 'sendDocument' ? await this.uploadResultDocument(part, params) : await this.telegram.call(part.method, params);
             messageId = integer(object(sent).message_id) ?? null;
-            if (result && (!messageId || messageId < 1)) throw new TelegramError('Result part receipt was not confirmed.', 0);
+            if ((result || approval) && (!messageId || messageId < 1)) throw new TelegramError('Review/result part receipt was not confirmed.', 0);
             break;
           }
           catch (error) {
@@ -334,8 +336,9 @@ export class Outbox {
               this.persistAnswer(delivery.id, () => this.state.retryDelivery(delivery.id, retryAt));
               return { messageId, complete: false };
             }
-            if (approval && error instanceof TelegramError && error.status === 429) {
-              if (!this.state.pauseApprovalPart(delivery.id, index, Date.now() + Math.max(1, error.retryAfter ?? 2) * 1000)) throw new DeliveryCancelled();
+            if (approval && error instanceof TelegramError && (error.notSent || error.status === 429)) {
+              const seconds = error.notSent ? 3 : Math.max(1, error.retryAfter ?? 2);
+              if (!this.state.pauseApprovalPart(delivery.id, index, Date.now() + seconds * 1000)) throw new DeliveryCancelled();
               return { messageId, complete: false };
             }
             if (!(error instanceof TelegramError) || error.status !== 429 || ++retries > 3) throw error;

@@ -517,7 +517,7 @@ export class Bridge {
     const receipt = this.state.approvalReceipt(key);
     if (!receipt || ['pending', 'sending'].includes(receipt.status)) return false;
     if (receipt.status !== 'held' && (receipt.status !== 'sent' || receipt.messageId === null)) {
-      this.attention(prompt.binding, prompt.request, 'This approval card could not be confirmed in Telegram. Check the existing messages and answer in Codex; another copy will not be sent automatically.');
+      this.approvalRecoveryNotice(prompt);
       prompt.refreshAfter = Infinity; return true;
     }
     if (receipt.status === 'sent' && JSON.stringify(receipt.markup) === JSON.stringify(prompt.approvalMarkup)) return false;
@@ -546,7 +546,7 @@ export class Bridge {
           binding?.topicId !== prompt.binding.topicId || binding.cwd !== prompt.binding.cwd) return true;
       if (isMissingTopic(error)) { this.state.missingTopic(prompt.binding); prompt.refreshAfter = Infinity; }
       else if (error instanceof TelegramError && [400, 403, 404].includes(error.status)) {
-        this.attention(prompt.binding, prompt.request, 'The existing approval card cannot be updated. Review and answer this request in Codex.');
+        this.approvalRecoveryNotice(prompt);
         prompt.refreshAfter = Infinity;
       } else {
         prompt.refreshAttempts = Math.min((prompt.refreshAttempts ?? 0) + 1, 5);
@@ -598,6 +598,16 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
         await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('ar:')) {
+        const key = `prompt/approval/card/${string(callback.data).slice(3)}`;
+        const sourceId = integer(message.message_id);
+        const prompt = sourceId !== undefined && sourceId > 0 ? [...this.prompts.values()].find(p => p.approval?.deliveryKey === key &&
+          p.binding.topicId === topic && this.pending(p) && sourceId === this.state.promptMessage(`attention/approval-recovery/${key}`)) : undefined;
+        await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id,
+          ...(!prompt ? { text: 'This recovery control is closed or belongs to another topic.' } : {}) });
+        if (prompt) await this.recoverApproval(prompt);
+        this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -616,6 +626,13 @@ export class Bridge {
     }
     const text = string(message.text).trim();
     if (!text) return;
+    if (/^\/approvals(?:\s|$)/u.test(text)) {
+      if (text !== '/approvals' || topicId === null) { this.notice(topicId, 'Send /approvals without arguments inside a session topic.'); return; }
+      const pending = [...this.prompts.values()].filter(p => p.approval && p.binding.topicId === topicId && this.pending(p));
+      if (!pending.length) this.notice(topicId, 'No live approvals are available in this topic. A decision already submitted will not be submitted again.');
+      for (const prompt of pending) await this.recoverApproval(prompt);
+      return;
+    }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
       this.notice(topicId, commandHelp()); return;
     }
@@ -1039,6 +1056,31 @@ export class Bridge {
     }
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/${randomUUID()}`, topicId, text); }
+  private approvalRecoveryNotice(prompt: Prompt): void {
+    this.state.enqueue(`attention/approval-recovery/${prompt.approval!.deliveryKey}`, prompt.binding.topicId,
+      'Approval delivery was not confirmed. Use the button below or /approvals to show the pending approval again. This does not approve the command.',
+      { inline_keyboard: [[{ text: 'Show approval again', callback_data: `ar:${prompt.approval!.deliveryKey.split('/').at(-1)}` }]] });
+  }
+  private async recoverApproval(prompt: Prompt): Promise<void> {
+    if (!prompt.approval || !this.pending(prompt) || !await this.promptAllowed(prompt) ||
+        this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) {
+      this.notice(prompt.binding.topicId, 'This approval is closed or cannot currently be verified. No decision was submitted.'); return;
+    }
+    const token = randomBytes(16).toString('hex');
+    const markup: Json = { inline_keyboard: [[...prompt.options.keys()].map(code => ({
+      text: code === 'a' ? 'Allow once' : code === 'c' ? 'Cancel turn' : 'Decline', callback_data: `r:${token}:${code}` }))] };
+    const replacement = this.state.replaceApprovalCard(prompt.approval.deliveryKey, prompt.token, token, markup);
+    if (!replacement) {
+      this.notice(prompt.binding.topicId, 'Approval delivery is already pending. Wait for its review card; another copy was not created.'); return;
+    }
+    this.prompts.delete(prompt.token);
+    this.prompts.set(token, { ...prompt, token, approval: { ...prompt.approval, deliveryKey: replacement.deliveryKey },
+      approvalMarkup: markup, refreshing: false, refreshAfter: 0, refreshAttempts: 0 });
+    if (replacement.messageId !== null) {
+      try { await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: replacement.messageId, reply_markup: { inline_keyboard: [] } }); }
+      catch { /* Old capability was retired atomically; an uneditable keyboard cannot submit a decision. */ }
+    }
+  }
   private attention(binding: Binding, request: RpcRequest, text: string): void {
     // Terminal-only notices use native item/context identity independently of the connection.
     const identity = JSON.stringify([string(request.params.threadId) || binding.threadId, request.method, request.params.turnId,

@@ -1,5 +1,17 @@
 # Verification record
 
+## Relay-only approval recovery and explicit widget links
+
+A red fake-transport regression reproduced a proven before-connect send failure becoming uncertain and leaving a live approval terminal-only. Small and multipart reviews now share durable part plans, validate positive receipts and defer proven notSent attempts by three seconds. Genuine unknown sends still require explicit recovery. /approvals and the warning's Show approval again action rotate one live card attempt while retaining canonical request identity and consume-before-native-response protection. Exact positive warning message receipts, owner/topic/scope checks and stable recovery capabilities protect copied, missing-ID and stale controls across reconnects. A separate red regression exposed an undefined-receipt comparison and now fails closed.
+
+Coverage includes partial-send checkpoints, lost acknowledgements, restart/replay, repeated recovery requests, old decision controls, uncertain native decisions and malformed small-card receipts. Two independent spec/standards reviews found no remaining findings after the receipt guard and synthetic fixture corrections. Final suite: 414 discovered, 410 passed, four skipped, zero failures. Clean install/build, typecheck, distribution/dry-run checks, production audit (zero vulnerabilities) and whitespace checks passed.
+
+The exact reported 1563-character Russian answer produced a full reader measuring 10432 raw bytes and 4355 zlib9 bytes before this patch, exceeding both the 4000-byte application budget and 4096-byte platform compressed ceiling. Its three flow cards were therefore a byte-budget fallback; no table/attachment detection bug was found, and paging policy was preserved. Exact private reproduction remains ignored; committed fixtures are synthetic.
+
+The same external href worked in the official QuickJS harness through default anchor navigation but did nothing on the owner's physical client while Text version worked. New cards now explicitly call openLink/openTelegramLink synchronously on click and prevent duplicate default navigation. VM checks cover both routes, no navigation during rendering and one action per tap. The official runtime confirmed one openLink action for the exact reported URL with no diagnostics; physical-client acceptance of the new handler remains pending. Existing immutable cards retain old HTML.
+
+A local relay restart delivered the affected session's recovery notice with a positive message receipt. Later passive native inspection showed that the old approval was resolved and the session was active without waitingOnApproval. The diagnostic agent submitted no approval decision or model turn. Main/release publication was not performed.
+
 ## Styled Working previews and stable reader height
 
 Working now retains bounded bold, italic, strike and code spans after Markdown parsing and whitespace normalization. UTF-16 offsets are remapped, clipped to the visible prefix and counted together with text/metadata in the 900-byte live-state budget. More/Less and height fitting redraw safe allowlisted DOM elements; raw model HTML remains literal and invalid spans fall back to plain text. Original progress source remains available to Current status. Old immutable cards keep their existing plain preview.

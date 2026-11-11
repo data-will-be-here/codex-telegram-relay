@@ -235,6 +235,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/bind SESSION_ID` | Recover uncertain creation, or retry attachment in the session's saved topic |
 | `/repair SESSION_ID` | Explicitly retry a failed/uncertain topic creation after checking whether a topic appeared |
 | `/questions` | Redisplay pending question cards with answer buttons and free-text input |
+| `/approvals` | Restore pending approval cards in this topic without submitting a decision |
 | `/model` | Choose this session's model, reasoning effort and speed |
 | `/permissions` | Show and change this session's native permissions (v0.1.20) |
 | `/view`, `/view classic`, `/view widgets` | Choose Classic or experimental Widgets for all topics (v0.1.20) |
@@ -388,3 +389,10 @@ npm start -- --codex-bin /absolute/path/to/native/codex
 On Windows use an absolute path to codex.exe. An existing but invalid executable is rejected rather than silently replaced. doctor --codex-bin PATH can inspect a replacement without saving any configuration.
 
 Known unanswered host questions now survive later turns and reconnects. Recovery extends only as far back as those known questions require; unrelated older questions are not imported. Very large questions and capacity limits produce terminal notices. Partial question answers are kept privately for up to seven days and restored only when stable identity and question contents match. A rejected native input remains retryable; accepted or uncertain input is not automatically repeated.
+## Recovering approval cards
+
+If an approval could not be delivered, use Show approval again on its warning or send `/approvals` inside the session topic. This explicitly restores a live review card; it never approves a command or starts another session. Repeated clicks while delivery is pending do not create another attempt. Previous controls are retired, and a decision already submitted to Codex cannot be rearmed. This works for relay-only sessions without an open terminal.
+
+A proven failure before connection retries automatically after three seconds, preserving confirmed parts of a long review. A genuinely unknown send is not replayed automatically; explicit recovery creates a new attempt while preserving the original native request identity. Unsupported native requests still require Codex's own interface.
+
+New result and Current status widgets open HTTPS links explicitly through Telegram's SDK; Telegram links use its in-app method. Existing immutable cards keep their old behavior; Text version remains an alternative.

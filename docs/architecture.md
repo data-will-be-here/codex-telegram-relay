@@ -194,3 +194,10 @@ Native executable discovery resolves Unix symlinks and known npm launchers to na
 `doctor` is read-only: initialize, list loaded threads and read metadata, plus getMe/getWebhookInfo if configured. It never resumes a thread, starts a model turn or changes Codex settings.
 
 Sources: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [developer commands](https://learn.chatgpt.com/docs/developer-commands), [Telegram Bot API](https://core.telegram.org/bots/api), [ws](https://github.com/websockets/ws).
+### Explicit approval delivery recovery
+
+Every approval, including a small one, now uses a persisted part plan with positive message receipt validation. Small reviews carry their existing native keyboard; multipart reviews arm controls only after all parts are acknowledged. A proven before-connect failure defers the current part for three seconds, while unknown writes remain uncertain. Confirmed parts are not replayed.
+
+`/approvals` and the Show approval again warning action revalidate a live pending native request and its current owner/topic/project route. The warning capability is tied to its exact delivered notice message and stable delivery identity, so reconnects do not need another warning. A transaction rotates the card delivery key and owner token, enqueues its same review text with fresh controls and retains the old receipt. In-memory capabilities rotate before any awaited cleanup of old controls. Pending/sending attempts cannot be replaced; consumed native decisions cannot be rearmed. The canonical request identity and native response payload remain unchanged, including subagent origin.
+
+Result and status links preserve safe HTTPS hrefs and synchronously invoke openLink or openTelegramLink on click, preventing duplicate default navigation. Paging swipe suppression still runs before link handlers. Old immutable HTML cannot acquire the new handler.

@@ -462,6 +462,22 @@ export class State {
     return row ? { status: string(row.status), messageId: typeof row.messageId === 'number' ? row.messageId : null,
       markup: typeof row.markup === 'string' ? object(JSON.parse(row.markup)) : null } : undefined;
   }
+  /** Explicit owner recovery rotates one live review attempt; native decision identity stays unchanged. */
+  replaceApprovalCard(key: string, ownerToken: string, nextToken: string, markup: Json): { deliveryKey: string; messageId: number | null } | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare(`SELECT o.* FROM outbox o JOIN approval_cards c ON c.deliveryKey=o.key
+        JOIN approval_requests r ON r.identity=c.requestIdentity
+        WHERE o.key=? AND c.ownerToken=? AND r.status='pending' AND o.status IN ('sent','uncertain')`).get(key, ownerToken);
+      if (!row) { this.db.exec('COMMIT'); return; }
+      const deliveryKey = `prompt/approval/card/${randomUUID()}`;
+      this.db.prepare('UPDATE approval_cards SET deliveryKey=?,ownerToken=?,at=? WHERE deliveryKey=? AND ownerToken=?')
+        .run(deliveryKey, nextToken, Date.now(), key, ownerToken);
+      this.enqueue(deliveryKey, Number(row.topicId), string(row.text), markup, string(row.projectCwd), string(row.sourceThreadId));
+      this.db.exec('COMMIT');
+      return { deliveryKey, messageId: typeof row.messageId === 'number' ? row.messageId : null };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   approvalPending(identity: string): boolean { return this.db.prepare("SELECT status FROM approval_requests WHERE identity=?").get(identity)?.status === 'pending'; }
   ownsApprovalCard(key: string, ownerToken: string): boolean {
     return this.db.prepare('SELECT ownerToken FROM approval_cards WHERE deliveryKey=?').get(key)?.ownerToken === ownerToken;
@@ -534,9 +550,9 @@ export class State {
       .get(retryAt, id, index)?.status === 'pending';
   }
   completeApprovalDelivery(id: number, parts: number): void {
-    this.db.prepare(`UPDATE outbox SET status='sent',markup=NULL WHERE id=? AND status IN ('sending','pending')
+    this.db.prepare(`UPDATE outbox SET status='sent',markup=CASE WHEN ?=1 THEN markup ELSE NULL END WHERE id=? AND status IN ('sending','pending')
       AND nextPart=? AND messageId IS NOT NULL AND key IN (
-        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(id, parts);
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(parts, id, parts);
   }
   delivered(id: number, messageId: number | null): void {
     this.db.exec('BEGIN IMMEDIATE');

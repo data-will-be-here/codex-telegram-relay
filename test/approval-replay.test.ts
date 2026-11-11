@@ -7,7 +7,7 @@ import { RpcError } from '../src/codex.js';
 import { State } from '../src/state.js';
 import { Outbox, TelegramError } from '../src/telegram.js';
 import { array, object, string, type RpcRequest } from '../src/types.js';
-import { fixture, click, messageBody, approvalBody, temporary, FakeCodex, FakeTelegram } from './helpers.js';
+import { fixture, click, message, messageBody, approvalBody, temporary, FakeCodex, FakeTelegram } from './helpers.js';
 
 const request: RpcRequest = { id: 'pending-approval', method: 'item/commandExecution/requestApproval', params: {
   threadId: 'thread-a', turnId: 'turn-a', itemId: 'command-a', command: 'echo waiting-for-owner', availableDecisions: ['accept', 'cancel'],
@@ -15,6 +15,156 @@ const request: RpcRequest = { id: 'pending-approval', method: 'item/commandExecu
 function control(markup: unknown): string {
   return string(object(array(array(object(markup).inline_keyboard)[0])[0]).callback_data);
 }
+function recoveryClick(id: number, data: string, sourceId: number): ReturnType<typeof click> {
+  const update = click(id, data); object(object(update.callback_query).message).message_id = sourceId; return update;
+}
+
+test('a proven unsent approval retries after three seconds without becoming uncertain', async () => {
+  const f = await fixture(); const originalNow = Date.now; let now = originalNow(); Date.now = () => now;
+  try {
+    f.codex.pending.add(request.id); await f.bridge.request(request);
+    const key = f.state.next()!.key; const call = f.telegram.call.bind(f.telegram); let failed = false;
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && !failed) { failed = true; throw new TelegramError('Before connect', 0, undefined, true); }
+      return call(method, params);
+    };
+    const outbox = new Outbox(f.state, f.telegram, f.bridge.config, 0);
+    await outbox.flushOne();
+    assert.equal(f.state.approvalReceipt(key)!.status, 'pending');
+    assert.equal(f.state.uncertainCount(), 0); assert.equal(await outbox.flushOne(), false);
+    now += 2999; assert.equal(await outbox.flushOne(), false);
+    now++; await f.drain();
+    assert.equal(f.state.approvalReceipt(key)!.status, 'sent');
+    assert.equal(f.telegram.sent().length, 1); assert.equal(f.codex.writes.length, 0);
+  } finally { Date.now = originalNow; f.close(); }
+});
+
+test('the owner recovers an uncertain approval in Telegram and old controls cannot submit it', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add(request.id); await f.bridge.request(request);
+    const key = f.state.next()!.key;
+    const call = f.telegram.call.bind(f.telegram); let failed = false;
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'sendMessage' && params.reply_markup && !failed) { failed = true; throw new TelegramError('Lost acknowledgement', 0); }
+      return result;
+    };
+    await assert.rejects(f.drain(), /Lost acknowledgement/u);
+    const old = control(f.telegram.sent()[0]!.reply_markup);
+    await f.bridge.flushApproval(); await f.drain();
+    const warning = f.telegram.sent().find(p => string(p.text).includes('delivery was not confirmed'))!;
+    assert.ok(warning, 'A relay-only session needs an actionable recovery notice');
+    const recovery = control(warning.reply_markup); assert.ok(recovery);
+    await f.bridge.update(click(1, recovery, 102));
+    await f.bridge.update(click(2, recovery, 101, 99));
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 1);
+    const warningId = f.state.promptMessage(`attention/approval-recovery/${key}`)!;
+    await f.bridge.update(recoveryClick(3, recovery, warningId + 50));
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 1);
+    assert.equal(f.state.next(), undefined, 'A copied control must not enqueue a replacement');
+    await f.bridge.update(recoveryClick(4, recovery, warningId)); await f.drain();
+    const cards = f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner'));
+    assert.equal(cards.length, 2); const fresh = control(cards[1]!.reply_markup); assert.notEqual(fresh, old);
+    await f.bridge.update(recoveryClick(5, recovery, warningId)); await f.bridge.update(click(6, old));
+    assert.equal(f.codex.writes.length, 0);
+    await f.bridge.update(click(7, fresh)); await f.bridge.update(click(8, fresh));
+    assert.equal(f.codex.writes.length, 1);
+  } finally { f.close(); }
+});
+
+test('/approvals restores a live review once while a replacement is pending, never a submitted decision', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add(request.id); await f.bridge.request(request); await f.drain();
+    const old = control(f.telegram.sent()[0]!.reply_markup);
+    await f.bridge.update(message(1, 101, '/approvals')); await f.bridge.update(message(2, 101, '/approvals')); await f.drain();
+    const cards = f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner'));
+    assert.equal(cards.length, 2); const fresh = control(cards[1]!.reply_markup);
+    await f.bridge.update(click(3, old)); assert.equal(f.codex.writes.length, 0);
+    f.codex.respond = async () => { throw new RpcError('Unknown native outcome', true); };
+    await assert.rejects(f.bridge.update(click(4, fresh)), /Unknown native outcome/u);
+    await f.bridge.update(message(5, 101, '/approvals')); await f.drain();
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 2);
+  } finally { f.close(); }
+});
+
+test('multipart before-connect retry preserves accepted review parts and keeps controls unarmed until complete', async () => {
+  const f = await fixture(); const originalNow = Date.now; let now = originalNow(); Date.now = () => now;
+  try {
+    f.codex.pending.add(request.id);
+    await f.bridge.request({ ...request, params: { ...request.params, reason: 'Review context without executable effects. '.repeat(250) } });
+    const call = f.telegram.call.bind(f.telegram); let attempts = 0;
+    f.telegram.call = async (method, params = {}) => {
+      if (method === 'sendMessage' && ++attempts === 2) throw new TelegramError('Before connect', 0, undefined, true);
+      return call(method, params);
+    };
+    const outbox = new Outbox(f.state, f.telegram, f.bridge.config, 0);
+    await outbox.flushOne(); const first = f.telegram.sent()[0]!.text;
+    await outbox.flushOne(); assert.equal(f.state.uncertainCount(), 0);
+    assert.equal(await f.bridge.flushApproval(), false); assert.equal(f.telegram.sent()[0]!.reply_markup, undefined);
+    now += 3000; await f.drain(); await f.bridge.flushApproval();
+    assert.equal(f.telegram.sent().filter(p => p.text === first).length, 1);
+    assert.equal(f.codex.writes.length, 0);
+    assert.ok(f.telegram.calls.some(p => p.method === 'editMessageReplyMarkup'));
+  } finally { Date.now = originalNow; f.close(); }
+});
+
+test('recovery survives restart while its notification and obsolete controls stay deduplicated', async () => {
+  const f = await persistentFixture();
+  try {
+    const call = f.telegram.call.bind(f.telegram); let failed = false;
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'sendMessage' && params.reply_markup && !failed) { failed = true; throw new TelegramError('Lost acknowledgement', 0); }
+      return result;
+    };
+    await f.bridge.request(request); const key = f.state.next()!.key; await assert.rejects(f.drain(), /Lost acknowledgement/u);
+    await f.bridge.flushApproval(); await f.drain();
+    const warning = f.telegram.sent().find(p => string(p.text).includes('delivery was not confirmed'))!;
+    const recovery = control(warning.reply_markup);
+    await f.reconnect(true, true); await f.bridge.request(request); await f.drain();
+    assert.equal(f.telegram.sent().filter(p => string(p.text).includes('delivery was not confirmed')).length, 1);
+    const warningId = f.state.promptMessage(`attention/approval-recovery/${key}`)!;
+    await f.bridge.update(recoveryClick(1, recovery, warningId)); await f.drain();
+    await f.reconnect(true, true); await f.bridge.request(request); await f.drain();
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 2);
+    await f.bridge.update(recoveryClick(2, recovery, warningId)); await f.drain();
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 2);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('a missing small-card receipt cannot become confirmed or silently arm a second copy', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add(request.id); await f.bridge.request(request); const key = f.state.next()!.key;
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params = {}) => method === 'sendMessage' && params.reply_markup ? {} : call(method, params);
+    await assert.rejects(f.drain(), /receipt was not confirmed/u);
+    assert.equal(f.state.approvalReceipt(key)!.status, 'uncertain');
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
+
+test('a recovery callback without a source receipt cannot restore an approval', async () => {
+  const f = await fixture();
+  try {
+    f.codex.pending.add(request.id); await f.bridge.request(request);
+    const call = f.telegram.call.bind(f.telegram); let failed = false;
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'sendMessage' && params.reply_markup && !failed) { failed = true; throw new TelegramError('Lost acknowledgement', 0); }
+      return result;
+    };
+    await assert.rejects(f.drain(), /Lost acknowledgement/u); await f.bridge.flushApproval();
+    const notice = f.state.next()!; const data = control(notice.markup);
+    const callback = click(1, data); delete object(object(callback.callback_query).message).message_id;
+    await f.bridge.update(callback); await f.drain();
+    assert.equal(f.telegram.sent().filter(p => messageBody(p).includes('waiting-for-owner')).length, 1);
+    assert.equal(f.codex.writes.length, 0);
+  } finally { f.close(); }
+});
 
 async function persistentFixture() {
   const temp = temporary(); const project = join(temp.dir, 'project'); mkdirSync(project);
@@ -92,7 +242,7 @@ test('a lost Telegram send acknowledgement stays uncertain across reconnect and 
     const call = f.telegram.call.bind(f.telegram);
     f.telegram.call = async (method, params = {}) => {
       const result = await call(method, params);
-      if (method === 'sendMessage' && params.reply_markup) throw new TelegramError('Synthetic lost send acknowledgement', 0);
+      if (method === 'sendMessage' && params.reply_markup && messageBody(params).includes('waiting-for-owner')) throw new TelegramError('Synthetic lost send acknowledgement', 0);
       return result;
     };
     await f.bridge.request(request); await assert.rejects(f.drain(), /lost send acknowledgement/u);
