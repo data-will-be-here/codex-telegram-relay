@@ -6,7 +6,7 @@ import { type ScreenOptions, type ScreenSpec } from './screen-types.js';
 import { screenDocuments } from './widget-result.js';
 import { widgetCaption as screenCaption } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
-import { array, integer, object, string, type Binding, type Json, type Telegram } from './types.js';
+import { array, integer, object, string, displayName, type Binding, type Json, type Telegram } from './types.js';
 
 const textOf = (text: string, spec: ScreenOptions): FormattedText => spec.markdown ? renderMarkdown(text) : { text, entities: [] };
 function withoutHeading(message: FormattedText, title: string): FormattedText {
@@ -46,7 +46,7 @@ export class Screens {
       html: part.html, caption: spec.caption ?? screenCaption(spec.title, binding.projectLabel || binding.cwd.split(/[\\/]/u).at(-1)),
       chat_data: '{}', allow_queries: false, is_shared: false }, fallbackText: part.message })) :
       formatMessages(text, spec.markdown === true, 3300).map(part => ({ method: 'sendMessage', params: {
-        ...withProjectHeader(part, binding.cwd || undefined, binding.sessionName, binding.projectLabel), link_preview_options: { is_disabled: true } } }));
+        ...withProjectHeader(part, binding.cwd || undefined, displayName(binding), binding.projectLabel), link_preview_options: { is_disabled: true } } }));
     parts[0]!.screen = spec;
     parts.forEach((part, index) => { if (index) part.params.disable_notification = true; });
     return parts;
@@ -75,7 +75,7 @@ export class Screens {
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!saved) {
       await this.telegram.call('editMessageText', { chat_id: this.config.ownerId, message_id: id,
-        ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding?.sessionName, binding?.projectLabel), reply_markup: markup }); return key;
+        ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding && displayName(binding), binding?.projectLabel), reply_markup: markup }); return key;
     }
     const widget = saved.parts[0]!.method === 'sendWidget'; const data = this.data(options.title, text);
     if (widget && (!data || (options.caption?.length ?? 0) > 1000) || !widget && text.length > 3300) {
@@ -98,7 +98,7 @@ export class Screens {
       await this.telegram.call('editMessageWidgetData', { ...common, chat_data: data! });
       await this.telegram.call('editMessageCaption', { ...common, caption: options.caption ?? screenCaption(options.title), reply_markup: addTextButton(markup, spec.token) });
     } else await this.telegram.call('editMessageText', { ...common,
-      ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding?.sessionName, binding?.projectLabel), reply_markup: addTextButton(markup, spec.token) });
+      ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding && displayName(binding), binding?.projectLabel), reply_markup: addTextButton(markup, spec.token) });
     return key;
   }
   async close(key: string, title: string): Promise<boolean> {
@@ -126,7 +126,7 @@ export class Screens {
     const current = topicId === null ? undefined : this.state.topic(topicId);
     const text = saved.spec.fullText ?? saved.text;
     const parts: RichDeliveryPart[] = formatMessages(text, saved.spec.markdown === true, 3300).map((part, index) => ({ method: 'sendMessage', params: {
-      ...withProjectHeader(part, saved.projectCwd, current?.sessionName, current?.projectLabel), link_preview_options: { is_disabled: true }, disable_notification: index > 0 } }));
+      ...withProjectHeader(part, saved.projectCwd, saved.label, current?.projectLabel), link_preview_options: { is_disabled: true }, disable_notification: index > 0 } }));
     parts[0]!.screen = { kind: 'text', title: 'Text version', token: randomBytes(16).toString('hex') };
     const key = `notice/screen-text/${saved.spec.token}/${createHash('sha256').update(string(callback.id)).digest('hex')}`;
     this.state.enqueueScreen(key, topicId, text, null, parts, saved.ownerNotice);

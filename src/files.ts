@@ -5,7 +5,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { allowedSessionDirectory, privateDirectory, privateRead, readConfig } from './config.js';
 import { withProjectHeader } from './format.js';
 import { TelegramError } from './telegram.js';
-import { integer, object, type Binding, type Telegram } from './types.js';
+import { integer, object, displayName, type Binding, type Telegram } from './types.js';
 
 export const MAX_EXPORT_BYTES = 49_000_000;
 const CACHE_BYTES = 200_000_000;
@@ -169,7 +169,7 @@ export class Files {
       if (Number(quota.count) >= 16 || Number(quota.bytes) + bytes.length > CACHE_BYTES) throw new Error('File queue is full. Wait for pending uploads.');
       if (Number(this.db.prepare('SELECT COUNT(*) AS count FROM file_jobs').get()!.count) >= 10_000) throw new Error('File receipt capacity reached. Inspect the local queue.');
       this.db.prepare(`INSERT INTO file_jobs(id,fingerprint,ownerId,threadId,topicId,cwd,title,lastTurn,name,hash,size,kind,caption,status,at,sessionName) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'preparing',?,?)`)
-        .run(id, fingerprint, config.ownerId, binding.threadId, binding.topicId, binding.cwd, binding.title, binding.lastTurn, name, hash, bytes.length, kind, caption, Date.now(), binding.sessionName ?? null);
+        .run(id, fingerprint, config.ownerId, binding.threadId, binding.topicId, binding.cwd, binding.title, binding.lastTurn, name, hash, bytes.length, kind, caption, Date.now(), displayName(binding) ?? null);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     try {

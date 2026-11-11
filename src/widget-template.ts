@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { type WidgetCard } from './widget-types.js';
-import { type Binding } from './types.js';
+import { displayName, type Binding } from './types.js';
 import { renderMarkdown } from './format.js';
 
 const normalized = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/gu, ' ').trim();
@@ -41,7 +41,7 @@ export function widgetCaption(title: string, text = ''): string {
 
 export function widgetSessionCaption(title: string, binding: Binding): string {
   const project = binding.projectLabel || basename(binding.cwd);
-  const task = binding.sessionName || binding.threadId.slice(0, 8);
+  const task = displayName(binding) || binding.threadId.slice(0, 8);
   return widgetCaption(title, [project, task].filter(Boolean).join(' · '));
 }
 
@@ -71,7 +71,7 @@ function formattedPreview(source: string): { text: string; styles: PreviewStyle[
 export function widgetData(card: WidgetCard): string {
   const s = card.snapshot;
   const data = { v: 1, r: card.revision, k: card.kind, p: widgetLabel(card.binding.projectLabel || basename(card.binding.cwd), 24),
-    t: widgetLabel(card.binding.sessionName || card.binding.threadId.slice(0, 8), 48), s: s.status,
+    t: widgetLabel(displayName(card.binding) || card.binding.threadId.slice(0, 8), 48), s: s.status,
     b: s.startedAt, e: s.finishedAt, u: s.updatedAt, n: s.plan ? [s.plan.done, s.plan.total] : null, q: '', f: undefined as PreviewStyle[] | undefined,
     a: s.activities.slice(-3).map(item => [item.status, widgetLabel(item.label, 48)]) };
   const available = 900 - Buffer.byteLength(JSON.stringify(data)) + 2;

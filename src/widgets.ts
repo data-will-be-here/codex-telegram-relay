@@ -5,6 +5,7 @@ import { type Screens } from './screens.js';
 import { array, object, string, type Binding, type Json, type Telegram } from './types.js';
 import { widgetLabel, widgetPreview } from './widget-template.js';
 import { resultParts } from './widget-result.js';
+import { taskTitle } from './tasks.js';
 import { type WidgetActivity, type WidgetCard, type WidgetDelivery, type ViewMode } from './widget-types.js';
 
 const finalStatuses = new Map([['completed', 'done'], ['failed', 'failed'], ['interrupted', 'interrupted']] as const);
@@ -41,7 +42,7 @@ export class Widgets {
 
   private card(binding: Binding, turnId: string, startedAt: number | null = null): WidgetCard {
     const previous = this.state.widgetCard(binding.threadId, turnId);
-    if (previous) return { ...previous, binding, generation: this.generation };
+    if (previous) return { ...previous, binding: { ...previous.binding, taskName: previous.binding.taskName || binding.taskName || null }, generation: this.generation };
     const now = this.now();
     return { id: randomUUID(), token: randomBytes(16).toString('hex'), generation: this.generation,
       binding, turnId, view: this.state.viewMode(), revision: 1, createdAt: now,
@@ -80,7 +81,7 @@ export class Widgets {
         current: widgetLabel(string(plan.find(step => step.status === 'inProgress')?.step), 96) } : null;
     } else if (card.view === 'widgets' && method.startsWith('item/')) {
       const item = object(params.item); const label = activityLabel(item); const id = string(item.id);
-      if (!label || !id) return;
+      if (!label || !id) { this.refreshTask(binding, turnId); return; }
       const key = createHash('sha256').update(id.slice(0, 2048)).digest('hex').slice(0, 24);
       const existing = card.snapshot.activities.find(activity => activity.id === key);
       // A replayed start must not turn a completed operation back into a running one.
@@ -89,12 +90,19 @@ export class Widgets {
         typeof item.exitCode === 'number' && item.exitCode !== 0 ? 'failed' : 'done';
       card.snapshot.activities = [...card.snapshot.activities.filter(activity => activity.id !== key), { id: key, label, status }].slice(-3);
     }
-    if (!previous || before !== JSON.stringify(card.snapshot) || previous.generation !== this.generation) this.save(card);
+    if (!previous || before !== JSON.stringify(card.snapshot) || previous.generation !== this.generation || previous.binding.taskName !== card.binding.taskName) this.save(card);
   }
   private save(card: WidgetCard): void {
     card.revision++; card.snapshot.updatedAt = this.now();
     if (!this.state.saveWidget(card)) this.state.enqueue(`attention/widget-capacity/${card.binding.threadId}`, card.binding.topicId,
       'Activity cards are paused because the widget history is full of unresolved deliveries. Replies and approvals continue normally.');
+  }
+  refreshTask(binding: Binding, turnId: string): void {
+    const saved = this.state.widgetCard(binding.threadId, turnId);
+    if (saved && !saved.binding.taskName && binding.taskName && saved.snapshot.finishedAt === null &&
+        saved.binding.topicId === binding.topicId && saved.binding.cwd === binding.cwd) {
+      saved.binding.taskName = binding.taskName; this.save(saved);
+    }
   }
   private hydrate(card: WidgetCard, items: unknown[]): void {
     for (const value of items.slice(-16)) {
@@ -136,11 +144,16 @@ export class Widgets {
   }
   recover(binding: Binding, turns: Json[]): void {
     const active = turns.find(turn => turn.status === 'inProgress');
+    const latest = active ?? turns[0];
+    if (latest) this.state.rememberTask(binding.threadId, string(latest.id), taskTitle(array(latest.items)),
+      this.state.binding(binding.threadId)?.taskTurnId === binding.taskTurnId);
     for (const saved of this.state.widgetCards(binding.threadId)) {
       if (saved.binding.topicId !== binding.topicId || saved.binding.cwd !== binding.cwd) { this.state.widgetResult(saved.id, 'retired'); continue; }
       if (saved.generation === this.generation) continue;
       const turn = turns.find(turn => turn.id === saved.turnId);
-      const card: WidgetCard = { ...saved, generation: this.generation, binding };
+      if (turn) this.state.rememberTask(binding.threadId, saved.turnId, taskTitle(array(turn.items)));
+      const card: WidgetCard = { ...saved, generation: this.generation,
+        binding: { ...saved.binding, taskName: saved.binding.taskName || this.state.turnBinding(binding, saved.turnId).taskName || null } };
       if (saved.snapshot.finishedAt !== null) {
         // Bounded native history omits older turns; an observed terminal snapshot stays terminal.
         card.binding = saved.binding; this.state.saveWidget(card); continue;
@@ -158,7 +171,7 @@ export class Widgets {
       this.save(card);
     }
     if (active && !this.state.widgetCard(binding.threadId, string(active.id))) {
-      const card = this.card(binding, string(active.id), millis(active.startedAt));
+      const card = this.card(this.state.turnBinding(binding, string(active.id)), string(active.id), millis(active.startedAt));
       // Recovery only uses safe activity categories, never historical reply/tool output.
       this.hydrate(card, array(active.items)); this.save(card);
     }

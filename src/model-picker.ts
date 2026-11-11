@@ -3,7 +3,7 @@ import { RpcError } from './codex.js';
 import { withProjectHeader } from './format.js';
 import { type State } from './state.js';
 import { type Screens } from './screens.js';
-import { array, object, string, integer, type Binding, type Codex, type Json, type Keyboard, type Telegram, type ModelSettings } from './types.js';
+import { array, object, string, integer, displayName, type Binding, type Codex, type Json, type Keyboard, type Telegram, type ModelSettings } from './types.js';
 
 const PAGE_SIZE = 8;
 const MENU_LIFETIME = 10 * 60 * 1000;
@@ -152,7 +152,7 @@ export class ModelPicker {
     const messageId = this.state.promptMessage(menu.key);
     if (!messageId) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: messageId,
-      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, menu.binding.sessionName, menu.binding.projectLabel), reply_markup: markup });
+      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, displayName(menu.binding), menu.binding.projectLabel), reply_markup: markup });
   }
   private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/model/${randomUUID()}`, binding.topicId, text); }
   private retire(menu: Menu): void {

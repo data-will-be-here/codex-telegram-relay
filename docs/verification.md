@@ -1,5 +1,11 @@
 # Verification record
 
+## Current task labels and completion captions (2026-11-11)
+
+Task headings now use the first user request of each turn, independently of the native session name. Seven focused tests cover terminal item events, confirmed Telegram turn IDs, steering, Markdown/Unicode/control sanitization, bounded labels, late acknowledgements/completions, rejected instructions, persisted classic queues, historical Text version reads and recovery after reconnect. Native session names remain unchanged. Successful final-widget and table-attachment captions use `Answer ready` without the check-mark emoji; the completion indicator inside the widget is retained.
+
+Validation: clean install/build, typecheck, package allowlist/dry-run, production audit (zero vulnerabilities) and whitespace checks passed. The full suite passed 431 tests with four skipped; the final focused run passed all seven task tests, including two added race/rejection checks. Native user-item shapes were checked against the installed generated schema and [official app-server events](https://developers.openai.com/codex/app-server#events). This is local integration verification; physical-client appearance remains an acceptance check.
+
 ## Themed command, review and settings screens
 
 The shared Screens module adds widget bodies for supported command/file/permission reviews, questions, limits/status/session lists, new-conversation menus and model/permissions/view/mode/stream settings. Native keyboard capabilities and free-text answers retain their existing handlers; no widget-query transport or native permission override was added. Classic and already captured turn/menu presentations remain available. Unknown or sensitive native prompts keep their existing terminal requirement.

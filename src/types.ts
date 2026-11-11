@@ -21,12 +21,16 @@ export interface Session {
 export interface Binding {
   projectLabel?: string | undefined;
   sessionName?: string | null;
+  taskName?: string | null;
+  taskTurnId?: string | null;
   threadId: string;
   topicId: number;
   cwd: string;
   title: string;
   lastTurn: string | null;
 }
+
+export const displayName = (binding: Binding): string | null | undefined => binding.taskName || binding.sessionName;
 
 export interface RpcRequest {
   id: string | number;

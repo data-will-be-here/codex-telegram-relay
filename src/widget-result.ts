@@ -6,6 +6,7 @@ import { widgetData, widgetSessionCaption } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
 import { type ScreenOptions } from './screen-types.js';
+import { displayName } from './types.js';
 
 // The complete measured document includes the reader, styles and escaped model data.
 // Keep 96 bytes below Telegram's 4096-byte zlib limit without splitting fitting answers at 3800.
@@ -90,7 +91,7 @@ export function fitsDocument(html: string): boolean {
 }
 
 export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true, screen?: ScreenOptions): string {
-  const data = { context: projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel).replace(/^» /u, ''),
+  const data = { context: projectHeader(card.binding.cwd, displayName(card.binding), card.binding.projectLabel).replace(/^» /u, ''),
     status: screen?.title ?? (card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted'),
     part, total, text: message.text, entities: message.entities, ...(screen?.meters?.length ? { meters: screen.meters.slice(0, 2) } : {}) };
   const live = screen ? String.raw`TelegramWidget.onEvent('chatDataChanged',function(){try{var p=JSON.parse(TelegramWidget.chatData||'null');if(!p||p.v!==1)return;if(p.title){D.status=p.title;if(D.part===1)el('status').textContent=p.title}` +
@@ -159,7 +160,7 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
       if (!containsTable(item)) { text.push(item); continue; }
       flush();
       try {
-        drafts.push(...richTokenMessages([item], card.binding.cwd, card.binding.sessionName, card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part })));
+        drafts.push(...richTokenMessages([item], card.binding.cwd, displayName(card.binding), card.binding.projectLabel, true).map(part => ({ kind: 'rich' as const, part })));
       } catch (error) {
         if (!(error instanceof RichTableTooLarge)) throw error;
         drafts.push({ kind: 'document', html: richTokenDocument([item]), fallback: item.raw });
@@ -168,17 +169,18 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     flush();
   }
   const completion = card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? '✅ Answer ready' : card.snapshot.status === 'failed' ? '❌ Turn failed' : '⏹ Turn interrupted';
+  const captionCompletion = completion.replace(/^✅ /u, '');
   const materialize = (draft: ResultDraft, index: number): RichDeliveryPart => {
     const part = index + 1; const total = drafts.length;
     const resultMeta = { part, total, ...(index === 0 ? { completion } : {}) };
     const common = { disable_notification: index !== 0,
       ...(index === total - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) };
     if (draft.kind === 'widget') return { method: 'sendWidget', resultMeta, params: { ...common, html: resultDocument(card, draft.message, part, total, paged),
-      caption: widgetSessionCaption(index ? `Part ${part}/${total}` : completion, card.binding),
+      caption: widgetSessionCaption(index ? `Part ${part}/${total}` : captionCompletion, card.binding),
       chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
     const attachment = drafts.slice(0, index + 1).filter(item => item.kind !== 'widget').length;
     const title = `Attachment ${attachment} · Table`;
-    const tableCaption = [index === 0 ? completion : '', title].filter(Boolean).join('\n');
+    const tableCaption = [index === 0 ? captionCompletion : '', title].filter(Boolean).join('\n');
     if (draft.kind === 'document') return { method: 'sendDocument', resultMeta, params: { ...common, caption: tableCaption },
       document: { name: `table-${attachment}.html`, html: draft.html }, fallback: draft.fallback };
     const body = draft.part.richMessage.blocks.slice(1);

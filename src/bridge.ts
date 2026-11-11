@@ -19,7 +19,8 @@ import { formatLimits } from './limits.js';
 import { limitMeters } from './limits.js';
 import { Screens } from './screens.js';
 import { widgetCaption } from './widget-template.js';
-import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
+import { taskTitle } from './tasks.js';
+import { array, integer, object, string, displayName, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
   widgets?: boolean;
@@ -174,11 +175,22 @@ export class Bridge {
       const activityThread = string(params.threadId) || string(object(params.thread).id);
       const activityBinding = this.state.binding(activityThread);
       if (!this.closed && activityBinding && this.attached.has(activityThread) && !this.state.topicOperation(activityThread) &&
-          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) this.widgets.observe(activityBinding, method, params);
+          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) {
+        const turn = object(params.turn); const turnId = string(params.turnId) || string(turn.id);
+        const item = object(params.item);
+        const user = method.startsWith('item/') && item.type === 'userMessage';
+        if (method === 'turn/started' || method === 'turn/completed' || user) {
+          const finished = this.state.widgetCard(activityThread, turnId)?.snapshot.finishedAt;
+          this.state.rememberTask(activityThread, turnId, taskTitle(user ? [item] : array(turn.items)),
+            (method === 'turn/started' || user) && finished == null);
+        }
+        this.widgets.observe(this.state.turnBinding(this.state.binding(activityThread)!, turnId), method, params);
+      }
     }
     if (!['item/started', 'item/agentMessage/delta', 'item/completed', 'turn/completed'].includes(method)) return;
     const threadId = string(params.threadId);
-    const binding = this.state.binding(threadId);
+    const currentBinding = this.state.binding(threadId);
+    const binding = currentBinding && this.state.turnBinding(currentBinding, string(params.turnId));
     if (!this.state.streamingEnabled() || !binding || !this.attached.has(threadId) ||
         this.config.ignoredThreadIds?.includes(threadId)) return;
     const turnId = string(params.turnId);
@@ -394,7 +406,8 @@ export class Bridge {
         if ((all || matchingReply) && !this.widgets.usesCard(threadId, string(params.turnId)) && await this.stillAllowed(binding)) {
           const itemId = string(item.id) || createHash('sha256').update(string(item.text)).digest('hex');
           const key = all ? `assistant/${threadId}/${string(params.turnId)}/${itemId}` : `reply/${threadId}/${reply!.inputId}`;
-          this.state.enqueue(key, binding.topicId, string(item.text));
+          const task = this.state.turnBinding(binding, string(params.turnId));
+          this.state.enqueue(key, binding.topicId, string(item.text), null, binding.cwd, binding.threadId, displayName(task));
           if (matchingReply) this.state.clearReply(threadId, reply.inputId);
         }
       }
@@ -413,10 +426,16 @@ export class Bridge {
     if (!['completed', 'failed', 'interrupted'].includes(status)) return;
     const previous = recovery?.baseline ?? this.state.binding(binding.threadId)?.lastTurn ?? null;
     if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
+    this.state.rememberTask(binding.threadId, turnId, taskTitle(array(turn.items)));
+    binding = this.state.turnBinding(binding, turnId);
     let text = finalAnswer(turn) || this.finals.get(`${binding.threadId}/${turnId}`) || '';
     if (!text) {
       const snapshot = (await this.codex.turns(binding.threadId, recovery ? 3000 : undefined)).find(t => t.id === turnId);
-      if (snapshot) text = finalAnswer(snapshot);
+      if (snapshot) {
+        text = finalAnswer(snapshot);
+        this.state.rememberTask(binding.threadId, turnId, taskTitle(array(snapshot.items)));
+        binding = this.state.turnBinding(binding, turnId);
+      }
       if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     }
     const currentBinding = this.state.binding(binding.threadId);
@@ -432,9 +451,9 @@ export class Bridge {
       const result = { ...progress, kind: 'result' as const, snapshot: { ...progress.snapshot, status: status === 'completed' ? 'done' as const : status as 'failed' | 'interrupted',
         finishedAt: progress.snapshot.finishedAt ?? (typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()),
         updatedAt: Date.now(), progressText: (text || error || 'See the terminal for details.').slice(0, 40_000), plan: null, activities: [] } };
-      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts(result, text || error || 'See the terminal for details.', token));
+      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts({ ...result, binding }, text || error || 'See the terminal for details.', token));
     }
-    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
+    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId, displayName(binding));
     if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
@@ -785,7 +804,7 @@ export class Bridge {
     if (authorized && valid() && answer) {
       const current = this.state.topic(topicId!)!;
       const click = createHash('sha256').update(string(callback.id)).digest('hex');
-      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId);
+      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId, displayName(answer.binding));
     }
   }
 
@@ -1029,17 +1048,27 @@ export class Bridge {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
       if (!current()) throw new RpcError('The topic changed. No instruction was sent.', false);
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
-      await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt));
+      await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt),
+        taskTitle(array(turn?.items)) ?? taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else if (status === 'idle') {
-      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt));
+      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
+        taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else throw new RpcError('This session is not ready. Open it in Codex before retrying.', false);
   }
-  private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>): Promise<void> {
+  private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>, task?: string): Promise<void> {
+    const binding = this.state.binding(threadId);
     this.state.awaitReply(threadId, inputId, turnId);
     try {
       const result = object(await write());
       const acceptedTurn = string(object(result.turn).id) || string(result.turnId);
       if (acceptedTurn) this.state.replyTurn(threadId, inputId, acceptedTurn);
+      const current = this.state.binding(threadId);
+      const knownTurn = acceptedTurn || turnId;
+      if (knownTurn && binding && !this.closed && current?.topicId === binding.topicId && current.cwd === binding.cwd &&
+          !this.config.ignoredThreadIds?.includes(threadId)) {
+        this.state.rememberTask(threadId, knownTurn, task, current.taskTurnId === binding.taskTurnId || current.taskTurnId === knownTurn);
+        this.widgets.refreshTask(this.state.turnBinding(current, knownTurn), knownTurn);
+      }
     } catch (error) { this.state.clearReply(threadId, inputId); throw error; }
   }
   private promptKey(prompt: Prompt): string { return prompt.approval?.deliveryKey ?? `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }

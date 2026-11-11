@@ -50,7 +50,7 @@ test('external and Telegram anchors use explicit SDK opening once per click, nev
 test('a complete formatted answer stays in one locally paged document when it fits the payload budget', () => {
   const source = '# Heading\n\n**Bold** and *italic*.\n\n- Item one\n- Item two\n\n```ts\nconst value = "🧪";\n```\n\n' + 'Русский абзац с полным окончанием предложения. '.repeat(60) + 'FINAL_TAIL';
   const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'Demo' } }, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
-  assert.equal(parts[0]!.params.caption, '✅ Answer ready · Demo · Task');
+  assert.equal(parts[0]!.params.caption, 'Answer ready · Demo · Task');
   const data = parts.map(part => resultPayload(string(part.params.html)));
   assert.equal(data.map(item => item.text).join(''), renderMarkdown(source).text);
   assert.ok(data.some(item => JSON.stringify(item.entities).includes('bold')));
@@ -160,8 +160,8 @@ test('wide tables become complete safe HTML attachments instead of flattened lab
   const html = parts[0]!.document!.html;
   assert.equal((html.match(/<th>/gu) || []).length, 24); assert.equal((html.match(/<td>/gu) || []).length, 24);
   assert.doesNotMatch(html, /<script[\s>]/iu); assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/u);
-  assert.ok(string(parts[0]!.params.caption).includes('✅ Answer ready')); assert.ok(parts[0]!.params.reply_markup);
-  assert.equal(string(parts[0]!.params.caption), '✅ Answer ready\nAttachment 1 · Table');
+  assert.ok(string(parts[0]!.params.caption).includes('Answer ready')); assert.ok(parts[0]!.params.reply_markup);
+  assert.equal(string(parts[0]!.params.caption), 'Answer ready\nAttachment 1 · Table');
   assert.doesNotMatch(string(parts[0]!.params.caption), /» |Part \d+\/\d+/u);
   assert.doesNotMatch(html, /» /u);
 });

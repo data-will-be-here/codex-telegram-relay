@@ -4,7 +4,7 @@ import { withProjectHeader } from './format.js';
 import { permissionSignature, validPermissionSettings } from './permission-settings.js';
 import { type State } from './state.js';
 import { type Screens } from './screens.js';
-import { integer, object, string, type Binding, type Codex, type Json, type Keyboard, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
+import { integer, object, string, displayName, type Binding, type Codex, type Json, type Keyboard, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
 
 const PAGE_SIZE = 7;
 const LIFETIME = 10 * 60_000;
@@ -173,7 +173,7 @@ export class PermissionPicker {
       { kind: 'menu', title: 'Session permissions', editable: true, caption: menu.confirmation ? text : undefined }); return; }
     const id = this.state.promptMessage(menu.key); if (!id) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: id,
-      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, menu.binding.sessionName, menu.binding.projectLabel), reply_markup: markup });
+      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, displayName(menu.binding), menu.binding.projectLabel), reply_markup: markup });
   }
   private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/permissions/${randomUUID()}`, binding.topicId, text); }
   private retire(menu: Menu): void {
