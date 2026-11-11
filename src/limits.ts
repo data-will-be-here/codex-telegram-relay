@@ -1,5 +1,21 @@
 import { integer, object, type Json } from './types.js';
 
+/** Charts use validated native numeric fields; labels never manufacture quota values. */
+export function limitMeters(snapshot: Json): { label: string; remaining: number }[] {
+  const entries = Object.entries(object(snapshot.rateLimitsByLimitId));
+  const groups = entries.length ? entries.map(([id, value]) => ({ id, bucket: object(value) })) : [{ id: '', bucket: object(snapshot.rateLimits) }];
+  const meters: { label: string; remaining: number }[] = [];
+  for (const { id, bucket } of groups.slice(0, 100)) for (const [index, value] of [bucket.primary, bucket.secondary].entries()) {
+    const used = object(value).usedPercent;
+    if (typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) continue;
+    const name = [bucket.limitName, bucket.limitId, id].find(value => typeof value === 'string' && value) as string | undefined;
+    meters.push({ label: `${(name || 'Codex').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 50)} · ${windowName(object(value).windowDurationMins, index)}`,
+      remaining: Math.round((100 - used) * 100) / 100 });
+    if (meters.length === 2) return meters;
+  }
+  return meters;
+}
+
 function label(value: unknown): string {
   if (typeof value !== 'string') return '';
   const clean = value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/gu, ' ').trim();

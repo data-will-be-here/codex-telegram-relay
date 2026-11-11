@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { type Screens } from './screens.js';
 import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -27,7 +28,8 @@ export class NewSessions {
   private pendingTopicBind: { id: string; attempt: number; expires: number } | undefined;
   constructor(private readonly config: Config, private readonly state: State, private readonly codex: Codex,
     private readonly telegram: Telegram, private readonly topics: Topics,
-    private readonly connected: (binding: Binding) => Promise<void>, private readonly clearBlocker: (binding: Binding) => Promise<string | undefined> = async () => 'The session cannot be verified.') { newSessionDefaults(config, state.home); }
+    private readonly connected: (binding: Binding) => Promise<void>, private readonly clearBlocker: (binding: Binding) => Promise<string | undefined> = async () => 'The session cannot be verified.',
+    private readonly screens?: Screens) { newSessionDefaults(config, state.home); }
 
   close(): void { this.closed = true; }
   clearPendingBind(): void { this.pendingTopicBind = undefined; }
@@ -129,7 +131,8 @@ export class NewSessions {
     const op: NewSessionOperation = { id, status: 'selecting', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
       expires: Date.now() + LIFETIME, choices, page: 0, topicFirst: true };
     this.state.createNewSession(op);
-    this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op));
+    if (this.screens) this.screens.enqueue(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op), { kind: 'menu', title: 'New conversation', editable: true }, true);
+    else this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op));
   }
 
   private keyboard(op: NewSessionOperation): Json {
@@ -245,6 +248,13 @@ export class NewSessions {
   private async edit(op: NewSessionOperation, text: string, markup: Json = { inline_keyboard: [] }): Promise<boolean> {
     const messageId = this.state.promptMessage(op.menuKey);
     if (!messageId) return false;
+    if (this.screens && this.state.screen(op.menuKey)) {
+      try {
+        const menuKey = await this.screens.edit(op.menuKey, op.topicId, text, markup, { kind: 'menu', title: 'New conversation', editable: true });
+        if (menuKey !== op.menuKey) { this.state.changeNewSession(op.id, op.status, { menuKey }); op.menuKey = menuKey; }
+        return true;
+      } catch { return false; }
+    }
     try { await this.telegram.call('editMessageText', { chat_id: this.config.ownerId, message_id: messageId, text, reply_markup: markup }); return true; }
     catch { return false; /* The durable operation is authoritative; Telegram edits are best effort. */ }
   }

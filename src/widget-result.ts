@@ -2,9 +2,10 @@ import { deflateSync } from 'node:zlib';
 import { Lexer, type MarkedToken, type Token } from 'marked';
 import { renderMarkdown, renderMarkdownTokens, projectHeader, type FormattedText } from './format.js';
 import { richTokenMessages, richDocument, richTokenDocument, RichTableTooLarge, type RichPart } from './rich.js';
-import { widgetData } from './widget-template.js';
+import { widgetData, widgetCaption } from './widget-template.js';
 import { type WidgetCard } from './widget-types.js';
 import { type RichDeliveryPart } from './state.js';
+import { type ScreenOptions } from './screen-types.js';
 
 // The complete measured document includes the reader, styles and escaped model data.
 // Keep 96 bytes below Telegram's 4096-byte zlib limit without splitting fitting answers at 3800.
@@ -84,14 +85,17 @@ const FLOW = RENDER + String.raw`draw(0,D.text.length);var width=0;
 function fit(){var body=el('content');width=body.clientWidth;if(!width)return;var font=parseFloat(getComputedStyle(document.body).fontSize)||15;document.body.className='flow'+(font>=40?' large':'');body.style.fontSize='';body.style.lineHeight='';var max=parseFloat(getComputedStyle(body).fontSize)||font*.95;if(el('card').getBoundingClientRect().height>580){var low=12,high=max;for(var i=0;i<9;i++){var mid=(low+high)/2;body.style.fontSize=mid+'px';if(el('card').getBoundingClientRect().height<=580)low=mid;else high=mid}body.style.fontSize=low+'px';if(el('card').getBoundingClientRect().height>580)body.style.lineHeight='1.2'}body.setAttribute('aria-busy','false')}
 TelegramWidget.onEvent('themeChanged',fit);TelegramWidget.onEvent('contentSafeAreaChanged',fit);new ResizeObserver(function(){if(el('content').clientWidth!==width)fit()}).observe(document.body);fit();TelegramWidget.ready();`;
 
-function fitsDocument(html: string): boolean {
+export function fitsDocument(html: string): boolean {
   return Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= MAX_COMPRESSED_BYTES;
 }
 
-export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true): string {
+export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true, screen?: ScreenOptions): string {
   const data = { context: projectHeader(card.binding.cwd, card.binding.sessionName, card.binding.projectLabel).replace(/^» /u, ''),
-    status: card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted',
-    part, total, text: message.text, entities: message.entities };
+    status: screen?.title ?? (card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted'),
+    part, total, text: message.text, entities: message.entities, ...(screen?.meters?.length ? { meters: screen.meters.slice(0, 2) } : {}) };
+  const live = screen ? String.raw`TelegramWidget.onEvent('chatDataChanged',function(){try{var p=JSON.parse(TelegramWidget.chatData||'null');if(!p||p.v!==1)return;if(p.title){D.status=p.title;if(D.part===1)el('status').textContent=p.title}` +
+    (screen.editable ? String.raw`if(typeof p.text==='string'){D.text=p.text;D.entities=[];points=[0];at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)})}` : '') + String.raw`fit()}catch(e){}});` : '';
+  const meters = screen?.meters?.length ? String.raw`D.meters.forEach(function(m){var row=document.createElement('div');row.textContent=m.label+' · '+m.remaining+'%';var track=document.createElement('div'),fill=document.createElement('div');track.className='meter';fill.style.width=m.remaining+'%';track.appendChild(fill);el('meters').appendChild(row);el('meters').appendChild(track)});` : '';
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font:var(--tg-text-font-size)/var(--tg-text-line-height) system-ui;color:var(--tg-theme-text-color)}
 main{padding:var(--tg-text-padding);padding-bottom:max(12px,env(safe-area-inset-bottom))}.topline{display:flex;align-items:flex-start;gap:8px;margin-bottom:.65em}.context{flex:1;min-width:0;color:var(--tg-theme-hint-color);font-size:min(.8em,16px);overflow-wrap:anywhere}
@@ -99,7 +103,8 @@ header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;
 #content,#measure{white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;line-height:1.4;font-size:.95em;user-select:text;touch-action:pan-y}#measure{position:absolute;left:0;top:0;visibility:hidden;pointer-events:none}strong{font-weight:600}code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--tg-theme-secondary-bg-color);border-radius:.25em}.pre{display:block;padding:.5em;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--tg-theme-link-color)}
 nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:.7em}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
 ${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #content{overflow:visible;touch-action:auto}'}
-</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${card.kind === 'status' ? 'status' : card.snapshot.status}">${card.kind === 'status' ? '●' : card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${paged ? READER : FLOW}</script></body></html>`;
+${screen?.meters?.length ? '#meters{font-size:min(.8em,16px);overflow-wrap:anywhere}.meter{height:4px;background:var(--tg-theme-secondary-bg-color);margin:.3em 0 .6em;border-radius:3px}.meter div{height:100%;background:var(--tg-theme-link-color);border-radius:3px}.large #meters{display:none}' : ''}
+</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${screen || card.kind === 'status' ? 'status' : card.snapshot.status}">${screen ? screen.kind === 'approval' ? '!' : screen.kind === 'question' ? '?' : '●' : card.kind === 'status' ? '●' : card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}${screen?.meters?.length ? '<section id="meters"></section>' : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${meters}${paged ? READER : FLOW}${live}</script></body></html>`;
 }
 
 type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };
@@ -118,6 +123,16 @@ function flowDrafts(message: FormattedText): ResultDraft[] {
     parts.push({ kind: 'widget', message: clip(message, start, end) }); start = end;
   }
   return parts;
+}
+
+export function screenDocuments(card: WidgetCard, message: FormattedText, screen: ScreenOptions): { html: string; message: FormattedText }[] | undefined {
+  const html = resultDocument(card, message, 1, 1, true, screen);
+  if (fitsDocument(html)) return [{ html, message }];
+  if (screen.editable) return;
+  const drafts = flowDrafts(message).filter((draft): draft is Extract<ResultDraft, { kind: 'widget' }> => draft.kind === 'widget');
+  const parts = drafts.map((draft, index) => ({ message: draft.message,
+    html: resultDocument(card, draft.message, index + 1, drafts.length, false, { ...screen, meters: index ? [] : screen.meters }) }));
+  return parts.every(part => fitsDocument(part.html)) ? parts : undefined;
 }
 
 /** Partition the resolved Markdown tree, keeping real tables separate from literal code and reference definitions. */
@@ -159,6 +174,7 @@ export function resultParts(card: WidgetCard, source: string, token: string): Ri
     const common = { disable_notification: index !== 0,
       ...(index === total - 1 ? { reply_markup: { inline_keyboard: [[{ text: 'Text version', callback_data: `a:${token}` }]] } } : {}) };
     if (draft.kind === 'widget') return { method: 'sendWidget', resultMeta, params: { ...common, html: resultDocument(card, draft.message, part, total, paged),
+      caption: widgetCaption(index ? `Part ${part}/${total}` : completion, card.binding.title),
       chat_data: widgetData(card), allow_queries: false, is_shared: false }, fallback: draft.message.text, fallbackText: draft.message };
     const attachment = drafts.slice(0, index + 1).filter(item => item.kind !== 'widget').length;
     const title = `Attachment ${attachment} · Table`;

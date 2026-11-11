@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { type State } from './state.js';
+import { type Screens } from './screens.js';
 import { array, object, string, type Binding, type Json, type Telegram } from './types.js';
 import { widgetLabel, widgetPreview } from './widget-template.js';
 import { resultParts } from './widget-result.js';
@@ -181,7 +182,7 @@ interface ViewMenu { topicId: number | null; key: string; expires: number; }
 export class ViewPicker {
   private menus = new Map<string, ViewMenu>();
   constructor(private readonly state: State, private readonly telegram: Telegram,
-    private readonly allowed: (binding: Binding) => Promise<boolean>, private readonly prepare: () => Promise<void>) {}
+    private readonly allowed: (binding: Binding) => Promise<boolean>, private readonly prepare: () => Promise<void>, private readonly screens?: Screens) {}
 
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/view/${randomUUID()}`, topicId, text); }
   async open(topicId: number | null, choice?: ViewMode): Promise<void> {
@@ -192,14 +193,19 @@ export class ViewPicker {
     if (this.menus.size >= 64) { this.notice(topicId, 'Close an open view menu and retry /view.'); return; }
     const token = randomBytes(16).toString('hex'); const key = `notice/view/${token}`;
     this.menus.set(token, { topicId, key, expires: Date.now() + 10 * 60_000 });
-    this.state.enqueue(key, topicId, `View for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns in all current and new sessions. Running turns keep their view.`, {
+    const text = `View for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nChoose the view for following turns in all current and new sessions. Running turns keep their view.`;
+    const markup = {
       inline_keyboard: [[{ text: 'Classic', callback_data: `v:${token}:c` }, { text: 'Widgets · experimental', callback_data: `v:${token}:w` }]],
-    });
+    };
+    if (this.screens) this.screens.enqueue(key, topicId, text, markup, { kind: 'menu', title: 'View for all topics' }, true);
+    else this.state.enqueue(key, topicId, text, markup);
   }
   private async apply(topicId: number | null, view: ViewMode): Promise<void> {
     if (this.state.viewMode() !== view) await this.prepare();
     this.state.setViewMode(view);
-    this.notice(topicId, `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in all current and new sessions. Running turns keep their view.\n${view === 'widgets' ? 'Progress stays in the card. Complete final replies use a separate swipeable reader. Approvals keep their normal controls.' : '/mode controls permanent messages; /stream controls answer previews.'}`);
+    const text = `${view === 'widgets' ? 'Widgets · experimental' : 'Classic'} selected for following turns in all current and new sessions. Running turns keep their view.\n${view === 'widgets' ? 'Progress and supported screens use cards with native action buttons. Complete final replies use a separate swipeable reader.' : '/mode controls permanent messages; /stream controls answer previews.'}`;
+    if (this.screens) this.screens.enqueue(`notice/view/${randomUUID()}`, topicId, text, null, { kind: 'info', title: 'View for all topics' }, true);
+    else this.notice(topicId, text);
   }
   async callback(callback: Json, message: Json, topic: number | null): Promise<void> {
     const match = /^v:([a-f0-9]{32}):([cwd])$/u.exec(string(callback.data));

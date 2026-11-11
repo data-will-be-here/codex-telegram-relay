@@ -6,12 +6,14 @@ import { privateDirectory } from './config.js';
 import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
 import { type FormattedText } from './format.js';
+import { type ScreenSpec } from './screen-types.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
 const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
 export interface RichDeliveryPart {
+  screen?: ScreenSpec;
   method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument'; params: Json;
   fallback?: string; fallbackText?: FormattedText;
   document?: { name: string; html: string }; tableDocument?: string; tableCaption?: string;
@@ -323,6 +325,36 @@ export class State {
     this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=? AND lastTurn IS ?').run(turnId, threadId, expected);
   }
   deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=? UNION ALL SELECT 1 FROM widget_answers WHERE deliveryKey=? LIMIT 1').get(key, key); }
+  enqueueScreen(key: string, topicId: number | null, text: string, markup: Json | null, parts: RichDeliveryPart[], ownerNotice = false): void {
+    if (this.deliveryExists(key)) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (ownerNotice) this.enqueueOwnerNotice(key, topicId, text, markup); else this.enqueue(key, topicId, text, markup);
+      this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(parts), key);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  screen(key: string): (DeliveryContext & { key: string; text: string; status: string; messageId: number | null; parts: RichDeliveryPart[]; spec: ScreenSpec }) | undefined {
+    const row = this.db.prepare('SELECT * FROM outbox WHERE key=?').get(key);
+    const parts = typeof row?.richPlan === 'string' ? JSON.parse(row.richPlan) as RichDeliveryPart[] : [];
+    const spec = parts[0]?.screen;
+    return row && spec ? { key, text: string(row.text), status: string(row.status), messageId: typeof row.messageId === 'number' ? row.messageId : null,
+      topicId: typeof row.topicId === 'number' ? row.topicId : null, projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null,
+      sourceThreadId: typeof row.sourceThreadId === 'string' ? row.sourceThreadId : null, ownerNotice: row.projectCwd === null && row.sourceThreadId === null,
+      parts, spec } : undefined;
+  }
+  screenToken(token: string): ReturnType<State['screen']> {
+    const row = this.db.prepare("SELECT key FROM outbox WHERE json_extract(richPlan,'$[0].screen.token')=? LIMIT 1").get(token);
+    return row ? this.screen(string(row.key)) : undefined;
+  }
+  attachScreen(key: string, parts: RichDeliveryPart[]): void {
+    this.db.prepare("UPDATE outbox SET richPlan=? WHERE key=? AND richPlan IS NULL AND status IN ('pending','deferred','blocked')").run(JSON.stringify(parts), key);
+  }
+  updateScreen(key: string, text: string, spec: ScreenSpec): void {
+    const saved = this.screen(key); if (!saved) return;
+    saved.parts[0]!.screen = spec;
+    this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(saved.parts), key);
+  }
   enqueueWidgetAnswer(key: string, binding: Binding, text: string, token: string, part: RichDeliveryPart | RichDeliveryPart[]): boolean {
     if (this.deliveryExists(key)) return true;
     if (Number(this.db.prepare('SELECT count(*) AS n FROM widget_answers').get()?.n ?? 0) >= 10_000) return false;
@@ -430,9 +462,9 @@ export class State {
   }
   clearReply(threadId: string, inputId: number): void { this.db.prepare('DELETE FROM replies WHERE threadId=? AND inputId=?').run(threadId, inputId); }
   enqueueOwnerNotice(key: string, topicId: number | null, text: string, markup: Json | null = null): void {
-    if (!key.startsWith('notice/')) throw new Error('Owner notices require a notice key.');
+    if (!key.startsWith('notice/') && !key.startsWith('attention/status/')) throw new Error('Owner notices require a notice or status key.');
     this.enqueue(key, null, text, markup);
-    this.db.prepare("UPDATE outbox SET topicId=? WHERE key=? AND projectCwd IS NULL AND sourceThreadId IS NULL AND status='pending'").run(topicId, key);
+    this.db.prepare("UPDATE outbox SET topicId=? WHERE key=? AND projectCwd IS NULL AND sourceThreadId IS NULL AND status IN ('pending','deferred')").run(topicId, key);
   }
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string): void {
     // A duplicate remains a no-op even while admission is full or after an uncertain send.
@@ -463,7 +495,7 @@ export class State {
       markup: typeof row.markup === 'string' ? object(JSON.parse(row.markup)) : null } : undefined;
   }
   /** Explicit owner recovery rotates one live review attempt; native decision identity stays unchanged. */
-  replaceApprovalCard(key: string, ownerToken: string, nextToken: string, markup: Json): { deliveryKey: string; messageId: number | null } | undefined {
+  replaceApprovalCard(key: string, ownerToken: string, nextToken: string, markup: Json, parts?: RichDeliveryPart[]): { deliveryKey: string; messageId: number | null } | undefined {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db.prepare(`SELECT o.* FROM outbox o JOIN approval_cards c ON c.deliveryKey=o.key
@@ -474,6 +506,7 @@ export class State {
       this.db.prepare('UPDATE approval_cards SET deliveryKey=?,ownerToken=?,at=? WHERE deliveryKey=? AND ownerToken=?')
         .run(deliveryKey, nextToken, Date.now(), key, ownerToken);
       this.enqueue(deliveryKey, Number(row.topicId), string(row.text), markup, string(row.projectCwd), string(row.sourceThreadId));
+      if (parts) this.db.prepare('UPDATE outbox SET richPlan=? WHERE key=?').run(JSON.stringify(parts), deliveryKey);
       this.db.exec('COMMIT');
       return { deliveryKey, messageId: typeof row.messageId === 'number' ? row.messageId : null };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -549,10 +582,10 @@ export class State {
         SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') RETURNING status`)
       .get(retryAt, id, index)?.status === 'pending';
   }
-  completeApprovalDelivery(id: number, parts: number): void {
+  completeApprovalDelivery(id: number, parts: number, armed = parts === 1): void {
     this.db.prepare(`UPDATE outbox SET status='sent',markup=CASE WHEN ?=1 THEN markup ELSE NULL END WHERE id=? AND status IN ('sending','pending')
       AND nextPart=? AND messageId IS NOT NULL AND key IN (
-        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(parts, id, parts);
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(Number(armed), id, parts);
   }
   delivered(id: number, messageId: number | null): void {
     this.db.exec('BEGIN IMMEDIATE');

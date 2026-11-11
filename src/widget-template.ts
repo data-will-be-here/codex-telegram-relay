@@ -33,6 +33,11 @@ export function widgetPreview(value: string, budget: number): string {
 
 type PreviewStyle = [number, number, number];
 
+export function widgetCaption(title: string, text = ''): string {
+  const chars = Array.from(normalized(title + (text ? ' · ' + text : '')));
+  return chars.length > 180 ? chars.slice(0, 179).join('') + '…' : chars.join('');
+}
+
 /** Map Markdown entity offsets through the same whitespace normalization as the live preview. */
 function formattedPreview(source: string): { text: string; styles: PreviewStyle[] } {
   const message = renderMarkdown(source);
