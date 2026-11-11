@@ -1,5 +1,11 @@
 # Verification record
 
+## Markdown-free live progress previews
+
+A red integration regression reproduced raw emphasis, strike and link delimiters in Working chat_data.q. Preview generation now uses the shared Markdown renderer before normalization and the 900-byte state budget. Ordinary formatting markers disappear while literal characters inside code remain; original progressText is preserved for the formatted Current status reader. The fixed activity HTML still inserts data through textContent, and no widget permissions or native input paths change.
+
+Local suite: 403 discovered, 399 passed, four skips, zero failures. Build/typecheck, package allowlist/dry-run, production audit (zero vulnerabilities) and diff checks passed. The owner-stopped relay was not restarted; no live Telegram acceptance is claimed for this payload correction.
+
 ## Release v0.1.20 preparation
 
 Package/lockfile and native client metadata agree on 0.1.20. Both READMEs install the release tag, identify released commands and experimental global Widgets consistently, and describe current-status snapshots, native-table attachments, global view preservation and explicit approval previews. The stopped-relay private-state backup and unsupported in-place downgrade are documented in both languages: v0.1.19 positional topic-operation inserts cannot use the extended database schema even with drained queues. Stable file-export/security anchors retain legacy aliases. All 41 local Markdown file/anchor references across README, README.ru, CONTRIBUTING, SECURITY and architecture passed.

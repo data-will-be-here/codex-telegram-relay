@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { type WidgetCard } from './widget-types.js';
-import { formatMessages } from './format.js';
+import { renderMarkdown } from './format.js';
 
 const normalized = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/gu, ' ').trim();
 
@@ -39,7 +39,7 @@ export function widgetData(card: WidgetCard): string {
     a: s.activities.slice(-3).map(item => [item.status, widgetLabel(item.label, 48)]) };
   const available = 900 - Buffer.byteLength(JSON.stringify(data)) + 2;
   const content = s.progressText || s.summary || s.plan?.current || '';
-  const preview = card.kind === 'result' ? formatMessages(content, true, 4000).at(0)?.text || content : content;
+  const preview = renderMarkdown(content).text;
   data.q = widgetPreview(preview, available);
   const result = JSON.stringify(data);
   if (Buffer.byteLength(result) > 900) throw new Error('Widget state exceeded its bounded preview budget.');

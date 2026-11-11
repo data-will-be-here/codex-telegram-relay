@@ -193,6 +193,22 @@ test('widget progress stays in the card instead of repeating assistant steps as 
   } finally { f.close(); }
 });
 
+test('Working previews parse Markdown before budgeting while preserving literal code and the original status text', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const text = '**Checking the queue** with *care*, ~~old retries~~, `count **=** 2` and [documentation](https://example.com/guide).';
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text } });
+    f.advance(); await f.flush();
+    const params = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
+    const data = JSON.parse(string(params.chat_data));
+    assert.equal(data.q, 'Checking the queue with care, old retries, count **=** 2 and documentation.');
+    assert.ok(Buffer.byteLength(string(params.chat_data)) <= 900);
+    assert.equal(f.state.widgetCard('thread-a', 'live')!.snapshot.progressText, text, 'The formatted Current status reader keeps the original Markdown');
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
 test('Russian progress uses available data space instead of stopping halfway through a sentence', async () => {
   const f = await setup();
   try {
