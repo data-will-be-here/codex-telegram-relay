@@ -109,6 +109,7 @@ test('widget approval keeps exact native authority and offers the full command a
     assert.equal(part.reply_markup, undefined, 'Widget reviews stay passive until their receipt is confirmed');
     await f.bridge.flushApproval();
     assert.equal(payload(string(part.html)).status, 'Command approval');
+    assert.equal(part.caption, 'Command approval · project-a', 'command and task belong in the body, not the caption');
     assert.ok(string(payload(string(part.html)).text).includes('Abbreviated preview'));
     const choices = buttons(keyboard(f)); const approve = choices.find(button => button.text === 'Allow once')!;
     const textButton = choices.find(button => button.text === 'Text version')!;

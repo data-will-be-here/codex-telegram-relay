@@ -41,8 +41,7 @@ export function widgetCaption(title: string, text = ''): string {
 
 export function widgetSessionCaption(title: string, binding: Binding): string {
   const project = binding.projectLabel || basename(binding.cwd);
-  const task = displayName(binding) || binding.threadId.slice(0, 8);
-  return widgetCaption(title, [project, task].filter(Boolean).join(' · '));
+  return widgetCaption(title, project);
 }
 
 /** Map Markdown entity offsets through the same whitespace normalization as the live preview. */

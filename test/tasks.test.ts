@@ -43,7 +43,7 @@ test('terminal user events update each turn while session names and previous car
     assert.equal(f.state.widgetCard('thread-a', 'first')!.binding.taskName, 'Check the queue');
     await f.drain();
     const result = f.telegram.calls.find(call => call.method === 'sendWidget' && string(call.params.html).includes('First result.'))!;
-    assert.equal(result.params.caption, 'Answer ready · project-a · Check the queue');
+    assert.equal(result.params.caption, 'Answer ready · project-a');
     assert.ok(string(result.params.html).includes('project-a • Check the queue'));
     const token = f.state.widgetCards('thread-a').find(card => card.turnId === 'first')!.token;
     // The reader uses a separate answer token, not the Working-card capability.

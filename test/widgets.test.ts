@@ -187,7 +187,7 @@ test('widget progress stays in the card instead of repeating assistant steps as 
     await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item });
     f.advance(); await f.flush(); await f.drain();
     const sent = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
-    assert.equal(sent.caption, 'Working · project-a · thread-a');
+    assert.equal(sent.caption, 'Working · project-a');
     assert.ok(string(sent.caption).length <= 180, 'caption is a short archive/notification label');
     assert.equal(string(sent.caption).includes(item.text), false, 'progress must not be duplicated in the caption');
     assert.ok(string(sent.chat_data).includes(item.text), 'the live card must explain the current work');

@@ -18,7 +18,6 @@ import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
 import { limitMeters } from './limits.js';
 import { Screens } from './screens.js';
-import { widgetCaption } from './widget-template.js';
 import { taskTitle } from './tasks.js';
 import { array, integer, object, string, displayName, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
@@ -528,8 +527,7 @@ export class Bridge {
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
     if (!receipt) this.screens.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup,
-      { kind: 'approval', title: request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review', markdown: true, fullText: card, widgets: prompt.widgets,
-        caption: widgetCaption('Approval review', string(request.params.command).split('\n')[0] || binding.title) });
+      { kind: 'approval', title: request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review', markdown: true, fullText: card, widgets: prompt.widgets });
     prompt.approvalMarkup = this.screens.markup(key, markup)!;
     if (receipt?.status === 'pending' || receipt?.status === 'held') this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
     else if (receipt) await this.refreshApproval(prompt);
