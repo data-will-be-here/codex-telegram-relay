@@ -203,6 +203,8 @@ test('Working previews parse Markdown before budgeting while preserving literal 
     const params = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
     const data = JSON.parse(string(params.chat_data));
     assert.equal(data.q, 'Checking the queue with care, old retries, count **=** 2 and documentation.');
+    assert.ok(data.f.some((span: number[]) => span[0] === 0 && data.q.slice(span[1], span[1]! + span[2]!) === 'Checking the queue'));
+    assert.ok(data.f.some((span: number[]) => span[0] === 3 && data.q.slice(span[1], span[1]! + span[2]!) === 'count **=** 2'));
     assert.ok(Buffer.byteLength(string(params.chat_data)) <= 900);
     assert.equal(f.state.widgetCard('thread-a', 'live')!.snapshot.progressText, text, 'The formatted Current status reader keeps the original Markdown');
     assert.deepEqual(f.codex.writes, []);
@@ -218,6 +220,25 @@ test('Russian progress uses available data space instead of stopping halfway thr
     f.advance(); await f.flush();
     const data = JSON.parse(string(f.telegram.calls.find(call => call.method === 'sendWidget')!.params.chat_data));
     assert.equal(data.q, text, 'this complete progress paragraph fits the Telegram data budget');
+  } finally { f.close(); }
+});
+
+test('styled progress keeps Unicode offsets after whitespace normalization and budgets formatting together with text', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const card = f.state.widgetCard('thread-a', 'live')!;
+    card.snapshot.progressText = ' \n**🧪 First** \n\n *Second*\tand `a**b` ';
+    let data = JSON.parse(widgetData(card));
+    assert.equal(data.q, '🧪 First Second and a**b');
+    assert.equal(data.q.slice(data.f[0][1], data.f[0][1] + data.f[0][2]), '🧪 First');
+    assert.ok(data.f.some((span: number[]) => span[0] === 1 && data.q.slice(span[1], span[1]! + span[2]!) === 'Second'));
+    card.snapshot.progressText = Array.from({ length: 300 }, (_, index) => `**Value ${index}** *checking* \`x_${index}\`.`).join('\n');
+    const encoded = widgetData(card); data = JSON.parse(encoded);
+    assert.ok(Buffer.byteLength(encoded) <= 900);
+    assert.ok(data.q.endsWith('…')); assert.ok(data.f.length <= 24);
+    assert.ok(data.f.every((span: number[]) => span[1]! >= 0 && span[2]! > 0 && span[1]! + span[2]! <= data.q.length));
+    assert.ok(!data.q.includes('\ufffd'));
   } finally { f.close(); }
 });
 

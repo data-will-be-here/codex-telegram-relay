@@ -1,5 +1,13 @@
 # Verification record
 
+## Styled Working previews and stable reader height
+
+Working now retains bounded bold, italic, strike and code spans after Markdown parsing and whitespace normalization. UTF-16 offsets are remapped, clipped to the visible prefix and counted together with text/metadata in the 900-byte live-state budget. More/Less and height fitting redraw safe allowlisted DOM elements; raw model HTML remains literal and invalid spans fall back to plain text. Original progress source remains available to Current status. Old immutable cards keep their existing plain preview.
+
+The official WidgetHost qualification covered 24 Working combinations of widths 200/320/430, light/dark and fonts 20/24/32/64, including computed bold styling, More/Less and the 600px ceiling. A separate red reader regression reproduced unequal page heights. Result and Current status readers now reserve the measured content height for all pages, including the last, while single-page readers remain compact. The official reader runtime passed 16 width/font/theme/kind combinations, backward swipes, changed font/width/safe-area reflow, no clipping and no runtime errors. Every multipage card measured 580px in that matrix. Two independent source reviews found no remaining spec or standards findings.
+
+Final local suite: 405 discovered, 401 passed, four skipped, zero failures. Build/typecheck, distribution allowlist/dry-run, production dependency audit (zero vulnerabilities) and diff checks passed. The owner-stopped relay was not restarted. These are local and official-runtime checks, not new physical Telegram-client acceptance. Template changes apply to new cards only.
+
 ## Markdown-free live progress previews
 
 A red integration regression reproduced raw emphasis, strike and link delimiters in Working chat_data.q. Preview generation now uses the shared Markdown renderer before normalization and the 900-byte state budget. Ordinary formatting markers disappear while literal characters inside code remain; original progressText is preserved for the formatted Current status reader. The fixed activity HTML still inserts data through textContent, and no widget permissions or native input paths change.

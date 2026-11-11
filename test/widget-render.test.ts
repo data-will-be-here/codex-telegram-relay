@@ -4,11 +4,20 @@ import { runInNewContext } from 'node:vm';
 import { WIDGET_HTML } from '../src/widget-template.js';
 import { widgetPreview } from '../src/widget-template.js';
 
+interface RenderNode { tag: string; textContent: string; children: RenderNode[]; style: Record<string, string>; className: string; appendChild(child: RenderNode): void; }
+function element(tag: string): RenderNode {
+  let ownText = '';
+  return { tag, children: [], style: {}, className: '',
+    get textContent() { return ownText + this.children.map(child => child.textContent).join(''); },
+    set textContent(value: string) { ownText = value; this.children = []; },
+    appendChild(child: RenderNode) { this.children.push(child); } };
+}
+
 function renderer(initial: Record<string, unknown>) {
   let now = 1_000_000;
-  const nodes = new Map<string, { textContent: string; style: Record<string, string>; className: string; appendChild: () => void }>();
+  const nodes = new Map<string, RenderNode>();
   const node = (id: string) => {
-    if (!nodes.has(id)) nodes.set(id, { textContent: '', style: {}, className: '', appendChild() {} });
+    if (!nodes.has(id)) nodes.set(id, element(id));
     return nodes.get(id)!;
   };
   let tick: (() => void) | undefined;
@@ -16,7 +25,7 @@ function renderer(initial: Record<string, unknown>) {
   const widget = { chatData: JSON.stringify({ v: 1, r: 2, p: 'relay', t: 'Check rendering', s: 'done', b: now - 20_000, e: now - 1000, u: now - 1000, n: null, q: '', a: [], ...initial }),
     onEvent(type: string, callback: () => void) { events.set(type, callback); }, ready() {} };
   runInNewContext(WIDGET_HTML.match(/<script>([\s\S]*?)<\/script>/u)![1]!, {
-    document: { getElementById: node, createElement: node, body: { className: '' } },
+    document: { getElementById: node, createElement: element, body: { className: '' } },
     TelegramWidget: widget,
     Date: { now: () => now }, getComputedStyle: () => ({ fontSize: '20px' }),
     setInterval: (callback: () => void) => { tick = callback; },
@@ -33,6 +42,20 @@ test('a finished widget freezes its footer and duration when the client clock ad
   assert.equal(node('elapsed').textContent, elapsed);
   assert.equal(node('updated').textContent, footer, 'a completed card must not show an ever-growing last-update timer');
   assert.doesNotMatch(footer, /Last update|ago/u);
+});
+
+test('Working renders bounded inline styles as safe DOM nodes and keeps model HTML literal', () => {
+  const text = 'Bold italic code <script>bad()</script>';
+  const { node, update } = renderer({ s: 'working', e: null, q: text, f: [[0, 0, 4], [1, 5, 6], [3, 12, 4]] });
+  const step = node('step');
+  assert.equal(step.textContent, text);
+  assert.equal(step.children.find(child => child.tag === 'strong')!.textContent, 'Bold');
+  assert.equal(step.children.find(child => child.tag === 'em')!.textContent, 'italic');
+  assert.equal(step.children.find(child => child.tag === 'code')!.textContent, 'code');
+  assert.equal(step.children.some(child => child.tag === 'script'), false);
+  update({ r: 3, q: 'Plain next update', f: [[999, 0, 5], [0, -1, 4], ['script', 0, 5]] });
+  assert.equal(step.textContent, 'Plain next update');
+  assert.equal(step.children.length, 0, 'Invalid style records fall back to safe plain text');
 });
 
 test('live updates render meaningful progress even without a plan or tool rows', () => {
