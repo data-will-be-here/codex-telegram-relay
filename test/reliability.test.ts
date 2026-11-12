@@ -11,6 +11,7 @@ const completed = (id: string, text: string): Json => ({ id, status: 'completed'
 
 test('a final received at queue capacity survives a later completion and restart without native replay', async () => {
   const f = await fixture(); let state = new State(join(f.dir, 'recovery'));
+  state.setViewMode('classic');
   try {
     const original = new Bridge(f.bridge.config, state, f.codex, f.telegram);
     await original.discover();

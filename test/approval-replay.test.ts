@@ -173,6 +173,7 @@ async function persistentFixture() {
   codex.sessions = [{ id: 'thread-a', cwd: project, name: 'Project', status: 'idle' }];
   codex.pending.add(request.id);
   let state = new State(join(temp.dir, 'state'));
+  state.setViewMode('classic'); // This fixture exercises native text receipt/replay semantics.
   let bridge = new Bridge(config, state, codex, telegram);
   await bridge.discover();
   return {

@@ -50,6 +50,7 @@ function setup(automatic = false, legacy = false) {
   const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: process.execPath,
     ...(!automatic ? { newSessions: { projects: [project], scratchRoot: scratch } } : {}) };
   const state = new State(join(temp.dir, 'private')); const native = new Native(); const telegram = new FakeTelegram();
+  state.setViewMode('classic'); // Topic-creation protocol fixtures inspect native text recovery menus.
   const bridge = new Bridge(config, state, native, telegram);
   const outbox = new Outbox(state, telegram, config, 0);
   const drain = async () => { while (await outbox.flushOne()) { /* Deliver controls. */ } };

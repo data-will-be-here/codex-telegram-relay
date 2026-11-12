@@ -62,6 +62,28 @@ test('message mode defaults to all and persists across restarts', () => {
   } finally { state.close(); temp.close(); }
 });
 
+test('fresh installations default to Widgets and preserve a later Classic selection across restarts', () => {
+  const temp = temporary(); const home = join(temp.dir, 'fresh-view'); let state = new State(home);
+  try {
+    assert.equal(state.viewMode(), 'widgets');
+    state.close(); state = new State(home); assert.equal(state.viewMode(), 'widgets');
+    state.setViewMode('classic'); state.close(); state = new State(home);
+    assert.equal(state.viewMode(), 'classic');
+  } finally { state.close(); temp.close(); }
+});
+
+test('existing installations without a saved view keep implicit Classic after upgrade', () => {
+  const temp = temporary(); const home = join(temp.dir, 'old-view'); let state = new State(home);
+  try {
+    state.setMessageMode('compact'); state.close();
+    const old = new DatabaseSync(join(home, 'state.sqlite'));
+    try { old.exec("DELETE FROM settings WHERE key='view'"); } finally { old.close(); }
+    state = new State(home);
+    assert.equal(state.viewMode(), 'classic'); assert.equal(state.messageMode(), 'compact');
+    state.close(); state = new State(home); assert.equal(state.viewMode(), 'classic');
+  } finally { state.close(); temp.close(); }
+});
+
 test('streaming defaults to enabled and its owner preference survives restarts independently of message mode', () => {
   const temp = temporary(); const home = join(temp.dir, 'home'); let state = new State(home);
   try {

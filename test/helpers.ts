@@ -109,6 +109,7 @@ export async function fixture(mode: MessageMode = 'compact'): Promise<{
   const codex = new FakeCodex(); const telegram = new FakeTelegram();
   codex.sessions = [{ id: 'thread-a', cwd: projectA, name: '', status: 'idle' }, { id: 'thread-b', cwd: projectB, name: '', status: 'idle' }];
   const state = new State(join(temp.dir, 'private'));
+  state.setViewMode('classic'); // Existing Classic sessions are the baseline for protocol tests; view tests opt in explicitly.
   state.setMessageMode(mode);
   const bridge = new Bridge({ version: 1, ownerId: 42, roots: [projectA, projectB], codexBinary: process.execPath }, state, codex, telegram);
   await bridge.discover();

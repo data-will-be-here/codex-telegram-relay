@@ -70,7 +70,8 @@ export class State {
     writeFileSync(fd, this.lockValue); closeSync(fd);
     try {
       const path = join(home, 'state.sqlite');
-      if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error('Invalid state database path.');
+      const existingState = existsSync(path);
+      if (existingState && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error('Invalid state database path.');
       this.db = new DatabaseSync(path);
       chmodSync(path, 0o600);
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;
@@ -128,8 +129,9 @@ export class State {
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
-      // Preserve an existing opt-in once when migrating per-session preferences to the relay-wide setting.
-      this.db.exec("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END; DELETE FROM settings WHERE key LIKE 'view/%'");
+      // New installations start with Widgets; upgrades retain explicit or implicit Classic and legacy opt-ins.
+      this.db.prepare("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN ?=1 OR EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END").run(Number(!existingState));
+      this.db.exec("DELETE FROM settings WHERE key LIKE 'view/%'");
       if (interruptedWidgets.size) this.setViewMode('classic');
       this.db.exec("UPDATE widget_cards SET delivery='uncertain',failure='restart-outcome-unknown' WHERE delivery='sending'; UPDATE widget_cards SET delivery='active' WHERE delivery='editing'; UPDATE widget_cards SET failure='legacy-outcome-unknown' WHERE delivery='uncertain' AND failure IS NULL");
       if (!this.db.prepare('PRAGMA table_info(topic_operations)').all().some(column => column.name === 'error')) this.db.exec('ALTER TABLE topic_operations ADD COLUMN error TEXT');

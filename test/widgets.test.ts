@@ -29,7 +29,7 @@ async function setup() {
     close: () => { Date.now = realNow; f.close(); } };
 }
 
-test('/view applies to all sessions, defaults to classic, latches each turn and never writes native settings/input', async () => {
+test('/view applies to all sessions, preserves classic running turns and never writes native settings/input', async () => {
   const f = await setup();
   try {
     await f.start('old'); await f.bridge.update(message(1, 101, '/view widgets')); await f.drain();
