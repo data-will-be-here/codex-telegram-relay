@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/905562ec-fdfc-4e52-900c-61848ec2eaab
 - **Start a separate conversation (v0.1.20).** `/new` works immediately: a general question/research workspace first, then connected projects. Each choice creates its own Codex session and Telegram topic.
 
 - **Choose a model from Telegram.** `/model` opens the current Codex catalog; choose a model, then a reasoning/speed combination. The second selection saves immediately for following requests in the same session.
-- **Optional live activity cards (v0.1.20).** `/view widgets` adds an updating activity card and the complete formatted final reply in a swipeable reader. Colors and text size follow the Telegram client's theme; approvals retain their normal controls.
+- **Optional themed cards (v0.1.21).** `/view widgets` adds live progress, complete swipeable replies, approval reviews, questions, limits and settings. Colors and text size follow Telegram; native decision buttons and text answers remain available.
 - **Check remaining account limits (v0.1.20).** `/limits` reads current Codex usage windows, remaining percentages and reset times, with credit and spending information when available.
 - **Keep working away from your terminal.** Receive assistant updates, questions, approval requests and finished answers in Telegram; your replies reach the same Codex session.
 - **Keep a searchable conversation archive.** Messages forwarded under your chosen mode and your Telegram replies stay in the topic, so you can return to earlier discussions and results whenever you need them.
@@ -35,7 +35,7 @@ Install Codex Telegram Relay on my computer: https://github.com/data-will-be-her
 Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. If the installed release supports file exports, offer to help add artifact-delivery instructions to my AGENTS.md. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
-[Public preview v0.1.20](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.20). Adds optional theme-aware activity widgets, complete swipeable result/status readers, native table attachments, same-topic `/clear`, and four Codex-style permission presets. Improves topic creation and recovery while keeping direct `npm start`, existing pairing and searchable Telegram history. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.21](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.21). Extends Widgets to approvals, questions, limits and settings; improves Markdown, page-height stability and link opening; restores live approvals directly from Telegram. Task headings follow the current request, with short project-only captions. Existing pairing, topics, Classic mode and native approval checks are preserved. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -86,7 +86,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.20 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.21 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -117,7 +117,7 @@ codex-telegram-relay start
 
 ### Upgrade an existing installation
 
-**Before upgrading to v0.1.20, stop the relay and back up its complete private state directory** (including SQLite sidecar files, configuration and pairing). Keep that backup private. This release automatically extends the state schema and stores mixed widget/table/file delivery plans, status snapshots and new-session/reset state. **In-place downgrade to v0.1.19 or older is unsupported even after queues drain**: old code cannot use the upgraded database layout. For rollback, stop every relay process and restore a compatible pre-upgrade backup; restoring it does not undo later Telegram/Codex actions, so reconcile post-backup deliveries and sessions before restarting. Prefer a forward fix if newer state must be preserved.
+**Before upgrading to v0.1.21, stop the relay and back up its complete private state directory** (including SQLite sidecar files, configuration and pairing). Keep that backup private. This release extends the state schema with per-turn task labels and persists review/settings screen plans alongside widget/table/file delivery progress, status snapshots and new-session/reset state. **In-place downgrade to v0.1.19 or older is unsupported even after queues drain**: old code cannot use the upgraded database layout. Do not use an older release to handle pending v0.1.21 screen deliveries or reviews. For rollback, stop every relay process and restore a compatible pre-upgrade backup; restoring it does not undo later Telegram/Codex actions, so reconcile post-backup deliveries and sessions before restarting. Prefer a forward fix if newer state must be preserved.
 
 Since v0.1.20, newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
 
@@ -264,7 +264,7 @@ The last result part offers Text version as an optional formatted text copy; exi
 
 Full-answer caches are private local state retained independently of the seven-day delivery queue, so old buttons remain usable while their exact topic/project binding remains eligible. Up to 10,000 replies are retained; at capacity new results use ordinary text instead of discarding old answers. Removing the local state removes this archive and its buttons' content.
 
-The implementation targets production Bot API 10.4/private topics. New activity cards have a Classic for all topics button and no explanatory caption beneath them. Rendering depends on the Telegram client. Quiet active cards are checked against recent native history, at most four per discovery pass and no more often than every 15 seconds per card, with bounded RPC timeouts. A missed completion settles the existing card and delivers the final reply once without regressing a newer baseline. Successful checks refresh live status; finished cards show a stable Finished footer. Unknown initial sends are never replayed, and uncertain receipts remain protected from pruning. Existing sent HTML is immutable: the new footer/layout applies to new cards; editing data cannot upgrade the old template. [Protocol and validation](docs/architecture.md#activity-widgets).
+The implementation targets production Bot API 10.4/private topics. New activity cards have a Classic for all topics button and a short `Working · project` caption. Rendering depends on the Telegram client. Quiet active cards are checked against recent native history, at most four per discovery pass and no more often than every 15 seconds per card, with bounded RPC timeouts. A missed completion settles the existing card and delivers the final reply once without regressing a newer baseline. Successful checks refresh live status; finished cards show a stable Finished footer. Unknown initial sends are never replayed, and uncertain receipts remain protected from pruning. Existing sent HTML is immutable: the new footer/layout applies to new cards; editing data cannot upgrade the old template. [Protocol and validation](docs/architecture.md#activity-widgets).
 
 Proven connection failures before a widget request is sent are retried after three seconds. If an initial send has an unknown outcome, it is never replayed automatically and Classic is selected for following turns in all topics. `/view widgets` enables future cards. Safe diagnostic categories are retained locally; raw transport errors and bot URLs are not stored.
 

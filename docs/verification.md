@@ -1,5 +1,11 @@
 # Verification record
 
+## Release v0.1.21 preparation
+
+Package/lockfile and native client metadata agree on 0.1.21. Both READMEs install tag v0.1.21 and describe themed reviews/settings, explicit relay-only approval recovery, stable Markdown readers, current-turn headings and short project-only captions. Stale claims about missing captions and permanent session-name headings were corrected. Upgrade instructions cover per-turn labels and persisted review/settings plans while preserving pairing and topics; rollback requires a compatible private-state backup.
+
+Local release validation: clean npm ci/build, typecheck, 437 discovered tests (433 passed, four skipped, zero failures), zero production dependency vulnerabilities, distribution allowlist/dry-run, official Codex 0.166.0 native-install/proxy qualification and all 41 local documentation links passed. Windows/Linux/macOS on Node 22/24 must pass for the release PR and final main SHA before tagging and publication. Widget runtime/client findings above remain scoped to their recorded checks; existing immutable messages keep their previous layout.
+
 ## Current task labels and completion captions (2026-11-11)
 
 Task headings now use the first user request of each turn, independently of the native session name. Seven focused tests cover terminal item events, confirmed Telegram turn IDs, steering, Markdown/Unicode/control sanitization, bounded labels, late acknowledgements/completions, rejected instructions, persisted classic queues, historical Text version reads and recovery after reconnect. Native session names remain unchanged. Successful final-widget and table-attachment captions use `Answer ready` without the check-mark emoji; the completion indicator inside the widget is retained.
