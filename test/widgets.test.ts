@@ -29,7 +29,7 @@ async function setup() {
     close: () => { Date.now = realNow; f.close(); } };
 }
 
-test('/view applies to all sessions, defaults to classic, latches each turn and never writes native settings/input', async () => {
+test('/view applies to all sessions, preserves classic running turns and never writes native settings/input', async () => {
   const f = await setup();
   try {
     await f.start('old'); await f.bridge.update(message(1, 101, '/view widgets')); await f.drain();
@@ -39,10 +39,10 @@ test('/view applies to all sessions, defaults to classic, latches each turn and 
     await f.bridge.update(message(2, 101, '/view classic')); await f.drain();
     await f.bridge.notification('turn/plan/updated', { threadId: 'thread-a', turnId: 'live', plan: [{ step: 'Do work', status: 'inProgress' }] });
     f.advance(); await f.flush();
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget' && call.params.html === WIDGET_HTML).length, 1);
     assert.equal(f.telegram.calls.filter(call => call.method === 'editMessageWidgetData').length, 1, 'current widget turn keeps its view');
     await f.start('next'); f.advance(); await f.flush();
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget' && call.params.html === WIDGET_HTML).length, 1);
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
@@ -68,7 +68,7 @@ test('global /view menus and direct commands work without a topic or session, wi
       assert.equal(f.state.viewMode(), 'classic');
       await f.bridge.update(click(5)); assert.equal(f.state.viewMode(), 'widgets');
       await f.bridge.update(command(6, '/status')); await f.drain();
-      assert.ok(f.telegram.sent().some(item => string(item.text).includes('View for all topics: Widgets')));
+      assert.ok(f.telegram.calls.some(call => call.method === 'sendWidget' && string(call.params.html).includes('View for all topics: Widgets')));
       await f.bridge.update(command(7, '/view classic')); assert.equal(f.state.viewMode(), 'classic');
       await f.bridge.update(click(8)); assert.equal(f.state.viewMode(), 'classic', 'an already consumed menu cannot change the global setting again');
       assert.deepEqual(f.codex.writes, []);
@@ -147,7 +147,7 @@ test('a quiet activity card finishes and a separate result notifies without an a
     await f.bridge.notification('item/started', { ...event, item: { id: 'reason', type: 'reasoning', text: 'SECRET_REASONING' } });
     await f.bridge.notification('turn/plan/updated', { threadId: 'thread-a', turnId: 'live', plan: [{ step: 'First', status: 'completed' }, { step: 'Second', status: 'inProgress' }] });
     f.advance(); await f.flush();
-    const sent = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
+    const sent = f.telegram.calls.find(call => call.method === 'sendWidget' && call.params.html === WIDGET_HTML)!.params;
     assert.equal(sent.message_thread_id, 101); assert.equal(sent.is_shared, false); assert.equal(sent.allow_queries, false); assert.equal(sent.public_data, undefined);
     const data = JSON.parse(string(sent.chat_data)); assert.deepEqual(data.n, [1, 2]); assert.deepEqual(data.a, [['running', 'Run command']]);
     assert.doesNotMatch(string(sent.chat_data), /SECRET_/u);
@@ -187,9 +187,29 @@ test('widget progress stays in the card instead of repeating assistant steps as 
     await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item });
     f.advance(); await f.flush(); await f.drain();
     const sent = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
-    assert.equal(sent.caption, undefined, 'the card must not add an explanatory text block below itself');
+    assert.equal(sent.caption, 'Working · project-a');
+    assert.ok(string(sent.caption).length <= 180, 'caption is a short archive/notification label');
+    assert.equal(string(sent.caption).includes(item.text), false, 'progress must not be duplicated in the caption');
     assert.ok(string(sent.chat_data).includes(item.text), 'the live card must explain the current work');
     assert.equal(f.telegram.sent().some(message => string(message.text).includes(item.text)), false, 'widget progress must not be repeated below the card');
+  } finally { f.close(); }
+});
+
+test('Working previews parse Markdown before budgeting while preserving literal code and the original status text', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const text = '**Checking the queue** with *care*, ~~old retries~~, `count **=** 2` and [documentation](https://example.com/guide).';
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'live', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text } });
+    f.advance(); await f.flush();
+    const params = f.telegram.calls.find(call => call.method === 'sendWidget')!.params;
+    const data = JSON.parse(string(params.chat_data));
+    assert.equal(data.q, 'Checking the queue with care, old retries, count **=** 2 and documentation.');
+    assert.ok(data.f.some((span: number[]) => span[0] === 0 && data.q.slice(span[1], span[1]! + span[2]!) === 'Checking the queue'));
+    assert.ok(data.f.some((span: number[]) => span[0] === 3 && data.q.slice(span[1], span[1]! + span[2]!) === 'count **=** 2'));
+    assert.ok(Buffer.byteLength(string(params.chat_data)) <= 900);
+    assert.equal(f.state.widgetCard('thread-a', 'live')!.snapshot.progressText, text, 'The formatted Current status reader keeps the original Markdown');
+    assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });
 
@@ -202,6 +222,25 @@ test('Russian progress uses available data space instead of stopping halfway thr
     f.advance(); await f.flush();
     const data = JSON.parse(string(f.telegram.calls.find(call => call.method === 'sendWidget')!.params.chat_data));
     assert.equal(data.q, text, 'this complete progress paragraph fits the Telegram data budget');
+  } finally { f.close(); }
+});
+
+test('styled progress keeps Unicode offsets after whitespace normalization and budgets formatting together with text', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start();
+    const card = f.state.widgetCard('thread-a', 'live')!;
+    card.snapshot.progressText = ' \n**🧪 First** \n\n *Second*\tand `a**b` ';
+    let data = JSON.parse(widgetData(card));
+    assert.equal(data.q, '🧪 First Second and a**b');
+    assert.equal(data.q.slice(data.f[0][1], data.f[0][1] + data.f[0][2]), '🧪 First');
+    assert.ok(data.f.some((span: number[]) => span[0] === 1 && data.q.slice(span[1], span[1]! + span[2]!) === 'Second'));
+    card.snapshot.progressText = Array.from({ length: 300 }, (_, index) => `**Value ${index}** *checking* \`x_${index}\`.`).join('\n');
+    const encoded = widgetData(card); data = JSON.parse(encoded);
+    assert.ok(Buffer.byteLength(encoded) <= 900);
+    assert.ok(data.q.endsWith('…')); assert.ok(data.f.length <= 24);
+    assert.ok(data.f.every((span: number[]) => span[1]! >= 0 && span[2]! > 0 && span[1]! + span[2]! <= data.q.length));
+    assert.ok(!data.q.includes('\ufffd'));
   } finally { f.close(); }
 });
 
@@ -603,8 +642,9 @@ test('a new native question is delivered before continuing a long result series'
     await f.bridge.request({ id: 'question', method: 'item/tool/requestUserInput', params: { threadId: 'thread-a', turnId: 'next',
       questions: [{ id: 'q', question: 'Important pending question?', options: [{ label: 'One', description: 'First' }] }] } });
     await f.outbox.flushOne();
-    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Important pending question')));
-    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
+    const sent = f.telegram.calls.filter(call => call.method === 'sendWidget');
+    assert.ok(string(sent.at(-1)!.params.html).includes('Important pending question'));
+    assert.equal(sent.length, 2);
     assert.deepEqual(f.codex.writes, []);
   } finally { f.close(); }
 });

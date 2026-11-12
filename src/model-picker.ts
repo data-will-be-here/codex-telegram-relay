@@ -2,7 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { RpcError } from './codex.js';
 import { withProjectHeader } from './format.js';
 import { type State } from './state.js';
-import { array, object, string, integer, type Binding, type Codex, type Json, type Keyboard, type Telegram, type ModelSettings } from './types.js';
+import { type Screens } from './screens.js';
+import { array, object, string, integer, displayName, type Binding, type Codex, type Json, type Keyboard, type Telegram, type ModelSettings } from './types.js';
 
 const PAGE_SIZE = 8;
 const MENU_LIFETIME = 10 * 60 * 1000;
@@ -34,7 +35,7 @@ function choices(model: Model): { text: string; settings: ModelSettings }[] {
 export class ModelPicker {
   private menus = new Map<string, Menu>();
   constructor(private readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
-    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>) {}
+    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>, private readonly screens?: Screens) {}
 
   async open(binding: Binding): Promise<void> {
     for (const menu of this.menus.values()) if (!menu.busy && menu.expires < Date.now()) this.retire(menu);
@@ -53,7 +54,8 @@ export class ModelPicker {
       if (this.menus.get(binding.threadId) !== menu) { this.retire(menu); return; }
       if (!await this.allowed(binding)) { this.retire(menu); this.notice(binding, 'The session is unavailable for this topic. Open it in Codex and send /model.'); return; }
       const screen = this.screen(menu);
-      this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
+      if (this.screens) this.screens.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json, { kind: 'menu', title: 'Model', editable: true });
+      else this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
     } catch {
       if (this.menus.get(binding.threadId) === menu) {
         await this.close(menu);
@@ -146,10 +148,11 @@ export class ModelPicker {
   }
 
   private async edit(menu: Menu, text: string, markup: Keyboard): Promise<void> {
+    if (this.screens) { menu.key = await this.screens.edit(menu.key, menu.binding.topicId, text, markup as unknown as Json, { kind: 'menu', title: 'Model', editable: true }); return; }
     const messageId = this.state.promptMessage(menu.key);
     if (!messageId) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: messageId,
-      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, menu.binding.sessionName, menu.binding.projectLabel), reply_markup: markup });
+      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, displayName(menu.binding), menu.binding.projectLabel), reply_markup: markup });
   }
   private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/model/${randomUUID()}`, binding.topicId, text); }
   private retire(menu: Menu): void {

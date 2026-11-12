@@ -23,6 +23,7 @@ async function nativeFixture() {
   const temp = temporary();
   const project = join(temp.dir, 'project'); mkdirSync(project);
   const state = new State(join(temp.dir, 'private'));
+  state.setViewMode('classic'); // These native-origin tests inspect classic approval messages and controls.
   let codex = new CodexClient();
   const telegram = new FakeTelegram();
   const config: Config = { version: 1, ownerId: 42, roots: [project], codexBinary: process.execPath };

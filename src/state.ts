@@ -6,12 +6,14 @@ import { privateDirectory } from './config.js';
 import { object, string, type Binding, type Json, type MessageMode } from './types.js';
 import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
 import { type FormattedText } from './format.js';
+import { type ScreenSpec } from './screen-types.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
 const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
 export interface RichDeliveryPart {
+  screen?: ScreenSpec;
   method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument'; params: Json;
   fallback?: string; fallbackText?: FormattedText;
   document?: { name: string; html: string }; tableDocument?: string; tableCaption?: string;
@@ -68,7 +70,8 @@ export class State {
     writeFileSync(fd, this.lockValue); closeSync(fd);
     try {
       const path = join(home, 'state.sqlite');
-      if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error('Invalid state database path.');
+      const existingState = existsSync(path);
+      if (existingState && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error('Invalid state database path.');
       this.db = new DatabaseSync(path);
       chmodSync(path, 0o600);
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;
@@ -81,6 +84,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS question_progress(key TEXT PRIMARY KEY,signature TEXT NOT NULL,answers TEXT NOT NULL,at INTEGER NOT NULL);
         DELETE FROM settings WHERE key='topicTitleMode';
         CREATE TABLE IF NOT EXISTS replies(threadId TEXT PRIMARY KEY, inputId INTEGER NOT NULL, turnId TEXT);
+        CREATE TABLE IF NOT EXISTS turn_tasks(threadId TEXT NOT NULL, turnId TEXT NOT NULL, label TEXT, at INTEGER NOT NULL, PRIMARY KEY(threadId,turnId));
         CREATE TABLE IF NOT EXISTS approval_requests(identity TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, requestId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS approval_cards(identity TEXT PRIMARY KEY, deliveryKey TEXT NOT NULL UNIQUE, requestIdentity TEXT NOT NULL, ownerToken TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
@@ -103,6 +107,7 @@ export class State {
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
       if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE bindings ADD COLUMN sessionName TEXT');
+      if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'taskTurnId')) this.db.exec('ALTER TABLE bindings ADD COLUMN taskTurnId TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE outbox ADD COLUMN sessionName TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
@@ -124,8 +129,9 @@ export class State {
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
-      // Preserve an existing opt-in once when migrating per-session preferences to the relay-wide setting.
-      this.db.exec("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END; DELETE FROM settings WHERE key LIKE 'view/%'");
+      // New installations start with Widgets; upgrades retain explicit or implicit Classic and legacy opt-ins.
+      this.db.prepare("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN ?=1 OR EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END").run(Number(!existingState));
+      this.db.exec("DELETE FROM settings WHERE key LIKE 'view/%'");
       if (interruptedWidgets.size) this.setViewMode('classic');
       this.db.exec("UPDATE widget_cards SET delivery='uncertain',failure='restart-outcome-unknown' WHERE delivery='sending'; UPDATE widget_cards SET delivery='active' WHERE delivery='editing'; UPDATE widget_cards SET failure='legacy-outcome-unknown' WHERE delivery='uncertain' AND failure IS NULL");
       if (!this.db.prepare('PRAGMA table_info(topic_operations)').all().some(column => column.name === 'error')) this.db.exec('ALTER TABLE topic_operations ADD COLUMN error TEXT');
@@ -274,7 +280,28 @@ export class State {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   private describeBinding(binding: Binding | undefined): Binding | undefined {
-    return binding ? { ...binding, ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'No project' } : {}) } : undefined;
+    return binding ? { ...binding, taskName: this.taskName(binding.threadId, binding.taskTurnId ?? ''),
+      ...(this.workspaceLabel(binding.cwd) ? { projectLabel: 'No project' } : {}) } : undefined;
+  }
+  private taskName(threadId: string, turnId: string): string | null {
+    const label = this.db.prepare('SELECT label FROM turn_tasks WHERE threadId=? AND turnId=?').get(threadId, turnId)?.label;
+    return typeof label === 'string' ? label : null;
+  }
+  rememberTask(threadId: string, turnId: string, label?: string, activate = false): void {
+    if (!turnId || turnId.length > 256) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const added = this.db.prepare('INSERT OR IGNORE INTO turn_tasks VALUES(?,?,?,?)').run(threadId, turnId, label ?? null, Date.now());
+      if (label) this.db.prepare('UPDATE turn_tasks SET label=? WHERE threadId=? AND turnId=? AND label IS NULL').run(label, threadId, turnId);
+      if (activate && (added.changes || !this.binding(threadId)?.taskTurnId))
+        this.db.prepare('UPDATE bindings SET taskTurnId=? WHERE threadId=?').run(turnId, threadId);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  turnBinding(binding: Binding, turnId: string): Binding {
+    const saved = this.widgetCard(binding.threadId, turnId)?.binding;
+    return { ...binding, taskTurnId: turnId, taskName: this.taskName(binding.threadId, turnId) ?? saved?.taskName ?? null,
+      sessionName: saved?.sessionName ?? binding.sessionName ?? null };
   }
   bindings(): Binding[] { return (this.db.prepare('SELECT * FROM bindings').all() as unknown as Binding[]).map(binding => this.describeBinding(binding)!); }
   binding(threadId: string): Binding | undefined { return this.describeBinding(this.db.prepare('SELECT * FROM bindings WHERE threadId=?').get(threadId) as unknown as Binding | undefined); }
@@ -323,12 +350,43 @@ export class State {
     this.db.prepare('UPDATE bindings SET lastTurn=? WHERE threadId=? AND lastTurn IS ?').run(turnId, threadId, expected);
   }
   deliveryExists(key: string): boolean { return !!this.db.prepare('SELECT 1 FROM outbox WHERE key=? UNION ALL SELECT 1 FROM widget_answers WHERE deliveryKey=? LIMIT 1').get(key, key); }
+  enqueueScreen(key: string, topicId: number | null, text: string, markup: Json | null, parts: RichDeliveryPart[], ownerNotice = false): void {
+    if (this.deliveryExists(key)) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (ownerNotice) this.enqueueOwnerNotice(key, topicId, text, markup); else this.enqueue(key, topicId, text, markup);
+      this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(parts), key);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  screen(key: string): (DeliveryContext & { key: string; text: string; label: string | null; status: string; messageId: number | null; parts: RichDeliveryPart[]; spec: ScreenSpec }) | undefined {
+    const row = this.db.prepare('SELECT * FROM outbox WHERE key=?').get(key);
+    const parts = typeof row?.richPlan === 'string' ? JSON.parse(row.richPlan) as RichDeliveryPart[] : [];
+    const spec = parts[0]?.screen;
+    return row && spec ? { key, text: string(row.text), label: typeof row.sessionName === 'string' ? row.sessionName : null,
+      status: string(row.status), messageId: typeof row.messageId === 'number' ? row.messageId : null,
+      topicId: typeof row.topicId === 'number' ? row.topicId : null, projectCwd: typeof row.projectCwd === 'string' ? row.projectCwd : null,
+      sourceThreadId: typeof row.sourceThreadId === 'string' ? row.sourceThreadId : null, ownerNotice: row.projectCwd === null && row.sourceThreadId === null,
+      parts, spec } : undefined;
+  }
+  screenToken(token: string): ReturnType<State['screen']> {
+    const row = this.db.prepare("SELECT key FROM outbox WHERE json_extract(richPlan,'$[0].screen.token')=? LIMIT 1").get(token);
+    return row ? this.screen(string(row.key)) : undefined;
+  }
+  attachScreen(key: string, parts: RichDeliveryPart[]): void {
+    this.db.prepare("UPDATE outbox SET richPlan=? WHERE key=? AND richPlan IS NULL AND status IN ('pending','deferred','blocked')").run(JSON.stringify(parts), key);
+  }
+  updateScreen(key: string, text: string, spec: ScreenSpec): void {
+    const saved = this.screen(key); if (!saved) return;
+    saved.parts[0]!.screen = spec;
+    this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(saved.parts), key);
+  }
   enqueueWidgetAnswer(key: string, binding: Binding, text: string, token: string, part: RichDeliveryPart | RichDeliveryPart[]): boolean {
     if (this.deliveryExists(key)) return true;
     if (Number(this.db.prepare('SELECT count(*) AS n FROM widget_answers').get()?.n ?? 0) >= 10_000) return false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.enqueue(key, binding.topicId, text, null, binding.cwd, binding.threadId);
+      this.enqueue(key, binding.topicId, text, null, binding.cwd, binding.threadId, binding.taskName || binding.sessionName);
       this.db.prepare('INSERT INTO widget_answers(deliveryKey,token,binding,text,multipartSafe) VALUES(?,?,?,?,1)').run(key, token, JSON.stringify(binding), text);
       this.db.prepare('UPDATE outbox SET text=?,richPlan=? WHERE key=?').run(text, JSON.stringify(Array.isArray(part) ? part : [part]), key);
       this.db.exec('COMMIT'); return true;
@@ -430,11 +488,11 @@ export class State {
   }
   clearReply(threadId: string, inputId: number): void { this.db.prepare('DELETE FROM replies WHERE threadId=? AND inputId=?').run(threadId, inputId); }
   enqueueOwnerNotice(key: string, topicId: number | null, text: string, markup: Json | null = null): void {
-    if (!key.startsWith('notice/')) throw new Error('Owner notices require a notice key.');
+    if (!key.startsWith('notice/') && !key.startsWith('attention/status/')) throw new Error('Owner notices require a notice or status key.');
     this.enqueue(key, null, text, markup);
-    this.db.prepare("UPDATE outbox SET topicId=? WHERE key=? AND projectCwd IS NULL AND sourceThreadId IS NULL AND status='pending'").run(topicId, key);
+    this.db.prepare("UPDATE outbox SET topicId=? WHERE key=? AND projectCwd IS NULL AND sourceThreadId IS NULL AND status IN ('pending','deferred')").run(topicId, key);
   }
-  enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string): void {
+  enqueue(key: string, topicId: number | null, text: string, markup: Json | null = null, projectCwd?: string, sourceThreadId?: string, label?: string | null): void {
     // A duplicate remains a no-op even while admission is full or after an uncertain send.
     if (this.deliveryExists(key)) return;
     const approval = key.startsWith('prompt/approval/') && this.db.prepare('SELECT 1 FROM approval_cards WHERE deliveryKey=?').get(key);
@@ -446,7 +504,7 @@ export class State {
     const blocked = binding && this.topicOperation(binding.threadId);
     // Final answers are durable before queue admission and remain outside the active-work cap.
     const status = blocked ? key.startsWith('prompt/') ? 'cancelled' : 'blocked' : durable ? 'deferred' : 'pending';
-    const sessionName = binding?.sessionName ?? (sourceThreadId ? this.binding(sourceThreadId)?.sessionName : null) ?? null;
+    const sessionName = label ?? binding?.taskName ?? binding?.sessionName ?? (sourceThreadId ? this.binding(sourceThreadId)?.sessionName : null) ?? null;
     this.db.prepare('INSERT OR IGNORE INTO outbox(key,topicId,text,markup,at,status,projectCwd,sourceThreadId,sessionName) VALUES(?,?,?,?,?,?,?,?,?)').run(key, topicId, text, markup === null ? null : JSON.stringify(markup), Date.now(), status, projectCwd ?? binding?.cwd ?? null, sourceThreadId ?? binding?.threadId ?? null, sessionName);
   }
   approvalCard(cardIdentity: string, identity: string, threadId: string, turnId: string, requestId: string | number, ownerToken: string): ApprovalCard {
@@ -461,6 +519,23 @@ export class State {
     const row = this.db.prepare('SELECT status,messageId,markup FROM outbox WHERE key=?').get(key);
     return row ? { status: string(row.status), messageId: typeof row.messageId === 'number' ? row.messageId : null,
       markup: typeof row.markup === 'string' ? object(JSON.parse(row.markup)) : null } : undefined;
+  }
+  /** Explicit owner recovery rotates one live review attempt; native decision identity stays unchanged. */
+  replaceApprovalCard(key: string, ownerToken: string, nextToken: string, markup: Json, parts?: RichDeliveryPart[]): { deliveryKey: string; messageId: number | null } | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare(`SELECT o.* FROM outbox o JOIN approval_cards c ON c.deliveryKey=o.key
+        JOIN approval_requests r ON r.identity=c.requestIdentity
+        WHERE o.key=? AND c.ownerToken=? AND r.status='pending' AND o.status IN ('sent','uncertain')`).get(key, ownerToken);
+      if (!row) { this.db.exec('COMMIT'); return; }
+      const deliveryKey = `prompt/approval/card/${randomUUID()}`;
+      this.db.prepare('UPDATE approval_cards SET deliveryKey=?,ownerToken=?,at=? WHERE deliveryKey=? AND ownerToken=?')
+        .run(deliveryKey, nextToken, Date.now(), key, ownerToken);
+      this.enqueue(deliveryKey, Number(row.topicId), string(row.text), markup, string(row.projectCwd), string(row.sourceThreadId));
+      if (parts) this.db.prepare('UPDATE outbox SET richPlan=? WHERE key=?').run(JSON.stringify(parts), deliveryKey);
+      this.db.exec('COMMIT');
+      return { deliveryKey, messageId: typeof row.messageId === 'number' ? row.messageId : null };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   approvalPending(identity: string): boolean { return this.db.prepare("SELECT status FROM approval_requests WHERE identity=?").get(identity)?.status === 'pending'; }
   ownsApprovalCard(key: string, ownerToken: string): boolean {
@@ -533,10 +608,10 @@ export class State {
         SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending') RETURNING status`)
       .get(retryAt, id, index)?.status === 'pending';
   }
-  completeApprovalDelivery(id: number, parts: number): void {
-    this.db.prepare(`UPDATE outbox SET status='sent',markup=NULL WHERE id=? AND status IN ('sending','pending')
+  completeApprovalDelivery(id: number, parts: number, armed = parts === 1): void {
+    this.db.prepare(`UPDATE outbox SET status='sent',markup=CASE WHEN ?=1 THEN markup ELSE NULL END WHERE id=? AND status IN ('sending','pending')
       AND nextPart=? AND messageId IS NOT NULL AND key IN (
-        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(id, parts);
+        SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending')`).run(Number(armed), id, parts);
   }
   delivered(id: number, messageId: number | null): void {
     this.db.exec('BEGIN IMMEDIATE');
@@ -578,5 +653,6 @@ export class State {
     this.db.prepare("DELETE FROM approval_requests WHERE status='resolved' AND at<? AND identity NOT IN (SELECT requestIdentity FROM approval_cards)").run(cutoff);
     this.db.prepare('DELETE FROM async_answers WHERE at<? AND threadId NOT IN (SELECT threadId FROM host_watch)').run(cutoff);
     this.db.prepare('DELETE FROM question_progress WHERE at<?').run(cutoff);
+    this.db.prepare('DELETE FROM turn_tasks WHERE at<? AND NOT EXISTS (SELECT 1 FROM bindings b WHERE b.threadId=turn_tasks.threadId AND b.taskTurnId=turn_tasks.turnId)').run(cutoff);
   }
 }

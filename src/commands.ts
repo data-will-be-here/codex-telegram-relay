@@ -13,6 +13,7 @@ const commands = [
   { command: 'mode', args: 'all|compact', en: 'Choose all assistant messages or compact replies' },
   { command: 'stream', args: 'on|off', en: 'Enable or disable live answer previews' },
   { command: 'questions', args: '', en: 'Show pending questions with answer buttons' },
+  { command: 'approvals', args: '', en: 'Restore pending approval cards in this topic' },
   { command: 'bind', args: 'SESSION_ID', en: 'Bind this topic to a session: /bind SESSION_ID', advanced: true },
   { command: 'repair', args: 'SESSION_ID', en: 'Retry topic creation: /repair SESSION_ID', advanced: true },
 ] as const;

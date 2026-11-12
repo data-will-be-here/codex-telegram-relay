@@ -16,9 +16,13 @@ import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { formatLimits } from './limits.js';
-import { array, integer, object, string, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
+import { limitMeters } from './limits.js';
+import { Screens } from './screens.js';
+import { taskTitle } from './tasks.js';
+import { array, integer, object, string, displayName, type AgentOrigin, type Binding, type Codex, type Json, type Keyboard, type RpcRequest, type Telegram, type UserInput } from './types.js';
 
 interface Prompt {
+  widgets?: boolean;
   approval?: ApprovalCard;
   approvalMarkup?: Json;
   refreshAfter?: number;
@@ -62,13 +66,15 @@ export class Bridge {
   private newSessions: NewSessions;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
+  private screens: Screens;
 
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
-    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding));
-    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
-    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding));
+    this.screens = new Screens(state, telegram, config);
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding), this.screens);
+    this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
+    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
     this.widgets = new Widgets(state, this.generation);
     this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async () => {
       for (const binding of this.state.bindings()) {
@@ -80,7 +86,7 @@ export class Bridge {
         if (current?.topicId !== binding.topicId || current.cwd !== binding.cwd || !this.attached.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId)) continue;
         this.widgets.recover(current, turns);
       }
-    });
+    }, this.screens);
   }
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
@@ -168,11 +174,22 @@ export class Bridge {
       const activityThread = string(params.threadId) || string(object(params.thread).id);
       const activityBinding = this.state.binding(activityThread);
       if (!this.closed && activityBinding && this.attached.has(activityThread) && !this.state.topicOperation(activityThread) &&
-          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) this.widgets.observe(activityBinding, method, params);
+          !this.config.ignoredThreadIds?.includes(activityThread) && this.allowed(activityBinding.cwd, activityThread)) {
+        const turn = object(params.turn); const turnId = string(params.turnId) || string(turn.id);
+        const item = object(params.item);
+        const user = method.startsWith('item/') && item.type === 'userMessage';
+        if (method === 'turn/started' || method === 'turn/completed' || user) {
+          const finished = this.state.widgetCard(activityThread, turnId)?.snapshot.finishedAt;
+          this.state.rememberTask(activityThread, turnId, taskTitle(user ? [item] : array(turn.items)),
+            (method === 'turn/started' || user) && finished == null);
+        }
+        this.widgets.observe(this.state.turnBinding(this.state.binding(activityThread)!, turnId), method, params);
+      }
     }
     if (!['item/started', 'item/agentMessage/delta', 'item/completed', 'turn/completed'].includes(method)) return;
     const threadId = string(params.threadId);
-    const binding = this.state.binding(threadId);
+    const currentBinding = this.state.binding(threadId);
+    const binding = currentBinding && this.state.turnBinding(currentBinding, string(params.turnId));
     if (!this.state.streamingEnabled() || !binding || !this.attached.has(threadId) ||
         this.config.ignoredThreadIds?.includes(threadId)) return;
     const turnId = string(params.turnId);
@@ -388,7 +405,8 @@ export class Bridge {
         if ((all || matchingReply) && !this.widgets.usesCard(threadId, string(params.turnId)) && await this.stillAllowed(binding)) {
           const itemId = string(item.id) || createHash('sha256').update(string(item.text)).digest('hex');
           const key = all ? `assistant/${threadId}/${string(params.turnId)}/${itemId}` : `reply/${threadId}/${reply!.inputId}`;
-          this.state.enqueue(key, binding.topicId, string(item.text));
+          const task = this.state.turnBinding(binding, string(params.turnId));
+          this.state.enqueue(key, binding.topicId, string(item.text), null, binding.cwd, binding.threadId, displayName(task));
           if (matchingReply) this.state.clearReply(threadId, reply.inputId);
         }
       }
@@ -407,10 +425,16 @@ export class Bridge {
     if (!['completed', 'failed', 'interrupted'].includes(status)) return;
     const previous = recovery?.baseline ?? this.state.binding(binding.threadId)?.lastTurn ?? null;
     if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
+    this.state.rememberTask(binding.threadId, turnId, taskTitle(array(turn.items)));
+    binding = this.state.turnBinding(binding, turnId);
     let text = finalAnswer(turn) || this.finals.get(`${binding.threadId}/${turnId}`) || '';
     if (!text) {
       const snapshot = (await this.codex.turns(binding.threadId, recovery ? 3000 : undefined)).find(t => t.id === turnId);
-      if (snapshot) text = finalAnswer(snapshot);
+      if (snapshot) {
+        text = finalAnswer(snapshot);
+        this.state.rememberTask(binding.threadId, turnId, taskTitle(array(snapshot.items)));
+        binding = this.state.turnBinding(binding, turnId);
+      }
       if (!await this.stillAllowed(binding, recovery ? 1000 : undefined)) return;
     }
     const currentBinding = this.state.binding(binding.threadId);
@@ -426,9 +450,9 @@ export class Bridge {
       const result = { ...progress, kind: 'result' as const, snapshot: { ...progress.snapshot, status: status === 'completed' ? 'done' as const : status as 'failed' | 'interrupted',
         finishedAt: progress.snapshot.finishedAt ?? (typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()),
         updatedAt: Date.now(), progressText: (text || error || 'See the terminal for details.').slice(0, 40_000), plan: null, activities: [] } };
-      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts(result, text || error || 'See the terminal for details.', token));
+      widget = this.state.enqueueWidgetAnswer(key, binding, body, token, resultParts({ ...result, binding }, text || error || 'See the terminal for details.', token));
     }
-    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId);
+    if (!widget) this.state.enqueue(key, binding.topicId, body, null, binding.cwd, binding.threadId, displayName(binding));
     if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
@@ -448,7 +472,10 @@ export class Bridge {
     if (agent && !request.method.endsWith('/requestApproval')) {
       this.attention(binding, request, `A subagent needs input in Codex. Check agent ${agent.threadId} in the terminal.`); return;
     }
+    const activeCard = this.state.widgetCard(binding.threadId, string(request.params.turnId)) ??
+      this.state.widgetCards().find(card => card.binding.threadId === binding.threadId && card.snapshot.finishedAt === null);
     const prompt: Prompt = {
+      widgets: (activeCard?.view ?? this.state.viewMode()) === 'widgets',
       token: randomBytes(16).toString('hex'), request, binding, options: new Map(), questions: [], answers: Object.create(null) as Record<string, { answers: string[] }>, index: 0, freeText: false,
     };
     if (request.method === 'item/tool/requestUserInput') {
@@ -499,9 +526,11 @@ export class Bridge {
     const markup = keyboard as unknown as Json;
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
-    if (!receipt) this.state.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup);
-    else if (receipt.status === 'pending' || receipt.status === 'held') this.state.approvalMarkup(key, markup, prompt.token);
-    else await this.refreshApproval(prompt);
+    if (!receipt) this.screens.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup,
+      { kind: 'approval', title: request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review', markdown: true, fullText: card, widgets: prompt.widgets });
+    prompt.approvalMarkup = this.screens.markup(key, markup)!;
+    if (receipt?.status === 'pending' || receipt?.status === 'held') this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
+    else if (receipt) await this.refreshApproval(prompt);
   }
 
   /** Refresh known card controls; edits never manufacture another message after a lost acknowledgement. */
@@ -517,7 +546,7 @@ export class Bridge {
     const receipt = this.state.approvalReceipt(key);
     if (!receipt || ['pending', 'sending'].includes(receipt.status)) return false;
     if (receipt.status !== 'held' && (receipt.status !== 'sent' || receipt.messageId === null)) {
-      this.attention(prompt.binding, prompt.request, 'This approval card could not be confirmed in Telegram. Check the existing messages and answer in Codex; another copy will not be sent automatically.');
+      this.approvalRecoveryNotice(prompt);
       prompt.refreshAfter = Infinity; return true;
     }
     if (receipt.status === 'sent' && JSON.stringify(receipt.markup) === JSON.stringify(prompt.approvalMarkup)) return false;
@@ -546,7 +575,7 @@ export class Bridge {
           binding?.topicId !== prompt.binding.topicId || binding.cwd !== prompt.binding.cwd) return true;
       if (isMissingTopic(error)) { this.state.missingTopic(prompt.binding); prompt.refreshAfter = Infinity; }
       else if (error instanceof TelegramError && [400, 403, 404].includes(error.status)) {
-        this.attention(prompt.binding, prompt.request, 'The existing approval card cannot be updated. Review and answer this request in Codex.');
+        this.approvalRecoveryNotice(prompt);
         prompt.refreshAfter = Infinity;
       } else {
         prompt.refreshAttempts = Math.min((prompt.refreshAttempts ?? 0) + 1, 5);
@@ -598,6 +627,19 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
         await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('sc:')) {
+        await this.screens.text(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
+      if (Object.keys(callback).length && string(callback.data).startsWith('ar:')) {
+        const key = `prompt/approval/card/${string(callback.data).slice(3)}`;
+        const sourceId = integer(message.message_id);
+        const prompt = sourceId !== undefined && sourceId > 0 ? [...this.prompts.values()].find(p => p.approval?.deliveryKey === key &&
+          p.binding.topicId === topic && this.pending(p) && sourceId === this.state.promptMessage(`attention/approval-recovery/${key}`)) : undefined;
+        await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id,
+          ...(!prompt ? { text: 'This recovery control is closed or belongs to another topic.' } : {}) });
+        if (prompt) await this.recoverApproval(prompt);
+        this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
       else await this.message(message, topic, id);
       this.state.finish(id, 'done');
@@ -616,6 +658,13 @@ export class Bridge {
     }
     const text = string(message.text).trim();
     if (!text) return;
+    if (/^\/approvals(?:\s|$)/u.test(text)) {
+      if (text !== '/approvals' || topicId === null) { this.notice(topicId, 'Send /approvals without arguments inside a session topic.'); return; }
+      const pending = [...this.prompts.values()].filter(p => p.approval && p.binding.topicId === topicId && this.pending(p));
+      if (!pending.length) this.notice(topicId, 'No live approvals are available in this topic. A decision already submitted will not be submitted again.');
+      for (const prompt of pending) await this.recoverApproval(prompt);
+      return;
+    }
     if (/^\/(start|help)(?:\s|$)/u.test(text)) {
       this.notice(topicId, commandHelp()); return;
     }
@@ -627,19 +676,19 @@ export class Bridge {
     }
     if (/^\/limits(?:\s|$)/u.test(text)) {
       if (text !== '/limits') { this.notice(topicId, 'Use /limits without arguments.'); return; }
-      try { this.notice(topicId, formatLimits(await this.codex.rateLimits())); }
+      try { const snapshot = await this.codex.rateLimits(); this.screen(topicId, 'Codex account limits', formatLimits(snapshot), limitMeters(snapshot)); }
       catch { this.notice(topicId, 'Could not load Codex limits. Check the connection and Codex sign-in, then retry /limits.'); }
       return;
     }
     if (text === '/sessions') {
-      this.notice(topicId, this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
+      this.screen(topicId, 'Sessions', this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
-    if (text === '/status') { this.state.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nView for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.`); return; }
+    if (text === '/status') { this.screens.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nView for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.\nChecked: ${new Date().toISOString()}`, null, { kind: 'info', title: 'Relay status' }, true); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
       const [, mode, extra] = text.split(/\s+/u);
       if (extra || mode !== undefined && mode !== 'on' && mode !== 'off') { this.notice(topicId, 'Use /stream on or /stream off.'); return; }
       if (mode) { this.state.setStreaming(mode === 'on'); if (mode === 'off') this.drafts.clear(); }
-      this.notice(topicId, `Live previews for all sessions: ${this.state.streamingEnabled() ? 'on' : 'off'}.\n/stream on — show answers as they are generated, with rich formatting\n/stream off — deliver completed messages only\nComplete answers and tables are saved separately in both modes. Changes apply immediately; an existing preview may take up to 30 seconds to disappear.`); return;
+      this.screen(topicId, 'Live previews', `Live previews for all sessions: ${this.state.streamingEnabled() ? 'on' : 'off'}.\n/stream on — show answers as they are generated, with rich formatting\n/stream off — deliver completed messages only\nComplete answers and tables are saved separately in both modes. Changes apply immediately; an existing preview may take up to 30 seconds to disappear.`); return;
     }
     if (/^\/(?:bind|repair)(?:\s|$)/u.test(text)) {
       const [command, supplied, extra] = text.split(/\s+/u);
@@ -690,7 +739,7 @@ export class Bridge {
       const mode = text.split(/\s+/u)[1];
       if (mode !== undefined && mode !== 'all' && mode !== 'compact') { this.notice(topicId, 'Use /mode all or /mode compact.'); return; }
       if (mode) this.state.setMessageMode(mode);
-      this.notice(topicId, `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
+      this.screen(topicId, 'Message mode', `Message mode for all sessions: ${this.state.messageMode()}.\n/mode all — every assistant message, without tool/system output\n/mode compact — first reply to Telegram input and final answer\nChanges apply immediately to future messages.`); return;
     }
     if (text === '/questions') {
       let count = 0;
@@ -753,7 +802,7 @@ export class Bridge {
     if (authorized && valid() && answer) {
       const current = this.state.topic(topicId!)!;
       const click = createHash('sha256').update(string(callback.id)).digest('hex');
-      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId);
+      this.state.enqueue(`attention/widget-answer/${token}/${click}`, current.topicId, answer.text, null, current.cwd, current.threadId, displayName(answer.binding));
     }
   }
 
@@ -877,7 +926,8 @@ export class Bridge {
     const choices = options.map((o, i) => `${i + 1}. ${string(o.label)}${o.description ? '\n' + string(o.description) : ''}`).join('\n\n');
     const text = `❓ ${string(question.header) || 'Codex needs your answer'}${progress}\n\n${string(question.question)}` +
       (choices ? '\n\n' + choices : '') + '\n\nChoose a button or write your own answer in this topic.';
-    this.state.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows });
+    this.screens.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows },
+      { kind: 'question', title: (string(question.header) || 'Codex needs your answer') + progress, widgets: prompt.widgets });
   }
   private async answer(prompt: Prompt, text: string, inputId: number, images: UserInput[] = []): Promise<void> {
     if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); return; }
@@ -996,17 +1046,27 @@ export class Bridge {
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
       if (!current()) throw new RpcError('The topic changed. No instruction was sent.', false);
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
-      await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt));
+      await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt),
+        taskTitle(array(turn?.items)) ?? taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else if (status === 'idle') {
-      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt));
+      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
+        taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else throw new RpcError('This session is not ready. Open it in Codex before retrying.', false);
   }
-  private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>): Promise<void> {
+  private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>, task?: string): Promise<void> {
+    const binding = this.state.binding(threadId);
     this.state.awaitReply(threadId, inputId, turnId);
     try {
       const result = object(await write());
       const acceptedTurn = string(object(result.turn).id) || string(result.turnId);
       if (acceptedTurn) this.state.replyTurn(threadId, inputId, acceptedTurn);
+      const current = this.state.binding(threadId);
+      const knownTurn = acceptedTurn || turnId;
+      if (knownTurn && binding && !this.closed && current?.topicId === binding.topicId && current.cwd === binding.cwd &&
+          !this.config.ignoredThreadIds?.includes(threadId)) {
+        this.state.rememberTask(threadId, knownTurn, task, current.taskTurnId === binding.taskTurnId || current.taskTurnId === knownTurn);
+        this.widgets.refreshTask(this.state.turnBinding(current, knownTurn), knownTurn);
+      }
     } catch (error) { this.state.clearReply(threadId, inputId); throw error; }
   }
   private promptKey(prompt: Prompt): string { return prompt.approval?.deliveryKey ?? `prompt/${this.generation}/${prompt.token}/${prompt.index}`; }
@@ -1017,7 +1077,8 @@ export class Bridge {
     const messageId = this.state.cancelPrompt(key);
     if (messageId) {
       try {
-        await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        if (!await this.screens.close(key, prompt.approval ? 'Review closed' : 'Question closed'))
+          await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
         if (prompt.approval) this.state.approvalMarkup(key, { inline_keyboard: [] }, prompt.token);
       }
       catch { /* A stale keyboard cannot pass hasRequest/token checks. */ }
@@ -1039,6 +1100,35 @@ export class Bridge {
     }
   }
   private notice(topicId: number | null, text: string): void { this.state.enqueue(`notice/${randomUUID()}`, topicId, text); }
+  private screen(topicId: number | null, title: string, text: string, meters?: { label: string; remaining: number }[]): void {
+    this.screens.enqueue(`notice/screen/${randomUUID()}`, topicId, text, null, { kind: 'info', title, meters }, true);
+  }
+  private approvalRecoveryNotice(prompt: Prompt): void {
+    this.state.enqueue(`attention/approval-recovery/${prompt.approval!.deliveryKey}`, prompt.binding.topicId,
+      'Approval delivery was not confirmed. Use the button below or /approvals to show the pending approval again. This does not approve the command.',
+      { inline_keyboard: [[{ text: 'Show approval again', callback_data: `ar:${prompt.approval!.deliveryKey.split('/').at(-1)}` }]] });
+  }
+  private async recoverApproval(prompt: Prompt): Promise<void> {
+    if (!prompt.approval || !this.pending(prompt) || !await this.promptAllowed(prompt) ||
+        this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) {
+      this.notice(prompt.binding.topicId, 'This approval is closed or cannot currently be verified. No decision was submitted.'); return;
+    }
+    const token = randomBytes(16).toString('hex');
+    const markup: Json = { inline_keyboard: [[...prompt.options.keys()].map(code => ({
+      text: code === 'a' ? 'Allow once' : code === 'c' ? 'Cancel turn' : 'Decline', callback_data: `r:${token}:${code}` }))] };
+    const prepared = this.screens.replacement(prompt.approval.deliveryKey, markup);
+    const replacement = this.state.replaceApprovalCard(prompt.approval.deliveryKey, prompt.token, token, prepared.markup, prepared.parts);
+    if (!replacement) {
+      this.notice(prompt.binding.topicId, 'Approval delivery is already pending. Wait for its review card; another copy was not created.'); return;
+    }
+    this.prompts.delete(prompt.token);
+    this.prompts.set(token, { ...prompt, token, approval: { ...prompt.approval, deliveryKey: replacement.deliveryKey },
+      approvalMarkup: prepared.markup, refreshing: false, refreshAfter: 0, refreshAttempts: 0 });
+    if (replacement.messageId !== null) {
+      try { await this.telegram.call('editMessageReplyMarkup', { chat_id: this.config.ownerId, message_id: replacement.messageId, reply_markup: { inline_keyboard: [] } }); }
+      catch { /* Old capability was retired atomically; an uneditable keyboard cannot submit a decision. */ }
+    }
+  }
   private attention(binding: Binding, request: RpcRequest, text: string): void {
     // Terminal-only notices use native item/context identity independently of the connection.
     const identity = JSON.stringify([string(request.params.threadId) || binding.threadId, request.method, request.params.turnId,

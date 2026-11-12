@@ -3,7 +3,8 @@ import { RpcError } from './codex.js';
 import { withProjectHeader } from './format.js';
 import { permissionSignature, validPermissionSettings } from './permission-settings.js';
 import { type State } from './state.js';
-import { integer, object, string, type Binding, type Codex, type Json, type Keyboard, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
+import { type Screens } from './screens.js';
+import { integer, object, string, displayName, type Binding, type Codex, type Json, type Keyboard, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
 
 const PAGE_SIZE = 7;
 const LIFETIME = 10 * 60_000;
@@ -51,7 +52,7 @@ export class PermissionPicker {
   private menus = new Map<string, Menu>();
   private opening = new Set<string>();
   constructor(private readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
-    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>) {}
+    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>, private readonly screens?: Screens) {}
 
   async open(binding: Binding): Promise<void> {
     if (this.opening.has(binding.threadId)) return;
@@ -73,7 +74,9 @@ export class PermissionPicker {
       const menu: Menu = { binding, key: `prompt/permissions/${randomUUID()}`, token: '', expires: Date.now() + LIFETIME,
         busy: false, snapshot, signature: permissionSignature(snapshot.settings), actions: new Map(), page: 0 };
       this.menus.set(binding.threadId, menu);
-      const screen = this.screen(menu); this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
+      const screen = this.screen(menu);
+      if (this.screens) this.screens.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json, { kind: 'menu', title: 'Session permissions', editable: true });
+      else this.state.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json);
     } catch { this.notice(binding, 'Could not load Codex permissions. Check the connection and retry /permissions.'); }
   }
 
@@ -166,9 +169,11 @@ export class PermissionPicker {
 
   private async ack(callback: Json, text?: string): Promise<void> { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(text ? { text } : {}) }); }
   private async edit(menu: Menu, text: string, markup: Keyboard): Promise<void> {
+    if (this.screens) { menu.key = await this.screens.edit(menu.key, menu.binding.topicId, text, markup as unknown as Json,
+      { kind: 'menu', title: 'Session permissions', editable: true, caption: menu.confirmation ? text : undefined }); return; }
     const id = this.state.promptMessage(menu.key); if (!id) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: id,
-      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, menu.binding.sessionName, menu.binding.projectLabel), reply_markup: markup });
+      ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, displayName(menu.binding), menu.binding.projectLabel), reply_markup: markup });
   }
   private notice(binding: Binding, text: string): void { this.state.enqueue(`attention/permissions/${randomUUID()}`, binding.topicId, text); }
   private retire(menu: Menu): void {

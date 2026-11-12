@@ -15,6 +15,7 @@ async function persistentReview() {
   codex.sessions = [{ id: 'thread-a', cwd: project, name: 'Task', status: 'idle' }];
   codex.pending.add('large-request');
   let state = new State(join(temp.dir, 'state'));
+  state.setViewMode('classic'); // Multipart native text delivery is independent of the installation default.
   let bridge = new Bridge(config, state, codex, telegram);
   await bridge.discover();
   const command = 'echo synthetic 😀 literal-content';

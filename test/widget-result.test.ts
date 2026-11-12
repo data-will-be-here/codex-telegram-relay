@@ -4,7 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resultParts } from '../src/widget-result.js';
+import { resultDocument, resultParts } from '../src/widget-result.js';
 import { renderMarkdown } from '../src/format.js';
 import { type WidgetCard } from '../src/widget-types.js';
 import { object, string, type Json } from '../src/types.js';
@@ -14,22 +14,43 @@ const card: WidgetCard = { id: 'test', token: 'test', generation: 'test', kind: 
   turnId: 'done', revision: 1, createdAt: 1000,
   snapshot: { status: 'done', startedAt: 0, finishedAt: 1000, updatedAt: 1000, plan: null, activities: [] } };
 
-export function resultPayload(html: string): Json {
+function resultRuntime(html: string) {
+  const elements: Json[] = []; const actions: { method: string; url: string }[] = [];
   const nodes = new Map<string, Json>();
   const node = (id: string): Json => {
     if (!nodes.has(id)) nodes.set(id, { textContent: '', style: {}, appendChild() {}, setAttribute() {}, addEventListener() {}, clientWidth: 0 });
     return nodes.get(id)!;
   };
-  const context: Json = { document: { getElementById: node, createElement: () => ({ textContent: '', style: {}, appendChild() {}, setAttribute() {} }), body: {} },
-    getComputedStyle: () => ({ fontSize: '20px' }), ResizeObserver: class { observe() {} }, TelegramWidget: { onEvent() {}, ready() {} } };
+  const context: Json = { document: { getElementById: node, createElement: (tag: string) => {
+    const value = { tag, textContent: '', style: {}, appendChild() {}, setAttribute() {} }; elements.push(value); return value;
+  }, body: {} },
+    getComputedStyle: () => ({ fontSize: '20px' }), ResizeObserver: class { observe() {} }, TelegramWidget: { onEvent() {}, ready() {},
+      openLink: (url: string) => actions.push({ method: 'openLink', url }), openTelegramLink: (url: string) => actions.push({ method: 'openTelegramLink', url }) } };
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/u)![1]!, context);
   assert.equal(context.pwned, undefined);
-  return object(context.D);
+  return { data: object(context.D), elements, actions };
 }
+export function resultPayload(html: string): Json { return resultRuntime(html).data; }
+
+test('external and Telegram anchors use explicit SDK opening once per click, never during rendering', () => {
+  const message = renderMarkdown('[API](https://core.telegram.org/bots/api#editmessagereplymarkup) [Chat](https://t.me/telegram)');
+  const runtime = resultRuntime(resultDocument(card, message, 1, 1, false));
+  assert.deepEqual(runtime.actions, []);
+  const anchors = runtime.elements.filter(node => node.tag === 'a'); assert.equal(anchors.length, 2);
+  let prevented = 0;
+  for (const anchor of anchors) {
+    assert.equal(typeof anchor.onclick, 'function');
+    (anchor.onclick as (event: { preventDefault(): void }) => void)({ preventDefault() { prevented++; } });
+  }
+  assert.equal(prevented, 2);
+  assert.deepEqual(runtime.actions, [{ method: 'openLink', url: 'https://core.telegram.org/bots/api#editmessagereplymarkup' },
+    { method: 'openTelegramLink', url: 'https://t.me/telegram' }]);
+});
 
 test('a complete formatted answer stays in one locally paged document when it fits the payload budget', () => {
   const source = '# Heading\n\n**Bold** and *italic*.\n\n- Item one\n- Item two\n\n```ts\nconst value = "🧪";\n```\n\n' + 'Русский абзац с полным окончанием предложения. '.repeat(60) + 'FINAL_TAIL';
-  const parts = resultParts(card, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
+  const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'Demo' } }, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
+  assert.equal(parts[0]!.params.caption, 'Answer ready · Demo');
   const data = parts.map(part => resultPayload(string(part.params.html)));
   assert.equal(data.map(item => item.text).join(''), renderMarkdown(source).text);
   assert.ok(data.some(item => JSON.stringify(item.entities).includes('bold')));
@@ -54,6 +75,15 @@ test('untrusted text stays data in a fixed reader and every document fits server
     assert.doesNotMatch(html, /innerHTML|fetch\(|WebSocket/u);
   }
   assert.equal(parts.map(part => resultPayload(string(part.params.html)).text).join(''), renderMarkdown(source).text);
+});
+
+test('a synthetic Russian answer retains every character and its external links', () => {
+  const source = readFileSync(new URL('../../test/fixtures/widget-links-answer.md', import.meta.url), 'utf8');
+  const parts = resultParts(card, source, 'a'.repeat(32));
+  const data = parts.map(part => resultPayload(string(part.params.html)));
+  assert.equal(data.map(part => part.text).join(''), renderMarkdown(source).text);
+  assert.ok(data.some(part => JSON.stringify(part.entities).includes('https://core.telegram.org/bots/api#editmessagereplymarkup')));
+  assert.ok(parts.every(part => deflateSync(string(part.params.html), { level: 9 }).length <= 4000));
 });
 
 test('unsupported or long link targets remain readable without exceeding a document limit', () => {
@@ -130,8 +160,8 @@ test('wide tables become complete safe HTML attachments instead of flattened lab
   const html = parts[0]!.document!.html;
   assert.equal((html.match(/<th>/gu) || []).length, 24); assert.equal((html.match(/<td>/gu) || []).length, 24);
   assert.doesNotMatch(html, /<script[\s>]/iu); assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/u);
-  assert.ok(string(parts[0]!.params.caption).includes('✅ Answer ready')); assert.ok(parts[0]!.params.reply_markup);
-  assert.equal(string(parts[0]!.params.caption), '✅ Answer ready\nAttachment 1 · Table');
+  assert.ok(string(parts[0]!.params.caption).includes('Answer ready')); assert.ok(parts[0]!.params.reply_markup);
+  assert.equal(string(parts[0]!.params.caption), 'Answer ready\nAttachment 1 · Table');
   assert.doesNotMatch(string(parts[0]!.params.caption), /» |Part \d+\/\d+/u);
   assert.doesNotMatch(html, /» /u);
 });
