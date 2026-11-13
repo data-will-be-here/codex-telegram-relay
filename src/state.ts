@@ -7,6 +7,7 @@ import { object, string, type Binding, type Json, type MessageMode } from './typ
 import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
 import { type FormattedText } from './format.js';
 import { type ScreenSpec } from './screen-types.js';
+import { type UpdateCache } from './updates.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
@@ -162,6 +163,23 @@ export class State {
   setViewMode(view: ViewMode): void {
     if (!['classic', 'widgets'].includes(view)) throw new Error('Invalid relay view.');
     this.db.prepare("INSERT INTO settings VALUES('view',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(view);
+  }
+  updateCheck(): unknown {
+    const value = this.db.prepare("SELECT value FROM settings WHERE key='releaseCheck'").get()?.value;
+    if (typeof value !== 'string' || value.length > 1000) return;
+    try { return JSON.parse(value) as unknown; } catch { return; }
+  }
+  saveUpdateCheck(cache: UpdateCache): void {
+    this.db.prepare("INSERT INTO settings VALUES('releaseCheck',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(cache));
+  }
+  enqueueUpdateNotice(version: string, text: string, markup: Json): void {
+    if (this.db.prepare("SELECT value FROM settings WHERE key='releaseNotice'").get()?.value === version) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.enqueueOwnerNotice(`notice/release/${version}`, null, text, markup);
+      this.db.prepare("INSERT INTO settings VALUES('releaseNotice',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(version);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   widgetCards(threadId?: string): WidgetDelivery[] {
     return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => this.decodeWidget(row)!);

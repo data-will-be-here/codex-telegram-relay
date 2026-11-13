@@ -127,6 +127,12 @@ Stop the relay with Ctrl+C, keeping Codex and the private relay state directory.
 
 Use one relay process per private state directory. Version 0.1.13 adds durable rich-message delivery progress; older versions do not understand that progress. Do not downgrade while rich deliveries are pending or unresolved.
 
+### Startup update notices (development version)
+
+Available in `dev`, after published v0.1.21. On startup, a background check reads this repository's public GitHub releases, including our public previews. When a newer numeric version is available, the terminal shows its release link and the bot sends one owner-only notice with **View release** and **How to update** buttons. It installs nothing and does not stop running tasks. Follow the upgrade instructions above when convenient.
+
+The request has a five-second timeout and a 512 KiB response cap; offline/rate-limited checks do not interrupt startup or messaging. A private 15-minute cache prevents repeated requests during frequent restarts, and the same release is announced in the bot only once across restarts. No bot token, project paths or conversation contents are sent to GitHub. Use `npm start -- --no-update-check` to skip the check for that launch. The relay uses its installed package version and published `vMAJOR.MINOR.PATCH` tags; draft releases and other tag formats are ignored.
+
 Version 0.1.14 enables live rich previews by default. After restarting the relay, use `/stream off` for completed messages only, or `/stream on` to restore streaming. Pairing and existing topic bindings are preserved; Codex sessions do not need restarting.
 
 Version 0.1.15 synchronizes the command menu for your paired owner's chat during startup. Restart the relay after upgrading; no new pairing is required. The v0.1.20 UI uses English throughout; startup also replaces the legacy Russian command descriptions with English. Menu updates do not change who can access the relay.

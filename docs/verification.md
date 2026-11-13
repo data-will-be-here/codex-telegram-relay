@@ -1,5 +1,11 @@
 # Verification record
 
+## Startup update notices (development after v0.1.21)
+
+The optional background checker reads only this public repository's published GitHub releases, including preview releases with numeric tags. Eight focused tests cover numeric comparison, drafts/invalid tags, canonical notification URLs, positive/negative caching, HTTP/offline failures, bounded response cancellation, shutdown, invalid cache data and persistent one-per-version owner-root notification deduplication after outbox pruning. It neither starts a model nor invokes installation commands. The startup flag skips the entire check; the installed version is read from package metadata.
+
+Clean install/build, typecheck, production audit (zero vulnerabilities), the 37-file distribution allowlist/dry-run and all 41 local documentation links passed. Full local suite: 447 discovered, 443 passed, four skipped, zero failures. A read-only live GitHub probe selected published preview v0.1.21 for an emulated v0.1.20 install, reused its cache and offered nothing for the current version; its notification store was in memory and sent no Telegram messages. Earlier live probes returned unavailable metadata, while a separate HTTP probe and the final checker probe succeeded; network checks are deliberately best-effort, bounded and independent of relay operation. This feature is in development, not retroactively part of published v0.1.21.
+
 ## Release v0.1.21 preparation
 
 Package/lockfile and native client metadata agree on 0.1.21. Fresh installations default to Widgets; upgrades preserve saved choices, implicit Classic and legacy opt-ins. Dedicated restart/migration tests cover this distinction; Classic protocol fixtures now select their view explicitly. Both READMEs install tag v0.1.21 and describe themed reviews/settings, explicit relay-only approval recovery, stable Markdown readers, current-turn headings and short project-only captions. Stale claims about missing captions and permanent session-name headings were corrected. Upgrade instructions cover per-turn labels and persisted review/settings plans while preserving pairing and topics; rollback requires a compatible private-state backup.

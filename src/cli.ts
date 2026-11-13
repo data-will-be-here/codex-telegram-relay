@@ -4,7 +4,7 @@ import { emitKeypressEvents } from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { realpathSync, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { realpathSync, existsSync, lstatSync, mkdirSync, statSync, readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
@@ -15,6 +15,7 @@ import { Files, type FileRequest } from './files.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
 import { withProjectHeader } from './format.js';
+import { checkForUpdates } from './updates.js';
 
 function binaryFlag(args: string[]): string | undefined {
   const index = args.indexOf('--codex-bin');
@@ -205,6 +206,10 @@ async function start(args: string[]): Promise<void> {
   })();
   // Optional UI settings must not hold up native attachment or Telegram update handling.
   const menu = commandMenu(telegram, config.ownerId);
+  const updates = args.includes('--no-update-check') ? Promise.resolve() : Promise.resolve().then(() => {
+    const installed = string(object(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))).version);
+    return checkForUpdates(state, installed, { signal: uploadStop.signal });
+  }).catch(() => { /* Optional release metadata and notices must not interrupt startup or messaging. */ });
   try {
     while (!stopping) {
       const codex = new CodexClient(); current = codex;
@@ -287,7 +292,7 @@ async function start(args: string[]): Promise<void> {
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {
-    stopping = true; uploadStop.abort(); current?.close(); await creations; await uploads; files.close(); await sender; await menu; state.close();
+    stopping = true; uploadStop.abort(); current?.close(); await creations; await uploads; files.close(); await sender; await menu; await updates; state.close();
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
 }
@@ -322,7 +327,7 @@ async function sendFile(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const command = args[0] === '--codex-bin' ? 'start' : args[0] ?? 'start';
+  const command = ['--codex-bin', '--no-update-check'].includes(args[0] ?? '') ? 'start' : args[0] ?? 'start';
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);
@@ -414,6 +419,7 @@ async function main(): Promise<void> {
   console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
   console.log('\nFile export (local opt-in):\nfiles enable|disable   Allow or revoke outgoing files for this installation\nfiles                 Show export setting\nsend-file PATH        Send one project file to its session topic\n  --session ID        Exact ID or unique prefix (default: CODEX_THREAD_ID, then unique project)\n  --as document       Preserve any file as a document; auto sends MP4 as video\n  --caption TEXT      Optional literal caption\n  --request-id ID     Stable caller ID; reuse it for the same attempt\n  --no-wait           Return queued receipt immediately\nfiles status ID       Inspect durable result; uncertain uploads are never auto-replayed');
   console.log('\nNew sessions work out of the box. Optional customization (restart afterwards):\nnew                         Show effective creation locations\nnew enable --project PATH   Add a project for /new\nnew enable --scratch-root PATH  Override the conversations directory\nnew disable                 Disable new creation, preserving existing conversations');
+  console.log('\nStartup update notices: public GitHub releases are checked in the background.\nstart --no-update-check      Skip the optional release check for this launch');
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

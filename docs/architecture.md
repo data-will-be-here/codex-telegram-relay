@@ -6,6 +6,8 @@ Relay-generated controls, notices, approval-preview warnings and scratch-workspa
 
 ## Modules
 
+- `updates.ts`: optional startup-only GitHub release metadata. It accepts published numeric version tags, including public-preview releases, compares version components numerically, bounds the unauthenticated fixed-endpoint request to five seconds/512 KiB and caches success/failure for 15 minutes in private settings. Notification links are constructed from the fixed repository and validated tag, never remote HTML/asset URLs. A keyed owner-root notice and persistent last-announced version are saved atomically, preserving deduplication after outbox retention. It does not invoke installation commands or native APIs. Shutdown cancels the check and awaits it before closing state; `--no-update-check` skips it entirely.
+
 - `codex.ts`: native executable, raw proxy WebSocket handshake, JSON-RPC correlation, pending-request lifecycle and native session discovery. The transport never falls back to a new daemon and never shells out through cmd.exe.
 - `bridge.ts`: project/topic bindings, owner authentication, completion filtering, input routing, questions and explicit one-time approvals. It does not own native sandbox policy.
 - `subagents.ts`: bounded live ancestry checks that route spawned descendants' approvals to an attached interactive root while retaining the executing child's identity.
