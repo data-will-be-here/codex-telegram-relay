@@ -4,7 +4,7 @@ const REPOSITORY = 'https://github.com/data-will-be-here/codex-telegram-relay';
 const RELEASES = 'https://api.github.com/repos/data-will-be-here/codex-telegram-relay/releases?per_page=20';
 const CHECK_INTERVAL = 15 * 60_000;
 const MAX_RESPONSE_BYTES = 512 * 1024;
-interface Release { tag: string; version: string; }
+export interface Release { tag: string; version: string; }
 export interface UpdateCache { checkedAt: number; release: Release | null; }
 export interface UpdateStore {
   updateCheck(): unknown;
@@ -20,7 +20,7 @@ function compare(a: number[], b: number[]): number {
   for (let index = 0; index < 3; index++) if (a[index] !== b[index]) return a[index]! - b[index]!;
   return 0;
 }
-function release(value: unknown): Release | undefined {
+export function parseRelease(value: unknown): Release | undefined {
   const candidate = object(value); const tag = string(candidate.tag); const parsed = version(tag);
   return parsed && candidate.version === parsed.join('.') ? { tag, version: parsed.join('.') } : undefined;
 }
@@ -53,15 +53,15 @@ async function readReleases(response: Response): Promise<unknown> {
 
 /** Optional startup metadata only: no native writes, installation commands or arbitrary release URLs. */
 export async function checkForUpdates(store: UpdateStore, installed: string, options: {
-  signal?: AbortSignal; fetch?: typeof fetch; now?: () => number; log?: (message: string) => void;
+  signal?: AbortSignal; fetch?: typeof fetch; now?: () => number; log?: (message: string) => void; notify?: boolean;
 } = {}): Promise<Release | undefined> {
   const current = version(installed); if (!current || options.signal?.aborted) return;
   const now = (options.now ?? Date.now)(); const saved = object(store.updateCheck());
   let latest: Release | null;
   if (typeof saved.checkedAt === 'number' && Number.isSafeInteger(saved.checkedAt) &&
       now >= saved.checkedAt && now - saved.checkedAt < CHECK_INTERVAL &&
-      (saved.release === null || release(saved.release))) {
-    latest = release(saved.release) ?? null;
+      (saved.release === null || parseRelease(saved.release))) {
+    latest = parseRelease(saved.release) ?? null;
   } else {
     latest = null;
     try {
@@ -79,7 +79,7 @@ export async function checkForUpdates(store: UpdateStore, installed: string, opt
   const url = `${REPOSITORY}/releases/tag/${encodeURIComponent(latest.tag)}`;
   const installedVersion = current.join('.');
   (options.log ?? console.log)(`Relay update available: v${latest.version} (installed v${installedVersion}).\n${url}`);
-  store.enqueueUpdateNotice(latest.version,
+  if (options.notify !== false) store.enqueueUpdateNotice(latest.version,
     `Codex Telegram Relay update available\nInstalled: v${installedVersion}\nAvailable: v${latest.version}\n\nOpen the release notes and follow the update instructions.`,
     { inline_keyboard: [[{ text: 'View release', url }, { text: 'How to update', url: `${REPOSITORY}#upgrade-an-existing-installation` }]] });
   return latest;

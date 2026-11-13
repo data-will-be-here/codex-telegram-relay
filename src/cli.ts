@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { realpathSync, existsSync, lstatSync, mkdirSync, statSync, readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
 import { Drafts } from './drafts.js';
@@ -140,7 +141,15 @@ async function doctor(args: string[]): Promise<void> {
 async function start(args: string[]): Promise<void> {
   const home = dataDirectory();
   if (!configExists(home)) throw new Error('No relay configuration found. Run setup to pair your bot first.');
+  const installRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const { assertNoIncompleteUpdate } = await import('./self-update.js');
+  assertNoIncompleteUpdate(installRoot);
   protectWindowsDirectory(home);
+  const interactiveUpdate = Boolean(stdin.isTTY && stdout.isTTY && !args.includes('--no-update-check'));
+  if (interactiveUpdate) {
+    const { consoleUpdate } = await import('./console-update.js');
+    if (await consoleUpdate(installRoot, home, args)) return;
+  }
   const override = binaryFlag(args);
   const { config, token, binaryChanged } = loadConfig(home, { recoverBinary: true, ...(override ? { codexBinary: override } : {}) });
   const telegram = new TelegramClient(token);
@@ -208,7 +217,7 @@ async function start(args: string[]): Promise<void> {
   const menu = commandMenu(telegram, config.ownerId);
   const updates = args.includes('--no-update-check') ? Promise.resolve() : Promise.resolve().then(() => {
     const installed = string(object(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))).version);
-    return checkForUpdates(state, installed, { signal: uploadStop.signal });
+    return checkForUpdates(state, installed, { signal: uploadStop.signal, ...(interactiveUpdate ? { log: () => {} } : {}) });
   }).catch(() => { /* Optional release metadata and notices must not interrupt startup or messaging. */ });
   try {
     while (!stopping) {
@@ -419,7 +428,7 @@ async function main(): Promise<void> {
   console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
   console.log('\nFile export (local opt-in):\nfiles enable|disable   Allow or revoke outgoing files for this installation\nfiles                 Show export setting\nsend-file PATH        Send one project file to its session topic\n  --session ID        Exact ID or unique prefix (default: CODEX_THREAD_ID, then unique project)\n  --as document       Preserve any file as a document; auto sends MP4 as video\n  --caption TEXT      Optional literal caption\n  --request-id ID     Stable caller ID; reuse it for the same attempt\n  --no-wait           Return queued receipt immediately\nfiles status ID       Inspect durable result; uncertain uploads are never auto-replayed');
   console.log('\nNew sessions work out of the box. Optional customization (restart afterwards):\nnew                         Show effective creation locations\nnew enable --project PATH   Add a project for /new\nnew enable --scratch-root PATH  Override the conversations directory\nnew disable                 Disable new creation, preserving existing conversations');
-  console.log('\nStartup update notices: public GitHub releases are checked in the background.\nstart --no-update-check      Skip the optional release check for this launch');
+  console.log('\nStartup updates: interactive Git installations offer Update now? [Y/n].\nBackground launches only show update notices; installation requires terminal consent.\nstart --no-update-check      Skip the release check and prompt for this launch');
 }
 
 main().catch(error => { console.error(string(object(error).message) || 'Relay failed.'); process.exitCode = 1; });

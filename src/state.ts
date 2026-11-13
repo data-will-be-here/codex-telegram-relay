@@ -51,6 +51,7 @@ export interface NewSessionOperation {
 
 export class State {
   private db: DatabaseSync;
+  private databaseClosed = false;
   private lock: string;
   private lockValue: string;
   constructor(readonly home: string) {
@@ -168,9 +169,9 @@ export class State {
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
   }
-  close(): void {
-    this.db.close();
-    if (existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
+  close(options: { retainLock?: boolean } = {}): void {
+    if (!this.databaseClosed) { this.db.close(); this.databaseClosed = true; }
+    if (!options.retainLock && existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
   }
   viewMode(): ViewMode { return this.db.prepare("SELECT value FROM settings WHERE key='view'").get()?.value === 'widgets' ? 'widgets' : 'classic'; }
   setViewMode(view: ViewMode): void {

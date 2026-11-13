@@ -16,6 +16,15 @@ class Store implements UpdateStore {
 }
 const response = (data: unknown): Response => new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json' } });
 
+test('interactive lookup can defer the bot notice until the user declines or installation fails', async () => {
+  const store = new Store(); let requests = 0;
+  const options = { fetch: async () => { requests++; return response([published('v0.1.22')]); }, log: () => {} };
+  assert.equal((await checkForUpdates(store, '0.1.21', { ...options, notify: false }))?.version, '0.1.22');
+  assert.equal(store.notices.length, 0);
+  await checkForUpdates(store, '0.1.21', options);
+  assert.equal(store.notices.length, 1); assert.equal(requests, 1);
+});
+
 test('published previews are compared numerically and only canonical repository links reach the owner notice', async () => {
   const store = new Store(); const logs: string[] = []; let calls = 0;
   const update = await checkForUpdates(store, '0.1.9', { log: text => logs.push(text), fetch: async (url, init) => {

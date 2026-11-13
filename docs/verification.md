@@ -1,5 +1,11 @@
 # Verification record
 
+## Interactive startup self-update (development, 2026-11-13)
+
+Interactive Git installations offer an English `Update now? [Y/n]` before native attachment and Telegram polling. Enter/yes accepts, no continues, EOF/Ctrl+C cancels; headless starts remain notification-only and `--no-update-check` skips both lookup and prompt. Twelve updater regressions cover actual Git fixtures, staged npm/build preparation, SQLite/WAL and private configuration backup, retained relay locking, local commits and dirty checkouts, changing tags, untracked collisions, activation rollback, interrupted-update startup protection, consent orchestration and fresh-process argument forwarding. A local fixture also uses the production command runner and real npm without network, shell execution or changing this installation. The release lookup can defer its bot notice while the terminal choice is pending.
+
+Final Windows suite: 500 discovered, 496 passed, four skipped, zero failures; typecheck, build, package allowlist and whitespace checks passed. These fixtures do not install a GitHub release into the live checkout or prove a real update on macOS/Linux; the existing six-job OS/Node CI matrix runs the same regressions. Private backups are retained, and no old database is automatically restored after a newer runtime has run.
+
 ## First-part final reply pins (development, 2026-11-13)
 
 Final deliveries and their known text backups admit one quiet pin for the first positive receipt, using the canonical final key. Rich-part receipt/admission is atomic; delayed plain-text receipt persistence captures the first ID by value. Thirteen new regressions cover multipart widget/native/rich/document delivery, service-message deletion without unpin, Classic replies, excluding status/text copies, unknown first/later result sends and backup targeting, pin outcome uncertainty without reply uncertainty, 429 retry, local persistence failures, binding replacement and SQLite reopen without pin replay. Queued pin context retains the original owner/thread/topic/cwd rather than following a rewritten recovery route. Pin jobs have lower priority than normal messages and do not block clear on their own.
