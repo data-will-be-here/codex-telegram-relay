@@ -51,6 +51,7 @@ test('a complete formatted answer stays in one locally paged document when it fi
   const source = '# Heading\n\n**Bold** and *italic*.\n\n- Item one\n- Item two\n\n```ts\nconst value = "🧪";\n```\n\n' + 'Русский абзац с полным окончанием предложения. '.repeat(60) + 'FINAL_TAIL';
   const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'Demo' } }, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
   assert.equal(parts[0]!.params.caption, 'Answer ready · Demo');
+  assert.equal(resultPayload(string(parts[0]!.params.html)).status, 'Ready');
   const data = parts.map(part => resultPayload(string(part.params.html)));
   assert.equal(data.map(item => item.text).join(''), renderMarkdown(source).text);
   assert.ok(data.some(item => JSON.stringify(item.entities).includes('bold')));
@@ -61,6 +62,21 @@ test('a complete formatted answer stays in one locally paged document when it fi
   assert.ok(parts.at(-1)!.params.reply_markup);
   assert.match(string(parts[0]!.params.html), /id="nav"/u);
   assert.match(string(parts[0]!.params.html), /pointerup/u);
+});
+
+test('approval layout removes only outside-code blank space and preserves native fallback text', () => {
+  const command = 'printf "first\\nsecond"\n\n# intentional blank line\n \t';
+  const message = renderMarkdown('**Command**\n\n```\n' + command + '\n```\n\n**Scope**\nThis operation.');
+  const html = resultDocument(card, message, 1, 1, true, { kind: 'approval', title: 'Command approval' });
+  const compact = resultPayload(html); const text = string(compact.text);
+  const code = (compact.entities as Json[]).find(entity => entity.type === 'pre')!;
+  assert.equal(text.slice(Number(code.offset), Number(code.offset) + Number(code.length)), command);
+  assert.equal(text[Number(code.offset) - 1], 'd');
+  assert.equal(text[Number(code.offset) + Number(code.length)], 'S');
+  assert.match(string(compact.text), /# intentional blank line/u); assert.match(message.text, /Command\n\n/u);
+  assert.match(html, /line-height:1\.3/u);
+  const ordinary = resultPayload(resultDocument(card, message, 1, 1));
+  assert.equal(ordinary.text, message.text, 'Final answers retain their original paragraph spacing');
 });
 
 test('untrusted text stays data in a fixed reader and every document fits server budgets', () => {

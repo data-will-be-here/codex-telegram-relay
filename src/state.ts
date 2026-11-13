@@ -11,7 +11,7 @@ import { type UpdateCache } from './updates.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
-const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
+const SETTLED_WIDGET_SQL = "(pinStatus<>'sending' AND everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
 export interface RichDeliveryPart {
   screen?: ScreenSpec;
@@ -129,6 +129,15 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(widget_answers)').all().some(column => column.name === 'multipartSafe')) this.db.exec('ALTER TABLE widget_answers ADD COLUMN multipartSafe INTEGER NOT NULL DEFAULT 0');
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
+      if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'pinStatus')) {
+        this.db.exec("ALTER TABLE widget_cards ADD COLUMN pinStatus TEXT NOT NULL DEFAULT 'none'");
+        this.db.exec(`UPDATE widget_cards SET pinStatus='pending' WHERE delivery='active' AND messageId>0
+          AND json_extract(payload,'$.view')='widgets' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL
+          AND json_extract(payload,'$.snapshot.status') IN ('working','approval','answer')`);
+      }
+      if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'pinRetryAt'))
+        this.db.exec('ALTER TABLE widget_cards ADD COLUMN pinRetryAt INTEGER NOT NULL DEFAULT 0');
+      this.db.exec("UPDATE widget_cards SET pinStatus='uncertain' WHERE pinStatus='sending'");
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
       // New installations start with Widgets; upgrades retain explicit or implicit Classic and legacy opt-ins.
       this.db.prepare("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN ?=1 OR EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END").run(Number(!existingState));
@@ -216,12 +225,22 @@ export class State {
     }
     const payload: WidgetCard = { id: card.id, token: card.token, generation: card.generation, binding: card.binding, turnId: card.turnId,
       view: card.view, revision: card.revision, createdAt: card.createdAt, snapshot: card.snapshot };
-    this.db.prepare('INSERT INTO widget_cards(id,threadId,turnId,payload) VALUES(?,?,?,?) ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload')
+    this.db.prepare("INSERT INTO widget_cards(id,threadId,turnId,payload,pinStatus) VALUES(?,?,?,?,'pending') ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload")
       .run(card.id, card.binding.threadId, card.turnId, JSON.stringify(payload));
     return true;
   }
   claimWidget(id: string, editing: boolean): boolean {
     return !!this.db.prepare('UPDATE widget_cards SET delivery=? WHERE id=? AND delivery=?').run(editing ? 'editing' : 'sending', id, editing ? 'active' : 'new').changes;
+  }
+  nextWidgetPin(generation: string, now: number): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare(`SELECT * FROM widget_cards WHERE pinStatus='pending' AND pinRetryAt<=? AND messageId>0 AND delivery='active'
+      AND json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' ORDER BY lastSentAt LIMIT 1`).get(now, generation));
+  }
+  claimWidgetPin(id: string, messageId: number): boolean {
+    return !!this.db.prepare("UPDATE widget_cards SET pinStatus='sending' WHERE id=? AND messageId=? AND pinStatus='pending'").run(id, messageId).changes;
+  }
+  widgetPinResult(id: string, status: 'pending' | 'pinned' | 'failed' | 'uncertain' | 'cancelled', retryAt = 0): void {
+    this.db.prepare('UPDATE widget_cards SET pinStatus=?,pinRetryAt=? WHERE id=?').run(status, retryAt, id);
   }
   widgetDelivered(id: string, revision: number, messageId: number, now: number): void {
     this.db.prepare("UPDATE widget_cards SET delivery=CASE WHEN delivery='retired' THEN 'retired' ELSE 'active' END,messageId=?,sentRevision=MAX(sentRevision,?),retryAt=0,lastSentAt=?,failure=NULL WHERE id=?")

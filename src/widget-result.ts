@@ -90,10 +90,37 @@ export function fitsDocument(html: string): boolean {
   return Buffer.byteLength(html) <= 32_768 && deflateSync(html, { level: 9 }).length <= MAX_COMPRESSED_BYTES;
 }
 
+/** Block code already creates a visual line break. Remove adjacent presentation LFs, never code LFs. */
+function reviewSpacing(message: FormattedText): FormattedText {
+  const blocks = message.entities.filter(entity => entity.type === 'pre').sort((a, b) => a.offset - b.offset);
+  const ranges: [number, number][] = [];
+  blocks.forEach((block, index) => {
+    let start = block.offset; const floor = index ? blocks[index - 1]!.offset + blocks[index - 1]!.length : 0;
+    while (start > floor && message.text[start - 1] === '\n') start--;
+    if (start < block.offset) ranges.push([start, block.offset]);
+    const end = block.offset + block.length; let after = end;
+    const ceiling = blocks[index + 1]?.offset ?? message.text.length;
+    while (after < ceiling && message.text[after] === '\n') after++;
+    if (after > end) ranges.push([end, after]);
+  });
+  const merged: [number, number][] = [];
+  for (const range of ranges.sort((a, b) => a[0] - b[0])) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]); else merged.push([...range]);
+  }
+  const position = (offset: number): number => offset - merged.reduce((sum, [start, end]) => sum + Math.max(0, Math.min(offset, end) - start), 0);
+  let text = ''; let at = 0;
+  for (const [start, end] of merged) { text += message.text.slice(at, start); at = end; }
+  text += message.text.slice(at);
+  return { text, entities: message.entities.map(entity => ({ ...entity, offset: position(entity.offset), length: position(entity.offset + entity.length) - position(entity.offset) })) };
+}
+
 export function resultDocument(card: WidgetCard, message: FormattedText, part: number, total: number, paged = true, screen?: ScreenOptions): string {
+  const review = screen?.kind === 'approval';
+  const content = review ? reviewSpacing(message) : message;
   const data = { context: projectHeader(card.binding.cwd, displayName(card.binding), card.binding.projectLabel).replace(/^» /u, ''),
-    status: screen?.title ?? (card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Answer ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted'),
-    part, total, text: message.text, entities: message.entities, ...(screen?.meters?.length ? { meters: screen.meters.slice(0, 2) } : {}) };
+    status: screen?.title ?? (card.kind === 'status' ? 'Current status' : card.snapshot.status === 'done' ? 'Ready' : card.snapshot.status === 'failed' ? 'Turn failed' : 'Turn interrupted'),
+    part, total, text: content.text, entities: content.entities, ...(screen?.meters?.length ? { meters: screen.meters.slice(0, 2) } : {}) };
   const live = screen ? String.raw`TelegramWidget.onEvent('chatDataChanged',function(){try{var p=JSON.parse(TelegramWidget.chatData||'null');if(!p||p.v!==1)return;if(p.title){D.status=p.title;if(D.part===1)el('status').textContent=p.title}` +
     (screen.editable ? String.raw`if(typeof p.text==='string'){D.text=p.text;D.entities=[];points=[0];at=0;Array.from(D.text).forEach(function(c){at+=c.length;points.push(at)})}` : '') + String.raw`fit()}catch(e){}});` : '';
   const meters = screen?.meters?.length ? String.raw`D.meters.forEach(function(m){var row=document.createElement('div');row.textContent=m.label+' · '+m.remaining+'%';var track=document.createElement('div'),fill=document.createElement('div');track.className='meter';fill.style.width=m.remaining+'%';track.appendChild(fill);el('meters').appendChild(row);el('meters').appendChild(track)});` : '';
@@ -105,7 +132,7 @@ header{display:flex;align-items:center;gap:.6em;margin:.65em 0}.badge{width:2em;
 nav{display:flex;align-items:center;justify-content:space-between;gap:.2em;margin-top:.65em}button{font-size:.85em}#page{font-size:.75em;color:var(--tg-theme-hint-color)}.large header{flex-wrap:wrap;margin:.3em 0}.large .badge{width:1.5em;height:1.5em;font-size:.55em}.large h3{font-size:${screen ? 'min(.7em,24px)' : '.7em'}}.large nav{margin-top:.3em}.large button{font-size:.55em;padding:.1em .3em}.large #page{font-size:.3em}
 ${paged ? '' : '.flow header{font-size:min(1em,24px);flex-wrap:wrap}.flow h3{flex:1;font-size:min(1.05em,20px)}.flow .badge{width:1.6em;height:1.6em}.flow #content{overflow:visible;touch-action:auto}'}
 ${screen?.meters?.length ? '#meters{font-size:min(.8em,16px);overflow-wrap:anywhere}.meter{height:4px;background:var(--tg-theme-secondary-bg-color);margin:.3em 0 .6em;border-radius:3px}.meter div{height:100%;background:var(--tg-theme-link-color);border-radius:3px}.large #meters{display:none}' : ''}
-</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${screen || card.kind === 'status' ? 'status' : card.snapshot.status}">${screen ? screen.kind === 'approval' ? '!' : screen.kind === 'question' ? '?' : '●' : card.kind === 'status' ? '●' : card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}${screen?.meters?.length ? '<section id="meters"></section>' : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${meters}${paged ? READER : FLOW}${live}</script></body></html>`;
+${review ? '#content,#measure{line-height:1.3}.pre{padding:.25em .5em}header{margin:.35em 0}.topline{margin-bottom:.35em}' : ''}</style></head><body><main id="card"><div class="topline"><div id="context" class="context"></div><span id="part"></span></div>${part === 1 ? `<header><span class="badge ${screen || card.kind === 'status' ? 'status' : card.snapshot.status}">${screen ? screen.kind === 'approval' ? '!' : screen.kind === 'question' ? '?' : '●' : card.kind === 'status' ? '●' : card.snapshot.status === 'done' ? '✓' : card.snapshot.status === 'failed' ? '!' : '■'}</span><h3 id="status"></h3></header>` : ''}${screen?.meters?.length ? '<section id="meters"></section>' : ''}<section id="content"></section>${paged ? '<nav id="nav"><button id="back" aria-label="Previous page">‹</button><span id="page"></span><button id="next" aria-label="Next page">›</button></nav>' : ''}</main>${paged ? '<section id="measure" aria-hidden="true"></section>' : ''}<script>var D=${payload(data)};${meters}${paged ? READER : FLOW}${live}</script></body></html>`;
 }
 
 type ResultDraft = { kind: 'widget'; message: FormattedText } | { kind: 'rich'; part: RichPart } | { kind: 'document'; html: string; fallback: string };

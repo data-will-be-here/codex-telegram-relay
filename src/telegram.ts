@@ -141,6 +141,37 @@ export class Outbox {
     this.state.cancelDelivery(delivery.id);
     throw new DeliveryCancelled();
   }
+  /** Pinning has its own receipt: failures never invalidate an already delivered activity card. */
+  private async pinWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
+    const card = this.state.nextWidgetPin(guard.generation, Date.now());
+    if (!card || card.messageId === null) return false;
+    const context = { topicId: card.binding.topicId, projectCwd: card.binding.cwd, sourceThreadId: card.binding.threadId, ownerNotice: false };
+    const valid = (): boolean => {
+      const binding = this.state.binding(card.binding.threadId);
+      return this.allowed(context) && binding?.topicId === card.binding.topicId && binding.cwd === card.binding.cwd &&
+        this.state.widgetCard(card.binding.threadId, card.turnId)?.generation === guard.generation;
+    };
+    if (!valid()) { this.state.widgetPinResult(card.id, 'cancelled'); return true; }
+    try {
+      if (!await guard.allowed(card)) { this.state.widgetPinResult(card.id, 'pending', Date.now() + 5000); return false; }
+    } catch { this.state.widgetPinResult(card.id, 'pending', Date.now() + 5000); return false; }
+    if (!valid()) { this.state.widgetPinResult(card.id, 'cancelled'); return true; }
+    if (!this.state.claimWidgetPin(card.id, card.messageId)) return false;
+    let status: 'pending' | 'pinned' | 'failed' | 'uncertain' = 'pinned'; let retryAt = 0;
+    try {
+      const result = await this.telegram.call('pinChatMessage', { chat_id: this.config.ownerId, message_id: card.messageId, disable_notification: true });
+      if (result !== true) throw new TelegramError('Pin receipt was not confirmed.', 0);
+    } catch (error) {
+      if (error instanceof TelegramError && (error.notSent || error.status === 429)) {
+        status = 'pending'; retryAt = Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000;
+      } else {
+        status = error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain';
+        console.error(`Activity card pin unavailable (${error instanceof TelegramError ? error.status : 0}); card delivery is unaffected.`);
+      }
+    }
+    this.persistWidget(`pin/${card.id}`, () => this.state.widgetPinResult(card.id, status, retryAt));
+    return true;
+  }
   /** Durable low-priority widget queue, serialized by the same sender as ordinary output. */
   async flushWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
     const now = Date.now();
@@ -152,7 +183,10 @@ export class Outbox {
       catch { this.widgetNextAt = now + 3000; return false; }
     }
     let card = this.state.nextWidgetDelivery(guard.generation, now);
-    if (!card) return false;
+    if (!card) {
+      this.widgetSending = true;
+      try { return await this.pinWidget(guard); } finally { this.widgetSending = false; }
+    }
     this.widgetSending = true;
     try {
       const context = { topicId: card.binding.topicId, projectCwd: card.binding.cwd, sourceThreadId: card.binding.threadId, ownerNotice: false };
@@ -212,6 +246,7 @@ export class Outbox {
           });
         }
       }
+      await this.pinWidget(guard);
       return true;
     } finally { this.widgetSending = false; }
   }

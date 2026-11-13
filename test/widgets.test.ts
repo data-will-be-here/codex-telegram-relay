@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { Bridge } from '../src/bridge.js';
 import { Outbox, TelegramClient, TelegramError } from '../src/telegram.js';
 import { State } from '../src/state.js';
@@ -28,6 +29,92 @@ async function setup() {
     flush: () => outbox.flushWidget(f.bridge.widgetDelivery()),
     close: () => { Date.now = realNow; f.close(); } };
 }
+
+test('a confirmed Working card is quietly pinned once and stays pinned after completion', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); await f.flush();
+    const card = f.state.widgetCard('thread-a', 'live')!;
+    const pins = () => f.telegram.calls.filter(call => call.method === 'pinChatMessage');
+    assert.deepEqual(pins().map(call => call.params), [{ chat_id: 42, message_id: card.messageId, disable_notification: true }]);
+    assert.ok(f.telegram.calls.findIndex(call => call.method === 'sendWidget') < f.telegram.calls.findIndex(call => call.method === 'pinChatMessage'));
+    await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'tool', type: 'commandExecution', command: 'echo synthetic' } });
+    f.advance(); await f.flush();
+    await f.bridge.notification('turn/completed', { threadId: 'thread-a', turn: { id: 'live', status: 'completed' } });
+    f.advance(); await f.flush();
+    assert.equal(pins().length, 1); assert.equal(f.telegram.calls.some(call => /unpin/iu.test(call.method)), false);
+    assert.deepEqual(f.codex.writes, []);
+  } finally { f.close(); }
+});
+
+for (const failure of ['rejected', 'unknown', 'missing-receipt'] as const) test(`pin ${failure} does not disable Widgets or repeat a pin on later updates`, async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'pinChatMessage') {
+        if (failure === 'missing-receipt') return false;
+        throw new TelegramError('Synthetic pin failure', failure === 'rejected' ? 400 : 0);
+      }
+      return result;
+    };
+    await f.start(); f.advance(); await f.flush();
+    assert.equal(f.state.viewMode(), 'widgets'); assert.equal(f.state.widgetCard('thread-a', 'live')!.delivery, 'active');
+    await f.bridge.notification('item/started', { threadId: 'thread-a', turnId: 'live', item: { id: 'next', type: 'commandExecution', command: 'echo synthetic' } });
+    f.advance(6000); await new Outbox(f.state, f.telegram, f.bridge.config, 0).flushWidget(f.bridge.widgetDelivery());
+    assert.equal(f.telegram.calls.filter(c => c.method === 'pinChatMessage').length, 1);
+    assert.ok(f.telegram.calls.some(c => c.method === 'editMessageWidgetData'));
+    assert.equal(f.state.nextWidgetPin(f.bridge.widgetDelivery().generation, Date.now()), undefined);
+  } finally { f.close(); }
+});
+
+for (const rateLimit of [false, true]) test(`a proven unsent pin retries after ${rateLimit ? 'retry_after' : 'three seconds'} without another card`, async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); const call = f.telegram.call.bind(f.telegram); let tries = 0;
+    f.telegram.call = async (method, params = {}) => {
+      const result = await call(method, params);
+      if (method === 'pinChatMessage' && tries++ === 0) throw new TelegramError('Synthetic deferred pin', rateLimit ? 429 : 0, rateLimit ? 5 : undefined, !rateLimit);
+      return result;
+    };
+    await f.start(); f.advance(); await f.flush(); f.advance(2000); await f.flush(); assert.equal(tries, 1);
+    f.advance(rateLimit ? 3000 : 1000); await f.flush(); assert.equal(tries, 2);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'sendWidget').length, 1); assert.equal(f.state.viewMode(), 'widgets');
+  } finally { f.close(); }
+});
+
+test('an unconfirmed activity-card send cannot trigger a pin', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params = {}) => { const result = await call(method, params); if (method === 'sendWidget') throw new TelegramError('Lost card receipt', 0); return result; };
+    await f.start(); f.advance(); await f.flush();
+    assert.equal(f.telegram.calls.some(c => c.method === 'pinChatMessage'), false);
+  } finally { f.close(); }
+});
+
+test('pin authorization rechecks the original topic after its native await', async () => {
+  const f = await setup();
+  try {
+    f.state.setViewMode('widgets'); await f.start(); f.advance(); const guard = f.bridge.widgetDelivery(); let checks = 0;
+    guard.allowed = async () => { if (++checks === 2) f.state.installTopic('thread-a', 999, f.projectA, 'Moved'); return true; };
+    await f.outbox.flushWidget(guard);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'sendWidget').length, 1);
+    assert.equal(f.telegram.calls.some(c => c.method === 'pinChatMessage'), false);
+  } finally { f.close(); }
+});
+
+test('a crash during pinning stays uncertain after SQLite reopen and payload updates do not rearm it', () => {
+  const temp = temporary(); const project = join(temp.dir, 'project'); mkdirSync(project); let state = new State(join(temp.dir, 'private'));
+  try {
+    const card = { id: 'pin-card', token: 'token', generation: 'generation', binding: { threadId: 'thread', topicId: 101, cwd: project, title: 'Project', lastTurn: null },
+      turnId: 'turn', view: 'widgets' as const, revision: 1, createdAt: Date.now(), snapshot: { status: 'working' as const, startedAt: null, finishedAt: null, updatedAt: Date.now(), plan: null, activities: [] } };
+    state.saveWidget(card); state.widgetDelivered(card.id, 1, 123, Date.now()); assert.equal(state.claimWidgetPin(card.id, 123), true);
+    state.close(); state = new State(join(temp.dir, 'private')); state.saveWidget({ ...card, revision: 2 });
+    assert.equal(state.nextWidgetPin('generation', Date.now()), undefined); assert.equal(state.viewMode(), 'widgets');
+  } finally { state.close(); temp.close(); }
+});
 
 test('/view applies to all sessions, preserves classic running turns and never writes native settings/input', async () => {
   const f = await setup();
@@ -266,7 +353,7 @@ test('Current status opens a complete immutable progress widget only on an autho
     assert.ok(string(readers[0]!.params.html).includes(text));
     assert.match(string(readers[0]!.params.html), /id="nav"/u);
     assert.match(string(readers[0]!.params.html), /class="badge status">●/u);
-    assert.doesNotMatch(string(readers[0]!.params.html), /class="badge done"|"status":"Answer ready"|"status":"Turn interrupted"/u);
+    assert.doesNotMatch(string(readers[0]!.params.html), /class="badge done"|"status":"(?:Answer ready|Ready)"|"status":"Turn interrupted"/u);
     assert.equal(f.telegram.sent().some(message => string(message.text).includes(text)), false);
     const copy = string(object((object(readers[0]!.params.reply_markup).inline_keyboard as Json[][])[0]![0]).callback_data);
     const answer = f.state.widgetAnswer(copy.slice(2))!; assert.ok(answer.text.includes(text));

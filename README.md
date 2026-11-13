@@ -402,7 +402,11 @@ If an approval could not be delivered, use Show approval again on its warning or
 A proven failure before connection retries automatically after three seconds, preserving confirmed parts of a long review. A genuinely unknown send is not replayed automatically; explicit recovery creates a new attempt while preserving the original native request identity. Unsupported native requests still require Codex's own interface.
 
 New result and Current status widgets open HTTPS links explicitly through Telegram's SDK; Telegram links use its in-app method. Existing immutable cards keep their old behavior; Text version remains an alternative.
+Development: confirmed Working cards are immediately pinned with notifications disabled and stay pinned after completion. The first upgrade also queues currently active Working/approval/question cards, without pinning the finished archive. Later updates and restarts do not re-pin cards the user has unpinned. Pinning is independent of delivery: proven unsent/rate-limited requests retry; unknown outcomes are not replayed; failures never disable Widgets or stop replies. New final widgets show `Ready` above the answer and retain `Answer ready · project` as their first caption.
+
 ### Other screens in Widgets mode
+
+Approval widgets use tighter heading/code padding and omit redundant line breaks beside block code. Code contents, including intentional blank lines and trailing whitespace, stay intact; native fallback/Text version retains the review's original spacing. Other answer readers keep their paragraph spacing.
 
 Widgets also present command/file/permission approval reviews, native questions, `/limits`, `/status`, `/sessions`, `/new`, `/model`, `/permissions`, `/view`, `/mode` and `/stream`. Native action buttons retain their current meaning and checks; model choices still come from Codex, and Full Access still needs separate confirmation, with its complete warning also visible in the native caption rather than hidden behind local pages. Opening a screen never starts a task or changes native permissions. Questions retain Type an answer and ordinary text input in the topic.
 
