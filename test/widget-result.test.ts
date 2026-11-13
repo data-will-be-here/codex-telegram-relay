@@ -208,7 +208,8 @@ test('only real payload limits split an oversized answer, with no missing text o
 
 test("the actual three-section Russian reading test stays in one document", () => {
   const source = "**Проверка текста и оформления**\n\nЭто тестовый ответ для проверки чтения внутри одной карточки. Текст должен оставаться чётким, абзацы — отделяться друг от друга, а выделенные заголовки — помогать ориентироваться. Размер текста и цвета должны соответствовать настройкам Telegram. Внизу карточки находятся стрелки и счётчик страниц.\n\n**Проверка переключения страниц**\n\nПопробуй провести пальцем влево, а затем вправо. Карточка должна переключать страницы без новых сообщений в переписке. Тот же результат должен получаться при нажатии стрелок внизу. Вертикальное движение пальца должно прокручивать переписку. При возвращении назад текст должен оставаться прежним.\n\n**Проверка завершения ответа**\n\nЭто заключительная часть тестового ответа. Проверь, что последние предложения доступны полностью, строки не обрезаются снизу, а счётчик показывает последнюю страницу. Затем вернись к началу: перед заголовком Answer ready должна находиться зелёная галочка. Последняя строка этого ответа: **тест успешно дошёл до конца**.";
-  const parts = resultParts(card, source, "a".repeat(32));
-  assert.equal(parts.length, 1, "the full real-world sample fits below the Telegram compressed limit");
+  const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'codex-telegram-relay' } }, source, "a".repeat(32));
+  assert.equal(parts.length, 1, "the full real-world sample fits below the Telegram compressed limit with the full project name");
+  assert.doesNotMatch(string(parts[0]!.params.html), /[\r\n]/u, 'Template whitespace is minified; payload newlines remain JSON-escaped');
   assert.equal(resultPayload(string(parts[0]!.params.html)).text, renderMarkdown(source).text);
 });

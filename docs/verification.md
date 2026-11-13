@@ -1,5 +1,9 @@
 # Verification record
 
+## Reader byte-budget CI correction (development, 2026-11-13)
+
+CI for the quiet-pin change exposed a deterministic near-limit reader regression on all six OS/Node jobs: the three-section Russian fixture fit with local project basename tgmcp but occupied 4001 zlib9 bytes with codex-telegram-relay. Removing literal newlines from the controlled fixed HTML/CSS/JS template reduced the complete document to 3980 bytes; user text remains JSON-escaped and unchanged, and the 4000-byte application budget is unchanged. The regression now explicitly uses the full project label instead of depending on cwd. Payload/code round trips and official WidgetHost/QuickJS qualification still pass (72 cases, maximum 580 px). Final local suite: 474 discovered, 470 passed, four skipped, zero failures. Remote CI is rerun for the corrective commit; local success does not imply its completion.
+
 ## Pin service notice cleanup (development, 2026-11-13)
 
 Bot-authored pin service updates for recorded activity receipts enqueue deletion of the exact service-message ID. The ordinary owner-input gate remains intact; a separate service-only path validates private owner chat, subject/actor identity, known pin state and current project binding. It accepts a root/different outer service topic while validating the recorded pinned subject. Manual pins, foreign chats, unknown subjects, forwarded/text-bearing updates and invalid IDs stay untouched. No adjacent message ID is inferred. [Telegram service updates](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get) and [deleteMessage](https://core.telegram.org/bots/api#deletemessage) define this path; the API's age/permission restrictions still apply.
