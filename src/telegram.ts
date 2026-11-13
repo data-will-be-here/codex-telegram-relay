@@ -360,6 +360,7 @@ export class Outbox {
             return splitFormatted(item.fallbackText, 3300).map((text, chunk) => ({ method: 'sendMessage',
               ...(chunk === 0 && item.screen ? { screen: item.screen } : {}), params: {
                 ...withProjectHeader(text, project, delivery.sessionName, delivery.projectLabel),
+                ...(item.params.reply_parameters ? { reply_parameters: item.params.reply_parameters } : {}),
                 link_preview_options: { is_disabled: true }, disable_notification: index > 0 || chunk > 0,
               } }));
           });

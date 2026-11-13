@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Lexer } from 'marked';
-import { string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
+import { posix, win32 } from 'node:path';
+import { array, object, string, type AgentOrigin, type Binding, type Json, type RpcRequest } from './types.js';
 import { formatMessages, projectHeader, withProjectHeader, type FormattedText } from './format.js';
 
 const PREVIEW_NOTICE = '⚠️ Abbreviated preview. The button approves the complete command, including omitted code. The full text is available in Codex.\n\n';
@@ -125,6 +126,123 @@ export function approvalDisplayMessage(method: string, params: Json, agent?: Age
     }
   }
   return (preview ? PREVIEW_NOTICE : '') + approvalMessage(method, display, agent, reason ? reasonMarkdown(string(display.reason)) : undefined);
+}
+
+/** A summary is opt-in by recognized schema; unfamiliar access context retains the full review. */
+export function approvalOverview(method: string, params: Json, project: string, agent?: AgentOrigin): string | undefined {
+  const command = method === 'item/commandExecution/requestApproval';
+  const files = method === 'item/fileChange/requestApproval';
+  const permissions = method === 'item/permissions/requestApproval';
+  if (!command && !files && !permissions) return;
+  const known = new Set(['threadId', 'turnId', 'itemId', 'startedAtMs', 'reason', 'environmentId', 'cwd',
+    ...(command ? ['kind', 'approvalId', 'command', 'commandActions', 'availableDecisions', 'additionalPermissions', 'networkApprovalContext', 'proposedExecpolicyAmendment', 'proposedNetworkPolicyAmendments'] :
+      files ? ['changes', 'proposedChanges', 'grantRoot', 'availableDecisions'] : ['permissions'])]);
+  if (Object.keys(params).some(key => !known.has(key))) return;
+  for (const key of ['reason', 'environmentId', 'cwd']) if (params[key] != null && typeof params[key] !== 'string') return;
+  if (command && params.kind != null && !['command', 'humanCommand', 'writeStdin'].includes(string(params.kind))) return;
+  const title = command ? params.kind === 'writeStdin' ? 'Terminal input approval' : 'Command approval' : files ? 'File change approval' : 'Permission approval';
+  const sections = [title];
+  if (agent) sections.push('**Agent**\n' + code(`${agent.name} · ${agent.threadId.slice(0, 8)}`));
+  const reason = string(params.reason).replace(/\r\n?/gu, '\n');
+  if (reason) {
+    if (reason.length <= 500) sections.push('**Reason**\n' + reasonMarkdown(shortenAuxiliaryQuotes(reason)));
+    else {
+      const prefix = reason.slice(0, 400);
+      const sentence = [...prefix.matchAll(/[.!?](?=\s|$)/gu)].at(-1);
+      const end = sentence && sentence.index > 180 ? sentence.index + 1 : Math.max(prefix.lastIndexOf(' '), 1);
+      sections.push('**Reason**\n' + literal(prefix.slice(0, end)) + '\nReason shortened; full reason in Details.');
+    }
+  }
+  if (command) {
+    if (params.command != null && typeof params.command !== 'string') return;
+    const original = string(params.command);
+    if (!original && !params.networkApprovalContext) return;
+    if (original) {
+      const shown = hasEmbeddedCode(original) ? shortenReviewText(original, 'Command abbreviated') : original;
+      sections.push('**' + (params.kind === 'writeStdin' ? 'Terminal input' : 'Command') + '**\n' + code(shown));
+      if (shown !== original) sections.splice(1, 0, '⚠️ Abbreviated preview. Allow once approves the complete command, including omitted code. Open Details for the full command.');
+    }
+  }
+  if (string(params.cwd)) sections.push('**Working directory**\n' + code(reviewPath(string(params.cwd), project)));
+  if (params.environmentId && params.environmentId !== 'local') sections.push('**Environment**\n' + literal(string(params.environmentId)));
+  if (command && params.networkApprovalContext != null) {
+    const network = object(params.networkApprovalContext);
+    if (!string(network.host) || !string(network.protocol) || Object.keys(network).some(key => !['host', 'protocol', 'port'].includes(key))) return;
+    sections.push('**Network access**\n' + code(JSON.stringify(network)));
+  }
+  const access = permissions ? params.permissions : params.additionalPermissions;
+  if (access != null) {
+    const shown = permissionOverview(access);
+    if (shown === undefined) return;
+    sections.push('**Requested permissions**\n' + (shown || 'No additional permissions.'));
+  } else if (permissions) return;
+  if (files) {
+    const changes = array(params.proposedChanges);
+    if (!changes.length) return;
+    const entries: string[] = [];
+    for (const raw of changes) {
+      const change = object(raw); const kind = object(change.kind);
+      if (!string(change.path) || typeof change.diff !== 'string' || Object.keys(change).some(key => !['path', 'kind', 'diff'].includes(key)) ||
+          change.kind != null && (!['add', 'delete', 'update'].includes(string(kind.type)) || Object.keys(kind).some(key => !['type', 'move_path'].includes(key)) ||
+            kind.move_path != null && typeof kind.move_path !== 'string')) return;
+      const action = kind.type === 'delete' ? 'DELETE' : kind.type === 'add' ? 'Add' : 'Update';
+      entries.push(action + ': ' + reviewPath(string(change.path), project) + (string(kind.move_path) ? '\nMove to: ' + reviewPath(string(kind.move_path), project) : ''));
+    }
+    sections.push('**Files (' + changes.length + ')**\n' + code(entries.join('\n')) + '\nFull diff in Details.');
+    if (params.grantRoot != null) {
+      if (!string(params.grantRoot)) return;
+      sections.push('**Requested write root**\n' + code(string(params.grantRoot)) + '\nCodex requests this root for the session; actual duration depends on native support.');
+    }
+  }
+  sections.push(permissions ? 'Scope: this turn.' : files && params.grantRoot != null ?
+    'This approval includes the requested write-root grant; Codex controls its duration.' : 'Allow once applies to this operation; no persistent policy rule is selected.');
+  return sections.join('\n\n');
+}
+
+/** Expand recognized file proposals as actual diff blocks, rather than JSON-escaped source lines. */
+export function approvalDetailsMessage(method: string, params: Json, agent?: AgentOrigin): string {
+  if (method !== 'item/fileChange/requestApproval') return approvalMessage(method, params, agent);
+  const origin = agent ? '**Agent**\n' + code(`${agent.name}\n${agent.threadId}`) + '\n\n' : '';
+  const sections = ['File change approval'];
+  if (string(params.reason)) sections.push('**Reason**\n' + literal(string(params.reason)));
+  for (const raw of array(params.proposedChanges)) {
+    const change = object(raw);
+    sections.push('**File**\n' + code(string(change.path)), '**Change**\n' + code(JSON.stringify(change.kind ?? { type: 'unspecified' })), '**Diff**\n' + code(string(change.diff)));
+  }
+  const remaining = { ...params }; delete remaining.proposedChanges; delete remaining.reason;
+  if (JSON.stringify(params.changes) === JSON.stringify(params.proposedChanges)) delete remaining.changes;
+  if (Object.keys(remaining).length) sections.push('**Additional context**\n' + code(JSON.stringify(remaining, null, 2)));
+  return origin + sections.join('\n\n');
+}
+
+function reviewPath(path: string, project: string): string {
+  const paths = /^[A-Za-z]:[\\/]|^\\\\/u.test(project) ? win32 : posix;
+  if (!project) return path;
+  const target = paths.resolve(project, path); const relative = paths.relative(project, target);
+  return relative === '' ? 'Project root' : relative === '..' || relative.startsWith('..' + paths.sep) || paths.isAbsolute(relative) ?
+    target + ' (outside project)' : '.' + paths.sep + relative;
+}
+
+function permissionOverview(value: unknown): string | undefined {
+  const access = object(value);
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(access).some(key => !['network', 'fileSystem'].includes(key))) return;
+  const lines: string[] = [];
+  if (access.network != null) {
+    const network = object(access.network);
+    if (typeof access.network !== 'object' || Array.isArray(access.network) || Object.keys(network).some(key => key !== 'enabled') || network.enabled != null && typeof network.enabled !== 'boolean') return;
+    if (network.enabled != null) lines.push('Network: ' + (network.enabled ? 'enabled' : 'disabled'));
+  }
+  if (access.fileSystem != null) {
+    const fs = object(access.fileSystem);
+    // New entry/glob schemas remain fully visible until they have an explicit renderer.
+    if (typeof access.fileSystem !== 'object' || Array.isArray(access.fileSystem) || Object.keys(fs).some(key => !['read', 'write'].includes(key))) return;
+    for (const [key, label] of [['read', 'Read'], ['write', 'Write']] as const) {
+      if (fs[key] == null) continue;
+      if (!Array.isArray(fs[key]) || fs[key].some(path => typeof path !== 'string' || !path)) return;
+      if (fs[key].length) lines.push(label + ':\n' + code(fs[key].join('\n')));
+    }
+  }
+  return lines.join('\n');
 }
 
 function literal(text: string): string {

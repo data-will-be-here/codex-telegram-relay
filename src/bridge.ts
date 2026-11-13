@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage } from './approvals.js';
+import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage, approvalOverview, approvalDetailsMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { FirstMessageRequiredError, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
@@ -526,8 +526,10 @@ export class Bridge {
     const markup = keyboard as unknown as Json;
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
-    if (!receipt) this.screens.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup,
-      { kind: 'approval', title: request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review', markdown: true, fullText: card, widgets: prompt.widgets });
+    const overview = prompt.widgets ? approvalOverview(request.method, detailsParams, binding.cwd, agent) : undefined;
+    if (!receipt) this.screens.enqueue(key, binding.topicId, overview ?? approvalDisplayMessage(request.method, detailsParams, agent), markup,
+      { kind: 'approval', title: overview?.split('\n')[0] ?? (request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review'),
+        markdown: true, fullText: overview ? approvalDetailsMessage(request.method, detailsParams, agent) : card, details: prompt.widgets === true, widgets: prompt.widgets });
     prompt.approvalMarkup = this.screens.markup(key, markup)!;
     if (receipt?.status === 'pending' || receipt?.status === 'held') this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
     else if (receipt) await this.refreshApproval(prompt);
@@ -627,7 +629,7 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
         await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
-      if (Object.keys(callback).length && string(callback.data).startsWith('sc:')) {
+      if (Object.keys(callback).length && /^s[cd]:/u.test(string(callback.data))) {
         await this.screens.text(callback, message, topic); this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('ar:')) {

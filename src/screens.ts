@@ -19,8 +19,8 @@ function withoutHeading(message: FormattedText, title: string): FormattedText {
     return end > from ? [{ ...entity, offset: from - offset, length: end - from }] : [];
   }) };
 }
-const addTextButton = (markup: Json | null, token: string): Json => ({ inline_keyboard: [...array(markup?.inline_keyboard),
-  [{ text: 'Text version', callback_data: `sc:${token}` }]] });
+const readerButton = (markup: Json | null, spec: ScreenSpec): Json => ({ inline_keyboard: [...array(markup?.inline_keyboard),
+  [{ text: spec.details ? 'Details' : 'Text version', callback_data: `s${spec.details ? 'd' : 'c'}:${spec.token}` }]] });
 
 /** One presentation module owns format selection, persisted render kind and native keyboard editing. */
 export class Screens {
@@ -42,8 +42,8 @@ export class Screens {
     const message = withoutHeading(textOf(text, spec), spec.title);
     const data = this.data(spec.title, text);
     const documents = spec.widgets === false || (spec.caption?.length ?? 0) > 1000 || spec.editable && !data ? undefined : screenDocuments(card, message, spec);
-    const parts: RichDeliveryPart[] = documents ? documents.map(part => ({ method: 'sendWidget', params: {
-      html: part.html, caption: spec.caption ?? screenCaption(spec.title, binding.projectLabel || binding.cwd.split(/[\\/]/u).at(-1)),
+    const parts: RichDeliveryPart[] = documents ? documents.map((part, index) => ({ method: 'sendWidget', params: {
+      html: part.html, ...(index ? {} : { caption: spec.caption ?? screenCaption(spec.title, binding.projectLabel || binding.cwd.split(/[\\/]/u).at(-1)) }),
       chat_data: '{}', allow_queries: false, is_shared: false }, fallbackText: part.message })) :
       formatMessages(text, spec.markdown === true, 3300).map(part => ({ method: 'sendMessage', params: {
         ...withProjectHeader(part, binding.cwd || undefined, displayName(binding), binding.projectLabel), link_preview_options: { is_disabled: true } } }));
@@ -55,15 +55,15 @@ export class Screens {
     const enabled = options.widgets ?? this.state.viewMode() === 'widgets';
     if (!enabled) { if (ownerNotice) this.state.enqueueOwnerNotice(key, topicId, text, markup); else this.state.enqueue(key, topicId, text, markup); return; }
     const parts = this.prepare(topicId, text, options);
-    this.state.enqueueScreen(key, topicId, text, addTextButton(markup, parts[0]!.screen!.token), parts, ownerNotice);
+    this.state.enqueueScreen(key, topicId, text, readerButton(markup, parts[0]!.screen!), parts, ownerNotice);
   }
   markup(key: string, markup: Json | null): Json | null {
-    const saved = this.state.screen(key); return saved ? addTextButton(markup, saved.spec.token) : markup;
+    const saved = this.state.screen(key); return saved ? readerButton(markup, saved.spec) : markup;
   }
   replacement(key: string, markup: Json): { markup: Json; parts?: RichDeliveryPart[] } {
     const saved = this.state.screen(key); if (!saved) return { markup };
     const parts = this.prepare(saved.topicId, saved.text, saved.spec);
-    return { parts, markup: addTextButton(markup, parts[0]!.screen!.token) };
+    return { parts, markup: readerButton(markup, parts[0]!.screen!) };
   }
   private data(title: string, text: string): string | undefined {
     const data = JSON.stringify({ v: 1, title, text: withoutHeading({ text, entities: [] }, title).text });
@@ -96,9 +96,9 @@ export class Screens {
     const common = { chat_id: this.config.ownerId, message_id: id };
     if (widget) {
       await this.telegram.call('editMessageWidgetData', { ...common, chat_data: data! });
-      await this.telegram.call('editMessageCaption', { ...common, caption: options.caption ?? screenCaption(options.title), reply_markup: addTextButton(markup, spec.token) });
+      await this.telegram.call('editMessageCaption', { ...common, caption: options.caption ?? screenCaption(options.title), reply_markup: readerButton(markup, spec) });
     } else await this.telegram.call('editMessageText', { ...common,
-      ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding && displayName(binding), binding?.projectLabel), reply_markup: addTextButton(markup, spec.token) });
+      ...withProjectHeader({ text, entities: [] }, binding?.cwd, binding && displayName(binding), binding?.projectLabel), reply_markup: readerButton(markup, spec) });
     return key;
   }
   async close(key: string, title: string): Promise<boolean> {
@@ -107,24 +107,37 @@ export class Screens {
     if (saved.parts.at(-1)!.method === 'sendWidget') {
       await Promise.all([
         this.telegram.call('editMessageWidgetData', { ...common, chat_data: JSON.stringify({ v: 1, title }) }),
-        this.telegram.call('editMessageCaption', { ...common, caption: screenCaption(title), reply_markup: addTextButton(null, saved.spec.token) }),
+        this.telegram.call('editMessageCaption', { ...common, caption: screenCaption(title), reply_markup: readerButton(null, saved.spec) }),
       ]);
-    } else await this.telegram.call('editMessageReplyMarkup', { ...common, reply_markup: addTextButton(null, saved.spec.token) });
+    } else await this.telegram.call('editMessageReplyMarkup', { ...common, reply_markup: readerButton(null, saved.spec) });
     return true;
   }
   async text(callback: Json, message: Json, topicId: number | null): Promise<void> {
-    const match = /^sc:([a-f0-9]{32})$/u.exec(string(callback.data));
-    const saved = match ? this.state.screenToken(match[1]!) : undefined;
+    const match = /^s([cd]):([a-f0-9]{32})$/u.exec(string(callback.data));
+    const saved = match ? this.state.screenToken(match[2]!) : undefined;
+    const details = match?.[1] === 'd';
     const valid = (): boolean => {
-      return !!saved && integer(message.message_id) !== undefined && integer(message.message_id)! > 0 && saved.messageId === integer(message.message_id) &&
+      return !!saved && (!details || saved.spec.details === true) && integer(message.message_id) !== undefined && integer(message.message_id)! > 0 && saved.messageId === integer(message.message_id) &&
       saved.topicId === topicId && object(callback.from).id === this.config.ownerId && object(message.chat).id === this.config.ownerId && object(message.chat).type === 'private' &&
       this.eligible(saved);
     };
     const authorized = valid();
-    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(!authorized ? { text: 'This text version is no longer available in this topic.' } : {}) }); } catch { /* Read-only access is independent of acknowledgement. */ }
+    const detailsKey = saved ? `notice/screen-details/${saved.spec.token}` : '';
+    const existing = details ? this.state.screen(detailsKey) : undefined;
+    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id,
+      ...(!authorized ? { text: 'This review is no longer available in this topic.' } : existing ? { text: existing.status === 'sent' ? 'Details are already below this approval.' :
+        existing.status === 'uncertain' ? 'Details delivery is uncertain. Check existing messages; it will not be repeated automatically.' : 'Details have already been requested.' } : {}) }); } catch { /* Read-only access is independent of acknowledgement. */ }
     if (!authorized || !valid() || !saved) return;
     const current = topicId === null ? undefined : this.state.topic(topicId);
     const text = saved.spec.fullText ?? saved.text;
+    if (details) {
+      if (this.state.deliveryExists(detailsKey)) return;
+      const options: ScreenOptions = { kind: 'info', title: 'Approval details', markdown: saved.spec.markdown === true, widgets: saved.parts[0]!.method === 'sendWidget' };
+      const parts = this.prepare(topicId, text, options);
+      parts.forEach(part => { part.params.reply_parameters = { message_id: saved.messageId }; });
+      this.state.enqueueScreen(detailsKey, topicId, text, readerButton(null, parts[0]!.screen!), parts, saved.ownerNotice);
+      return;
+    }
     const parts: RichDeliveryPart[] = formatMessages(text, saved.spec.markdown === true, 3300).map((part, index) => ({ method: 'sendMessage', params: {
       ...withProjectHeader(part, saved.projectCwd, saved.label, current?.projectLabel), link_preview_options: { is_disabled: true }, disable_notification: index > 0 } }));
     parts[0]!.screen = { kind: 'text', title: 'Text version', token: randomBytes(16).toString('hex') };

@@ -186,6 +186,7 @@ test('only real payload limits split an oversized answer, with no missing text o
     assert.equal(html.includes('<h3 id="status">'), index === 0);
     assert.doesNotMatch(html, /id="nav"|id="page"|pointerup/u, 'overflow parts must read sequentially without nested paging');
     assert.equal(part.params.disable_notification, index !== 0);
+    assert.equal(part.params.caption, index === 0 ? 'Answer ready · ' + (card.binding.projectLabel || card.binding.cwd.split(/[\\/]/u).at(-1)) : undefined);
   }
 });
 
