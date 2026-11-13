@@ -161,7 +161,7 @@ export async function installRelease(rootInput: string, homeInput: string, reque
     // From this point cancellation waits for activation or rollback, never a half-switched installation.
     writeFileSync(marker, JSON.stringify({ recoveryDirectory: work, original, target, stateBackup }, null, 2), { flag: 'wx', mode: 0o600 });
     activated = true;
-    await git(['checkout', '--detach', target], root, null);
+    await git(['checkout', '--no-overwrite-ignore', '--detach', target], root, null);
     for (const name of ['dist', 'node_modules']) {
       if (existsSync(join(root, name))) move(join(root, name), join(work, `previous-${name}`));
       move(join(stage, name), join(root, name));
@@ -177,7 +177,7 @@ export async function installRelease(rootInput: string, homeInput: string, reque
         const status = await run('git', ['status', '--porcelain=v1', '--untracked-files=no'], root);
         if (status) throw new Error('Concurrent tracked changes prevent rollback.');
         const branchHead = original.branch ? await git(['rev-parse', `refs/heads/${original.branch}`], root, null) : '';
-        await git(['checkout', ...(original.branch && branchHead === original.head ? [original.branch] : ['--detach', original.head])], root, null);
+        await git(['checkout', '--no-overwrite-ignore', ...(original.branch && branchHead === original.head ? [original.branch] : ['--detach', original.head])], root, null);
         unlinkSync(marker);
       } catch { throw new UpdateError(`Update rollback needs attention. Do not start the relay until recovered. Recovery files: ${work}`, false); }
     }

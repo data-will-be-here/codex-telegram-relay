@@ -166,15 +166,18 @@ test('a moving release tag is refused before closing state or switching files', 
   } finally { f.close(); }
 });
 
-test('untracked target collisions stop activation and retain the original file', async () => {
-  const f = fixture(); try {
-    writeFileSync(join(f.source, 'collision.txt'), 'release'); git(f.source, 'add', '.'); git(f.source, 'commit', '-m', 'New file'); git(f.source, 'tag', '-f', release.tag);
-    writeFileSync(join(f.root, 'collision.txt'), 'user file');
-    await assert.rejects(installRelease(f.root, f.home, release, { run: f.run, log: silent, beforeActivation: silent }), error => error instanceof UpdateError && error.recoverable);
-    assert.equal(readFileSync(join(f.root, 'collision.txt'), 'utf8'), 'user file');
-    assert.equal(git(f.root, 'rev-parse', 'HEAD'), f.head);
-    assertNoIncompleteUpdate(f.root);
-  } finally { f.close(); }
+test('untracked and ignored target collisions stop activation and retain the original file', async () => {
+  for (const ignored of [false, true]) {
+    const f = fixture(); try {
+      writeFileSync(join(f.source, 'collision.txt'), 'release'); git(f.source, 'add', '.'); git(f.source, 'commit', '-m', 'New file'); git(f.source, 'tag', '-f', release.tag);
+      writeFileSync(join(f.root, 'collision.txt'), 'user file');
+      if (ignored) writeFileSync(join(f.root, '.git', 'info', 'exclude'), 'collision.txt\n');
+      await assert.rejects(installRelease(f.root, f.home, release, { run: f.run, log: silent, beforeActivation: silent }), error => error instanceof UpdateError && error.recoverable);
+      assert.equal(readFileSync(join(f.root, 'collision.txt'), 'utf8'), 'user file');
+      assert.equal(git(f.root, 'rev-parse', 'HEAD'), f.head);
+      assertNoIncompleteUpdate(f.root);
+    } finally { f.close(); }
+  }
 });
 
 test('startup consent installs a cached newer release and releases the private lock before restart; N continues old version', async () => {
