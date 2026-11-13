@@ -596,6 +596,25 @@ export class Bridge {
     return true;
   }
 
+  /** Telegram-generated bot service events have a separate, strictly read-only-to-Codex route. */
+  private pinNotice(message: Json): void {
+    const chat = object(message.chat); const from = object(message.from); const pinned = object(message.pinned_message);
+    const original = object(pinned.from); const pinnedChat = object(pinned.chat);
+    const serviceId = integer(message.message_id); const pinnedId = integer(pinned.message_id);
+    const botId = integer(from.id);
+    if (chat.id !== this.config.ownerId || chat.type !== 'private' || pinnedChat.id !== this.config.ownerId || pinnedChat.type !== 'private' ||
+        from.is_bot !== true || original.is_bot !== true || !botId || botId < 1 || from.id !== original.id ||
+        !serviceId || serviceId < 1 || !pinnedId || pinnedId < 1 || serviceId === pinnedId ||
+        message.forward_origin || ['text', 'caption', 'photo', 'document', 'video', 'audio', 'voice', 'animation'].some(key => message[key] !== undefined)) return;
+    const card = this.state.pinnedWidgetMessage(pinnedId); if (!card) return;
+    const binding = this.state.binding(card.binding.threadId);
+    if (!binding || binding.topicId !== card.binding.topicId || binding.cwd !== card.binding.cwd ||
+        this.config.ignoredThreadIds?.includes(binding.threadId) || !this.allowed(binding.cwd, binding.threadId) ||
+        pinned.message_thread_id !== undefined && pinned.message_thread_id !== binding.topicId) return;
+    this.state.enqueueScreen(`notice/widget-pin-cleanup/${this.config.ownerId}/${serviceId}`, binding.topicId, '', null,
+      [{ method: 'deleteMessage', params: { chat_id: this.config.ownerId, message_id: serviceId } }]);
+  }
+
   async update(update: Json): Promise<void> {
     const id = integer(update.update_id);
     if (id === undefined) return;
@@ -603,6 +622,9 @@ export class Bridge {
     const message = Object.keys(callback).length ? object(callback.message) : object(update.message);
     const from = Object.keys(callback).length ? object(callback.from) : object(message.from);
     const chat = object(message.chat);
+    if (!Object.keys(callback).length && message.pinned_message !== undefined) {
+      this.pinNotice(message); this.state.advance(id); return;
+    }
     // Authorize before any payload journal, task allocation, native request, or outbound reply.
     if (from.id !== this.config.ownerId || from.is_bot === true || chat.id !== this.config.ownerId || chat.type !== 'private') {
       this.state.advance(id); return;

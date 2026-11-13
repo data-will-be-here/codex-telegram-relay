@@ -357,6 +357,32 @@ export class Outbox {
     let messageId: number | null = delivery.messageId;
     for (let index = delivery.nextPart; index < parts.length; index++) {
       const part = parts[index]!;
+      if (part.method === 'deleteMessage') {
+        this.check(delivery);
+        const id = integer(part.params.message_id);
+        if (parts.length !== 1 || !id || id < 1 || part.params.chat_id !== this.config.ownerId ||
+            delivery.key !== `notice/widget-pin-cleanup/${this.config.ownerId}/${id}`) {
+          this.state.cancelDelivery(delivery.id); return { messageId: null, complete: false };
+        }
+        try {
+          const deleted = await this.telegram.call('deleteMessage', { chat_id: this.config.ownerId, message_id: id });
+          if (deleted !== true) throw new TelegramError('Pin notice deletion receipt was not confirmed.', 0);
+        } catch (error) {
+          const missing = error instanceof TelegramError && error.status === 400 && /message to delete not found|MESSAGE_ID_INVALID/iu.test(error.message);
+          if (!missing) {
+            if (!(error instanceof TelegramError) || error.status === 0 || error.status === 429 || error.status >= 500) {
+              const delay = error instanceof TelegramError && error.status === 429 ? Math.max(1, error.retryAfter ?? 3) : 3;
+              this.persistAnswer(delivery.id, () => this.state.retryDelivery(delivery.id, Date.now() + delay * 1000));
+            } else {
+              this.state.cancelDelivery(delivery.id);
+              console.error(`Pin service message cleanup unavailable (${error.status}); the activity card remains pinned.`);
+            }
+            return { messageId: null, complete: false };
+          }
+        }
+        this.persistAnswer(delivery.id, () => this.state.delivered(delivery.id, null));
+        return { messageId: null, complete: false };
+      }
       const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
       if ((!approval || parts.length === 1 && !screen) && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;

@@ -15,7 +15,7 @@ const SETTLED_WIDGET_SQL = "(pinStatus<>'sending' AND everUncertain=0 AND (deliv
 
 export interface RichDeliveryPart {
   screen?: ScreenSpec;
-  method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument'; params: Json;
+  method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument' | 'deleteMessage'; params: Json;
   fallback?: string; fallbackText?: FormattedText;
   document?: { name: string; html: string }; tableDocument?: string; tableCaption?: string;
   resultMeta?: { part: number; total: number; completion?: string };
@@ -113,6 +113,8 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'retryAt')) this.db.exec('ALTER TABLE outbox ADD COLUMN retryAt INTEGER NOT NULL DEFAULT 0');
+      // Repeating deletion of the same verified service message is safe, including after a crash.
+      this.db.exec("UPDATE outbox SET status='pending' WHERE status='uncertain' AND key LIKE 'notice/widget-pin-cleanup/%' AND json_extract(richPlan,'$[0].method')='deleteMessage'");
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sourceThreadId')) {
         this.db.exec(`BEGIN IMMEDIATE;
           ALTER TABLE outbox ADD COLUMN sourceThreadId TEXT;
@@ -238,6 +240,9 @@ export class State {
   }
   claimWidgetPin(id: string, messageId: number): boolean {
     return !!this.db.prepare("UPDATE widget_cards SET pinStatus='sending' WHERE id=? AND messageId=? AND pinStatus='pending'").run(id, messageId).changes;
+  }
+  pinnedWidgetMessage(messageId: number): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare("SELECT * FROM widget_cards WHERE messageId=? AND pinStatus IN ('sending','pinned','uncertain') LIMIT 1").get(messageId));
   }
   widgetPinResult(id: string, status: 'pending' | 'pinned' | 'failed' | 'uncertain' | 'cancelled', retryAt = 0): void {
     this.db.prepare('UPDATE widget_cards SET pinStatus=?,pinRetryAt=? WHERE id=?').run(status, retryAt, id);
