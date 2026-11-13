@@ -1,5 +1,11 @@
 # Verification record
 
+## First-part final reply pins (development, 2026-11-13)
+
+Final deliveries and their known text backups admit one quiet pin for the first positive receipt, using the canonical final key. Rich-part receipt/admission is atomic; delayed plain-text receipt persistence captures the first ID by value. Thirteen new regressions cover multipart widget/native/rich/document delivery, service-message deletion without unpin, Classic replies, excluding status/text copies, unknown first/later result sends and backup targeting, pin outcome uncertainty without reply uncertainty, 429 retry, local persistence failures, binding replacement and SQLite reopen without pin replay. Queued pin context retains the original owner/thread/topic/cwd rather than following a rewritten recovery route. Pin jobs have lower priority than normal messages and do not block clear on their own.
+
+Final local Windows suite: 487 discovered, 483 passed, four skipped, zero failures; build/typecheck, package allowlist and diff whitespace checks passed. Existing serialization tests now include the final pin request, while still proving no late draft, no early retry and priority of ordinary attention messages. No layout/template change or real native approval was introduced. Earlier reader-budget correction CI passed all six OS/Node jobs; CI for this development commit remains a separate result. No completed archive backfill or main/release update is included.
+
 ## Reader byte-budget CI correction (development, 2026-11-13)
 
 CI for the quiet-pin change exposed a deterministic near-limit reader regression on all six OS/Node jobs: the three-section Russian fixture fit with local project basename tgmcp but occupied 4001 zlib9 bytes with codex-telegram-relay. Removing literal newlines from the controlled fixed HTML/CSS/JS template reduced the complete document to 3980 bytes; user text remains JSON-escaped and unchanged, and the 4000-byte application budget is unchanged. The regression now explicitly uses the full project label instead of depending on cwd. Payload/code round trips and official WidgetHost/QuickJS qualification still pass (72 cases, maximum 580 px). Final local suite: 474 discovered, 470 passed, four skipped, zero failures. Remote CI is rerun for the corrective commit; local success does not imply its completion.

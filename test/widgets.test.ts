@@ -651,7 +651,9 @@ test('a multipart result retries only the unsent card and persists a middle rece
     f.state.acceptRichPart = (...args) => { if (args[1] === 1 && failWrite) { failWrite = false; throw new Error('Temporary receipt persistence failure'); } return accept(...args); };
     assert.equal(await f.outbox.flushOne(), true); assert.equal(await f.outbox.flushOne(), true);
     assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
-    f.advance(2999); assert.equal(await f.outbox.flushOne(), false);
+    f.advance(2999); assert.equal(await f.outbox.flushOne(), true, 'The first confirmed part can be pinned while the next card waits for retry');
+    assert.equal(f.telegram.calls.filter(call => call.method === 'pinChatMessage').length, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 1);
     f.advance(1); await f.outbox.flushOne();
     assert.equal(f.telegram.calls.filter(call => call.method === 'sendWidget').length, 2);
     f.advance(1000); while (await f.outbox.flushOne()) { /* Retry receipt locally, then send the unsent suffix. */ }

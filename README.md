@@ -406,6 +406,8 @@ Development: confirmed Working cards are immediately pinned with notifications d
 
 ### Other screens in Widgets mode
 
+Development: new final replies are also pinned quietly in both Widgets and Classic. Multipart answers pin only their first confirmed message, including table/document-first replies and native text fallback. The first target survives later parts/reconnect; if the first card was unconfirmed, the first confirmed text backup is used. Current status snapshots and Text version copies are not pinned. The pin is low priority, bound to its original owner/session/topic and never repeated after an unknown pin outcome or a manual unpin; cosmetic pin uncertainty does not count as an uncertain reply or block `/clear`. The same service-notice cleanup applies to final replies. Existing final history is not backfilled.
+
 The relay removes its own “pinned a message” service notices for known activity-card receipts. It deletes the service message ID delivered by Telegram, leaving the card and pin intact; manual pins and unrelated messages are preserved. Cleanup retries the same deletion after transient failures or restart, without repeating the pin. Previously consumed updates are not scanned or reconstructed from guessed message IDs.
 
 Approval widgets use tighter heading/code padding and omit redundant line breaks beside block code. Code contents, including intentional blank lines and trailing whitespace, stay intact; native fallback/Text version retains the review's original spacing. Other answer readers keep their paragraph spacing.

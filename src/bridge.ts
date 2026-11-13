@@ -606,9 +606,9 @@ export class Bridge {
         from.is_bot !== true || original.is_bot !== true || !botId || botId < 1 || from.id !== original.id ||
         !serviceId || serviceId < 1 || !pinnedId || pinnedId < 1 || serviceId === pinnedId ||
         message.forward_origin || ['text', 'caption', 'photo', 'document', 'video', 'audio', 'voice', 'animation'].some(key => message[key] !== undefined)) return;
-    const card = this.state.pinnedWidgetMessage(pinnedId); if (!card) return;
-    const binding = this.state.binding(card.binding.threadId);
-    if (!binding || binding.topicId !== card.binding.topicId || binding.cwd !== card.binding.cwd ||
+    const subject = this.state.pinnedRelayMessage(pinnedId, this.config.ownerId); if (!subject) return;
+    const binding = this.state.binding(subject.threadId);
+    if (!binding || binding.topicId !== subject.topicId || binding.cwd !== subject.cwd ||
         this.config.ignoredThreadIds?.includes(binding.threadId) || !this.allowed(binding.cwd, binding.threadId) ||
         pinned.message_thread_id !== undefined && pinned.message_thread_id !== binding.topicId) return;
     this.state.enqueueScreen(`notice/widget-pin-cleanup/${this.config.ownerId}/${serviceId}`, binding.topicId, '', null,

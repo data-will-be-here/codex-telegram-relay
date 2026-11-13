@@ -141,6 +141,24 @@ export class Outbox {
     this.state.cancelDelivery(delivery.id);
     throw new DeliveryCancelled();
   }
+  private finalPin(delivery: Delivery): { ownerId: number; context: DeliveryContext } | undefined {
+    if (!/^(?:final\/|attention\/final-widget-fallback\/final\/)/u.test(delivery.key) || !delivery.sourceThreadId) return;
+    const binding = this.state.binding(delivery.sourceThreadId);
+    if (this.allowed(delivery) && binding?.topicId === delivery.topicId && binding.cwd === delivery.projectCwd)
+      return { ownerId: this.config.ownerId, context: delivery };
+  }
+  private async pinMessage(messageId: number): Promise<{ status: 'pending' | 'pinned' | 'failed' | 'uncertain'; retryAt: number }> {
+    try {
+      const result = await this.telegram.call('pinChatMessage', { chat_id: this.config.ownerId, message_id: messageId, disable_notification: true });
+      if (result !== true) throw new TelegramError('Pin receipt was not confirmed.', 0);
+      return { status: 'pinned', retryAt: 0 };
+    } catch (error) {
+      if (error instanceof TelegramError && (error.notSent || error.status === 429))
+        return { status: 'pending', retryAt: Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000 };
+      console.error(`Relay message pin unavailable (${error instanceof TelegramError ? error.status : 0}); delivery is unaffected.`);
+      return { status: error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain', retryAt: 0 };
+    }
+  }
   /** Pinning has its own receipt: failures never invalidate an already delivered activity card. */
   private async pinWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
     const card = this.state.nextWidgetPin(guard.generation, Date.now());
@@ -157,18 +175,7 @@ export class Outbox {
     } catch { this.state.widgetPinResult(card.id, 'pending', Date.now() + 5000); return false; }
     if (!valid()) { this.state.widgetPinResult(card.id, 'cancelled'); return true; }
     if (!this.state.claimWidgetPin(card.id, card.messageId)) return false;
-    let status: 'pending' | 'pinned' | 'failed' | 'uncertain' = 'pinned'; let retryAt = 0;
-    try {
-      const result = await this.telegram.call('pinChatMessage', { chat_id: this.config.ownerId, message_id: card.messageId, disable_notification: true });
-      if (result !== true) throw new TelegramError('Pin receipt was not confirmed.', 0);
-    } catch (error) {
-      if (error instanceof TelegramError && (error.notSent || error.status === 429)) {
-        status = 'pending'; retryAt = Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000;
-      } else {
-        status = error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain';
-        console.error(`Activity card pin unavailable (${error instanceof TelegramError ? error.status : 0}); card delivery is unaffected.`);
-      }
-    }
+    const { status, retryAt } = await this.pinMessage(card.messageId);
     this.persistWidget(`pin/${card.id}`, () => this.state.widgetPinResult(card.id, status, retryAt));
     return true;
   }
@@ -328,6 +335,10 @@ export class Outbox {
           chunks.splice(index, 1, ...formatMessages(withoutFormatting(chunk), false, limit).map(part => ({ ...part, plain: true })));
           index--; continue;
         }
+        if (index === 0 && messageId !== null) {
+          const first = messageId;
+          this.persistAnswer(delivery.id, () => this.state.rememberFinalPin(delivery.id, first, this.finalPin(delivery)));
+        }
         if (this.interval > 0) await delay(this.interval);
       }
       this.state.delivered(delivery.id, messageId);
@@ -357,6 +368,23 @@ export class Outbox {
     let messageId: number | null = delivery.messageId;
     for (let index = delivery.nextPart; index < parts.length; index++) {
       const part = parts[index]!;
+      if (part.method === 'pinChatMessage') {
+        this.check(delivery);
+        const target = integer(part.params.message_id);
+        const context = part.pinContext;
+        if (parts.length !== 1 || !target || target < 1 || part.params.chat_id !== this.config.ownerId || !delivery.key.startsWith('notice/final-pin/final/') ||
+            !context || context.threadId !== delivery.sourceThreadId || context.topicId !== delivery.topicId || context.cwd !== delivery.projectCwd) {
+          this.state.cancelDelivery(delivery.id); return { messageId: null, complete: false };
+        }
+        const outcome = await this.pinMessage(target);
+        this.persistAnswer(delivery.id, () => {
+          if (outcome.status === 'pending') this.state.retryDelivery(delivery.id, outcome.retryAt);
+          else if (outcome.status === 'pinned') this.state.delivered(delivery.id, target);
+          else if (outcome.status === 'uncertain') this.state.finalPinUncertain(delivery.id);
+          else this.state.cancelDelivery(delivery.id);
+        });
+        return { messageId: target, complete: false };
+      }
       if (part.method === 'deleteMessage') {
         this.check(delivery);
         const id = integer(part.params.message_id);
@@ -492,13 +520,13 @@ export class Outbox {
       } else if ((result || screen) && messageId !== null) {
         const receipt = messageId;
         const write = (): void => {
-          this.state.acceptRichPart(delivery.id, index, receipt);
+          this.state.acceptRichPart(delivery.id, index, receipt, this.finalPin(delivery));
           if (index === parts.length - 1) this.state.delivered(delivery.id, receipt);
           else this.state.retryDelivery(delivery.id, Date.now() + this.interval);
         };
         this.persistAnswer(delivery.id, write);
         return { messageId, complete: false };
-      } else this.state.acceptRichPart(delivery.id, index, messageId);
+      } else this.state.acceptRichPart(delivery.id, index, messageId, this.finalPin(delivery));
       if (this.interval > 0) await delay(this.interval);
       if (approval && index < parts.length - 1) return { messageId, complete: false };
     }
