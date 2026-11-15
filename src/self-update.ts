@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parseRelease, type Release } from './updates.js';
@@ -68,7 +68,11 @@ async function checkout(root: string, home: string, run: UpdateRunner, signal?: 
   assertNoIncompleteUpdate(root);
   if (inside(root, home) || inside(home, root)) throw new UpdateError('Automatic update requires private relay data outside the installation directory.');
   const top = await run('git', ['rev-parse', '--show-toplevel'], root, signal);
-  if (realpathSync(top) !== realpathSync(root)) throw new UpdateError('Automatic update requires a standalone Git clone of the relay.');
+  if (realpathSync(top) !== realpathSync(root)) {
+    // Windows realpath preserves path casing. Compare filesystem identity rather than lowercasing distinct case-sensitive paths.
+    const actual = statSync(top, { bigint: true }); const expected = statSync(root, { bigint: true });
+    if (actual.ino === 0n || actual.ino !== expected.ino || actual.dev !== expected.dev) throw new UpdateError('Automatic update requires a standalone Git clone of the relay.');
+  }
   const origin = await run('git', ['remote', 'get-url', 'origin'], root, signal);
   if (![SOURCE, SOURCE.slice(0, -4), 'git@github.com:data-will-be-here/codex-telegram-relay.git',
     'ssh://git@github.com/data-will-be-here/codex-telegram-relay.git'].includes(origin)) {

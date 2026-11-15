@@ -70,18 +70,17 @@ test('console update prompt accepts default/yes/no and reprompts without treatin
 });
 
 test('release installation preserves configuration, topics, untracked files and branch history; SQLite backup includes WAL', async () => {
-  const f = fixture(); let state: State | undefined;
+  const f = fixture(); let state: State | undefined; let external: DatabaseSync | undefined;
   try {
     state = new State(f.home); const store = state;
     store.bind('session', 123, 'project', 'Project session');
-    const external = new DatabaseSync(join(f.home, 'state.sqlite'));
+    external = new DatabaseSync(join(f.home, 'state.sqlite'));
     external.exec('PRAGMA journal_mode=WAL; CREATE TABLE update_fixture(value TEXT); INSERT INTO update_fixture VALUES(\'from-wal\')');
     const result = await installRelease(f.root, f.home, release, { run: f.run, log: silent, beforeActivation: () => {
       store.close({ retainLock: true });
       assert.ok(existsSync(join(f.home, 'relay.lock')));
       assert.throws(() => new State(f.home), /already/u);
     } });
-    external.close();
     assert.equal(result.version, '0.1.22'); assert.equal(git(f.root, 'branch', '--show-current'), '');
     assert.equal(git(f.root, 'rev-parse', 'main'), f.head);
     assert.equal(readFileSync(join(f.root, 'source.txt'), 'utf8'), '0.1.22');
@@ -95,7 +94,17 @@ test('release installation preserves configuration, topics, untracked files and 
     assert.equal(backup.prepare('SELECT topicId FROM bindings WHERE threadId=?').get('session')?.topicId, 123); backup.close();
     store.close(); assert.ok(!existsSync(join(f.home, 'relay.lock')));
     const reopened = new State(f.home); assert.equal(reopened.binding('session')?.topicId, 123); reopened.close();
-  } finally { state?.close(); f.close(); }
+  } finally { external?.close(); state?.close(); f.close(); }
+});
+
+test('installation identity accepts Windows path casing but rejects another repository', async () => {
+  const f = fixture();
+  try {
+    if (process.platform === 'win32') await updateSupport(f.root, f.home, async (command, args, cwd, signal) =>
+      args.includes('--show-toplevel') ? f.root.toLowerCase() : f.run(command, args, cwd, signal));
+    await assert.rejects(updateSupport(f.root, f.home, async (command, args, cwd, signal) =>
+      args.includes('--show-toplevel') ? f.source : f.run(command, args, cwd, signal)), /standalone Git clone/u);
+  } finally { f.close(); }
 });
 
 test('tracked modifications and foreign origins are refused before preparation without exposing origin secrets', async () => {
