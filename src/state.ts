@@ -7,14 +7,16 @@ import { object, string, type Binding, type Json, type MessageMode } from './typ
 import { type ViewMode, type WidgetCard, type WidgetDelivery } from './widget-types.js';
 import { type FormattedText } from './format.js';
 import { type ScreenSpec } from './screen-types.js';
+import { type UpdateCache } from './updates.js';
 
 const MAX_ACTIVE_DELIVERIES = 1000;
 const OWNER_NOTICE_SQL = "(projectCwd IS NULL AND sourceThreadId IS NULL AND (key LIKE 'notice/%' OR key LIKE 'attention/status/%'))";
-const SETTLED_WIDGET_SQL = "(everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
+const SETTLED_WIDGET_SQL = "(pinStatus<>'sending' AND everUncertain=0 AND (delivery IN ('retired','disabled') OR (delivery='new' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL) OR (delivery='active' AND json_extract(payload,'$.snapshot.finishedAt') IS NOT NULL AND sentRevision>=CAST(json_extract(payload,'$.revision') AS INTEGER))))";
 
 export interface RichDeliveryPart {
+  pinContext?: { threadId: string; topicId: number; cwd: string };
   screen?: ScreenSpec;
-  method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument'; params: Json;
+  method: 'sendRichMessage' | 'sendMessage' | 'sendWidget' | 'sendDocument' | 'deleteMessage' | 'pinChatMessage'; params: Json;
   fallback?: string; fallbackText?: FormattedText;
   document?: { name: string; html: string }; tableDocument?: string; tableCaption?: string;
   resultMeta?: { part: number; total: number; completion?: string };
@@ -49,6 +51,7 @@ export interface NewSessionOperation {
 
 export class State {
   private db: DatabaseSync;
+  private databaseClosed = false;
   private lock: string;
   private lockValue: string;
   constructor(readonly home: string) {
@@ -112,6 +115,9 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'nextPart')) this.db.exec('ALTER TABLE outbox ADD COLUMN nextPart INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'retryAt')) this.db.exec('ALTER TABLE outbox ADD COLUMN retryAt INTEGER NOT NULL DEFAULT 0');
+      // Repeating deletion of the same verified service message is safe, including after a crash.
+      this.db.exec("UPDATE outbox SET status='pending' WHERE status='uncertain' AND key LIKE 'notice/widget-pin-cleanup/%' AND json_extract(richPlan,'$[0].method')='deleteMessage'");
+      this.db.exec("UPDATE outbox SET status='pin-uncertain' WHERE status='uncertain' AND key LIKE 'notice/final-pin/%' AND json_extract(richPlan,'$[0].method')='pinChatMessage'");
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sourceThreadId')) {
         this.db.exec(`BEGIN IMMEDIATE;
           ALTER TABLE outbox ADD COLUMN sourceThreadId TEXT;
@@ -128,6 +134,15 @@ export class State {
       if (!this.db.prepare('PRAGMA table_info(widget_answers)').all().some(column => column.name === 'multipartSafe')) this.db.exec('ALTER TABLE widget_answers ADD COLUMN multipartSafe INTEGER NOT NULL DEFAULT 0');
       const legacyWidgets = !this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'failure');
       if (legacyWidgets) this.db.exec('ALTER TABLE widget_cards ADD COLUMN failure TEXT');
+      if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'pinStatus')) {
+        this.db.exec("ALTER TABLE widget_cards ADD COLUMN pinStatus TEXT NOT NULL DEFAULT 'none'");
+        this.db.exec(`UPDATE widget_cards SET pinStatus='pending' WHERE delivery='active' AND messageId>0
+          AND json_extract(payload,'$.view')='widgets' AND json_extract(payload,'$.snapshot.finishedAt') IS NULL
+          AND json_extract(payload,'$.snapshot.status') IN ('working','approval','answer')`);
+      }
+      if (!this.db.prepare('PRAGMA table_info(widget_cards)').all().some(column => column.name === 'pinRetryAt'))
+        this.db.exec('ALTER TABLE widget_cards ADD COLUMN pinRetryAt INTEGER NOT NULL DEFAULT 0');
+      this.db.exec("UPDATE widget_cards SET pinStatus='uncertain' WHERE pinStatus='sending'");
       const interruptedWidgets = new Set(this.db.prepare("SELECT id FROM widget_cards WHERE delivery='sending' OR (? AND delivery='uncertain')").all(Number(legacyWidgets)).map(row => row.id));
       // New installations start with Widgets; upgrades retain explicit or implicit Classic and legacy opt-ins.
       this.db.prepare("INSERT OR IGNORE INTO settings(key,value) SELECT 'view',CASE WHEN ?=1 OR EXISTS(SELECT 1 FROM settings WHERE key LIKE 'view/%' AND value='widgets') THEN 'widgets' ELSE 'classic' END").run(Number(!existingState));
@@ -154,14 +169,31 @@ export class State {
       this.prune();
     } catch (error) { unlinkSync(this.lock); throw error; }
   }
-  close(): void {
-    this.db.close();
-    if (existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
+  close(options: { retainLock?: boolean } = {}): void {
+    if (!this.databaseClosed) { this.db.close(); this.databaseClosed = true; }
+    if (!options.retainLock && existsSync(this.lock) && readFileSync(this.lock, 'utf8') === this.lockValue) unlinkSync(this.lock);
   }
   viewMode(): ViewMode { return this.db.prepare("SELECT value FROM settings WHERE key='view'").get()?.value === 'widgets' ? 'widgets' : 'classic'; }
   setViewMode(view: ViewMode): void {
     if (!['classic', 'widgets'].includes(view)) throw new Error('Invalid relay view.');
     this.db.prepare("INSERT INTO settings VALUES('view',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(view);
+  }
+  updateCheck(): unknown {
+    const value = this.db.prepare("SELECT value FROM settings WHERE key='releaseCheck'").get()?.value;
+    if (typeof value !== 'string' || value.length > 1000) return;
+    try { return JSON.parse(value) as unknown; } catch { return; }
+  }
+  saveUpdateCheck(cache: UpdateCache): void {
+    this.db.prepare("INSERT INTO settings VALUES('releaseCheck',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(cache));
+  }
+  enqueueUpdateNotice(version: string, text: string, markup: Json): void {
+    if (this.db.prepare("SELECT value FROM settings WHERE key='releaseNotice'").get()?.value === version) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.enqueueOwnerNotice(`notice/release/${version}`, null, text, markup);
+      this.db.prepare("INSERT INTO settings VALUES('releaseNotice',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(version);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   widgetCards(threadId?: string): WidgetDelivery[] {
     return this.db.prepare('SELECT * FROM widget_cards' + (threadId ? ' WHERE threadId=?' : '') + ' ORDER BY rowid').all(...(threadId ? [threadId] : [])).map(row => this.decodeWidget(row)!);
@@ -198,12 +230,37 @@ export class State {
     }
     const payload: WidgetCard = { id: card.id, token: card.token, generation: card.generation, binding: card.binding, turnId: card.turnId,
       view: card.view, revision: card.revision, createdAt: card.createdAt, snapshot: card.snapshot };
-    this.db.prepare('INSERT INTO widget_cards(id,threadId,turnId,payload) VALUES(?,?,?,?) ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload')
+    this.db.prepare("INSERT INTO widget_cards(id,threadId,turnId,payload,pinStatus) VALUES(?,?,?,?,'pending') ON CONFLICT(threadId,turnId) DO UPDATE SET payload=excluded.payload")
       .run(card.id, card.binding.threadId, card.turnId, JSON.stringify(payload));
     return true;
   }
   claimWidget(id: string, editing: boolean): boolean {
     return !!this.db.prepare('UPDATE widget_cards SET delivery=? WHERE id=? AND delivery=?').run(editing ? 'editing' : 'sending', id, editing ? 'active' : 'new').changes;
+  }
+  nextWidgetPin(generation: string, now: number): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare(`SELECT * FROM widget_cards WHERE pinStatus='pending' AND pinRetryAt<=? AND messageId>0 AND delivery='active'
+      AND json_extract(payload,'$.generation')=? AND json_extract(payload,'$.view')='widgets' ORDER BY lastSentAt LIMIT 1`).get(now, generation));
+  }
+  claimWidgetPin(id: string, messageId: number): boolean {
+    return !!this.db.prepare("UPDATE widget_cards SET pinStatus='sending' WHERE id=? AND messageId=? AND pinStatus='pending'").run(id, messageId).changes;
+  }
+  pinnedWidgetMessage(messageId: number): WidgetDelivery | undefined {
+    return this.decodeWidget(this.db.prepare("SELECT * FROM widget_cards WHERE messageId=? AND pinStatus IN ('sending','pinned','uncertain') LIMIT 1").get(messageId));
+  }
+  pinnedRelayMessage(messageId: number, ownerId: number): Binding | undefined {
+    const widget = this.pinnedWidgetMessage(messageId);
+    if (widget) return widget.binding;
+    const row = this.db.prepare(`SELECT json_extract(richPlan,'$[0].pinContext.topicId') AS topicId,
+      json_extract(richPlan,'$[0].pinContext.cwd') AS projectCwd,json_extract(richPlan,'$[0].pinContext.threadId') AS sourceThreadId
+      FROM outbox WHERE key LIKE 'notice/final-pin/%'
+      AND status IN ('sending','sent','pin-uncertain') AND json_extract(richPlan,'$[0].method')='pinChatMessage'
+      AND json_extract(richPlan,'$[0].params.message_id')=? AND json_extract(richPlan,'$[0].params.chat_id')=? LIMIT 1`).get(messageId, ownerId);
+    if (!row || typeof row.sourceThreadId !== 'string' || typeof row.projectCwd !== 'string' || typeof row.topicId !== 'number') return;
+    const binding = this.binding(row.sourceThreadId);
+    return binding ? { ...binding, topicId: row.topicId, cwd: row.projectCwd } : undefined;
+  }
+  widgetPinResult(id: string, status: 'pending' | 'pinned' | 'failed' | 'uncertain' | 'cancelled', retryAt = 0): void {
+    this.db.prepare('UPDATE widget_cards SET pinStatus=?,pinRetryAt=? WHERE id=?').run(status, retryAt, id);
   }
   widgetDelivered(id: string, revision: number, messageId: number, now: number): void {
     this.db.prepare("UPDATE widget_cards SET delivery=CASE WHEN delivery='retired' THEN 'retired' ELSE 'active' END,messageId=?,sentRevision=MAX(sentRevision,?),retryAt=0,lastSentAt=?,failure=NULL WHERE id=?")
@@ -257,7 +314,7 @@ export class State {
     return false;
   }
   sessionDeliveryBusy(threadId: string): boolean {
-    return !!this.db.prepare("SELECT 1 FROM outbox WHERE sourceThreadId=? AND status IN ('pending','blocked','deferred','held','sending') LIMIT 1").get(threadId) ||
+    return !!this.db.prepare("SELECT 1 FROM outbox WHERE sourceThreadId=? AND key NOT LIKE 'notice/final-pin/%' AND status IN ('pending','blocked','deferred','held','sending') LIMIT 1").get(threadId) ||
       !!this.db.prepare("SELECT 1 FROM widget_cards WHERE threadId=? AND delivery IN ('sending','editing') LIMIT 1").get(threadId) ||
       !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_jobs'").get() &&
       !!this.db.prepare("SELECT 1 FROM file_jobs WHERE threadId=? AND status IN ('preparing','pending','sending') LIMIT 1").get(threadId);
@@ -572,7 +629,7 @@ export class State {
       SELECT id FROM outbox WHERE status='deferred' ORDER BY CASE WHEN key LIKE 'attention/%' THEN 0 ELSE 1 END,id
       LIMIT MAX(0,${MAX_ACTIVE_DELIVERIES}-(SELECT count(*) FROM outbox WHERE status='pending'))
     )`);
-    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' AND retryAt<=? ORDER BY CASE WHEN key LIKE 'attention/%' OR key LIKE 'prompt/%' THEN 0 ELSE 1 END,id LIMIT 1`).get(Date.now());
+    const row = this.db.prepare(`SELECT *,${OWNER_NOTICE_SQL} AS ownerNotice FROM outbox WHERE status='pending' AND retryAt<=? ORDER BY CASE WHEN key LIKE 'attention/%' OR key LIKE 'prompt/%' THEN 0 WHEN key LIKE 'notice/final-pin/%' THEN 2 ELSE 1 END,id LIMIT 1`).get(Date.now());
     if (!row) return undefined;
     return {
       id: Number(row.id), key: string(row.key), topicId: row.topicId === null ? null : Number(row.topicId), text: string(row.text),
@@ -592,8 +649,31 @@ export class State {
   saveRichPlan(id: number, parts: RichDeliveryPart[]): void {
     this.db.prepare("UPDATE outbox SET richPlan=? WHERE id=? AND status='sending'").run(JSON.stringify(parts), id);
   }
-  acceptRichPart(id: number, index: number, messageId: number | null): void {
-    this.db.prepare("UPDATE outbox SET nextPart=?,messageId=? WHERE id=? AND status='sending' AND nextPart=?").run(index + 1, messageId, id, index);
+  private queueFinalPin(row: Record<string, unknown> | undefined, messageId: number, pin: { ownerId: number; context: DeliveryContext }): void {
+    if (!row || messageId < 1 || typeof row.topicId !== 'number' || typeof row.projectCwd !== 'string' || typeof row.sourceThreadId !== 'string' ||
+        row.topicId !== pin.context.topicId || row.projectCwd !== pin.context.projectCwd || row.sourceThreadId !== pin.context.sourceThreadId) return;
+    const key = string(row.key); const backup = 'attention/final-widget-fallback/';
+    const original = key.startsWith(backup) ? key.slice(backup.length) : key;
+    if (!original.startsWith('final/')) return;
+    const plan: RichDeliveryPart[] = [{ method: 'pinChatMessage', params: { chat_id: pin.ownerId, message_id: messageId },
+      pinContext: { threadId: row.sourceThreadId, topicId: row.topicId, cwd: row.projectCwd } }];
+    this.db.prepare(`INSERT OR IGNORE INTO outbox(key,topicId,text,markup,at,status,projectCwd,sourceThreadId,sessionName,richPlan)
+      VALUES(?,?,'',NULL,?,'pending',?,?,?,?)`).run(`notice/final-pin/${original}`, row.topicId, Date.now(), row.projectCwd, row.sourceThreadId,
+      typeof row.sessionName === 'string' ? row.sessionName : null, JSON.stringify(plan));
+  }
+  rememberFinalPin(id: number, messageId: number, pin: { ownerId: number; context: DeliveryContext } | undefined): void {
+    if (pin) this.queueFinalPin(this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id), messageId, pin);
+  }
+  finalPinUncertain(id: number): void {
+    this.db.prepare("UPDATE outbox SET status='pin-uncertain' WHERE id=? AND status='sending'").run(id);
+  }
+  acceptRichPart(id: number, index: number, messageId: number | null, pin?: { ownerId: number; context: DeliveryContext }): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const changed = this.db.prepare("UPDATE outbox SET nextPart=?,messageId=? WHERE id=? AND status='sending' AND nextPart=?").run(index + 1, messageId, id, index).changes;
+      if (changed && index === 0 && messageId !== null && pin) this.rememberFinalPin(id, messageId, pin);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   acceptApprovalPart(id: number, index: number, messageId: number): boolean {
     // Retirement can hold an in-flight send. Keep its receipt without releasing the hold.
@@ -648,7 +728,7 @@ export class State {
   prune(): void {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
-    this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled') AND key NOT IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status IN ('pending','consumed'))").run(cutoff);
+    this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled','pin-uncertain') AND key NOT IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status IN ('pending','consumed'))").run(cutoff);
     this.db.prepare("DELETE FROM approval_cards WHERE at<? AND requestIdentity IN (SELECT identity FROM approval_requests WHERE status='resolved') AND deliveryKey NOT IN (SELECT key FROM outbox WHERE status='uncertain')").run(cutoff);
     this.db.prepare("DELETE FROM approval_requests WHERE status='resolved' AND at<? AND identity NOT IN (SELECT requestIdentity FROM approval_cards)").run(cutoff);
     this.db.prepare('DELETE FROM async_answers WHERE at<? AND threadId NOT IN (SELECT threadId FROM host_watch)').run(cutoff);

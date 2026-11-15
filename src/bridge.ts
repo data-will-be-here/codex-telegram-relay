@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage } from './approvals.js';
+import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage, approvalOverview, approvalDetailsMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
 import { FirstMessageRequiredError, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
@@ -526,8 +526,10 @@ export class Bridge {
     const markup = keyboard as unknown as Json;
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
-    if (!receipt) this.screens.enqueue(key, binding.topicId, approvalDisplayMessage(request.method, detailsParams, agent), markup,
-      { kind: 'approval', title: request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review', markdown: true, fullText: card, widgets: prompt.widgets });
+    const overview = approvalOverview(request.method, detailsParams, binding.cwd, agent);
+    if (!receipt) this.screens.enqueue(key, binding.topicId, overview ?? approvalDisplayMessage(request.method, detailsParams, agent), markup,
+      { kind: 'approval', title: overview?.split('\n')[0] ?? (request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review'),
+        markdown: true, fullText: overview ? approvalDetailsMessage(request.method, detailsParams, agent) : card, details: !!overview || prompt.widgets === true, widgets: prompt.widgets });
     prompt.approvalMarkup = this.screens.markup(key, markup)!;
     if (receipt?.status === 'pending' || receipt?.status === 'held') this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
     else if (receipt) await this.refreshApproval(prompt);
@@ -594,6 +596,25 @@ export class Bridge {
     return true;
   }
 
+  /** Telegram-generated bot service events have a separate, strictly read-only-to-Codex route. */
+  private pinNotice(message: Json): void {
+    const chat = object(message.chat); const from = object(message.from); const pinned = object(message.pinned_message);
+    const original = object(pinned.from); const pinnedChat = object(pinned.chat);
+    const serviceId = integer(message.message_id); const pinnedId = integer(pinned.message_id);
+    const botId = integer(from.id);
+    if (chat.id !== this.config.ownerId || chat.type !== 'private' || pinnedChat.id !== this.config.ownerId || pinnedChat.type !== 'private' ||
+        from.is_bot !== true || original.is_bot !== true || !botId || botId < 1 || from.id !== original.id ||
+        !serviceId || serviceId < 1 || !pinnedId || pinnedId < 1 || serviceId === pinnedId ||
+        message.forward_origin || ['text', 'caption', 'photo', 'document', 'video', 'audio', 'voice', 'animation'].some(key => message[key] !== undefined)) return;
+    const subject = this.state.pinnedRelayMessage(pinnedId, this.config.ownerId); if (!subject) return;
+    const binding = this.state.binding(subject.threadId);
+    if (!binding || binding.topicId !== subject.topicId || binding.cwd !== subject.cwd ||
+        this.config.ignoredThreadIds?.includes(binding.threadId) || !this.allowed(binding.cwd, binding.threadId) ||
+        pinned.message_thread_id !== undefined && pinned.message_thread_id !== binding.topicId) return;
+    this.state.enqueueScreen(`notice/widget-pin-cleanup/${this.config.ownerId}/${serviceId}`, binding.topicId, '', null,
+      [{ method: 'deleteMessage', params: { chat_id: this.config.ownerId, message_id: serviceId } }]);
+  }
+
   async update(update: Json): Promise<void> {
     const id = integer(update.update_id);
     if (id === undefined) return;
@@ -601,6 +622,9 @@ export class Bridge {
     const message = Object.keys(callback).length ? object(callback.message) : object(update.message);
     const from = Object.keys(callback).length ? object(callback.from) : object(message.from);
     const chat = object(message.chat);
+    if (!Object.keys(callback).length && message.pinned_message !== undefined) {
+      this.pinNotice(message); this.state.advance(id); return;
+    }
     // Authorize before any payload journal, task allocation, native request, or outbound reply.
     if (from.id !== this.config.ownerId || from.is_bot === true || chat.id !== this.config.ownerId || chat.type !== 'private') {
       this.state.advance(id); return;
@@ -627,7 +651,7 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('a:')) {
         await this.answerCallback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
-      if (Object.keys(callback).length && string(callback.data).startsWith('sc:')) {
+      if (Object.keys(callback).length && /^s[cd]:/u.test(string(callback.data))) {
         await this.screens.text(callback, message, topic); this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('ar:')) {

@@ -97,7 +97,7 @@ test('a long text version preserves the full body while notifying only for its f
   } finally { f.close(); }
 });
 
-test('widget approval keeps exact native authority and offers the full command as text after closing', async () => {
+test('widget approval keeps exact native authority and offers read-only full details after closing', async () => {
   const f = await fixture();
   try {
     f.state.setViewMode('widgets'); f.codex.pending.add('review');
@@ -112,11 +112,17 @@ test('widget approval keeps exact native authority and offers the full command a
     assert.equal(part.caption, 'Command approval · project-a', 'command and task belong in the body, not the caption');
     assert.ok(string(payload(string(part.html)).text).includes('Abbreviated preview'));
     const choices = buttons(keyboard(f)); const approve = choices.find(button => button.text === 'Allow once')!;
-    const textButton = choices.find(button => button.text === 'Text version')!;
+    const detailsButton = choices.find(button => button.text === 'Details')!;
+    assert.ok(detailsButton); assert.equal(choices.some(button => button.text === 'Text version'), false);
     await f.bridge.update(tap(1, approve, id)); await f.bridge.update(tap(2, approve, id));
     assert.deepEqual(f.codex.writes, [{ method: 'respond', params: { id: 'review', result: { decision: 'accept' } } }]);
     assert.ok(f.telegram.calls.some(call => call.method === 'editMessageWidgetData' && string(call.params.chat_data).includes('Review closed')));
-    await f.bridge.update(tap(3, textButton, id)); await f.drain();
+    await f.bridge.update(tap(3, detailsButton, id)); await f.drain();
+    const details = widgets(f).at(-1)!;
+    assert.ok(string(payload(string(details.html)).text).includes(command));
+    assert.equal(buttons(details.reply_markup).some(button => button.text === 'Allow once'), false);
+    const textButton = buttons(details.reply_markup).find(button => button.text === 'Text version')!;
+    await f.bridge.update(tap(4, textButton, f.telegram.message)); await f.drain();
     assert.ok(f.telegram.sent().map(part => string(part.text)).join('').includes(command));
   } finally { f.close(); }
 });
@@ -248,7 +254,7 @@ test('long widget approvals keep decisions unavailable until every review part i
   try {
     f.state.setViewMode('widgets'); f.codex.pending.add('long-review');
     await f.bridge.request({ id: 'long-review', method: 'item/commandExecution/requestApproval', params: {
-      threadId: 'thread-a', turnId: 'turn', command: 'echo synthetic', reason: 'Synthetic complete security review context. '.repeat(1000), availableDecisions: ['accept', 'decline'] } });
+      threadId: 'thread-a', turnId: 'turn', command: 'echo ' + 'complete-ordinary-argument '.repeat(1600), reason: 'Synthetic complete security review context.', availableDecisions: ['accept', 'decline'] } });
     const original = f.state.next()!; assert.ok(original.richPlan!.length > 1);
     const outbox = new Outbox(f.state, f.telegram, f.bridge.config, 0);
     await outbox.flushOne(); assert.equal(widgets(f)[0]!.reply_markup, undefined);

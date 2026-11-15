@@ -141,6 +141,44 @@ export class Outbox {
     this.state.cancelDelivery(delivery.id);
     throw new DeliveryCancelled();
   }
+  private finalPin(delivery: Delivery): { ownerId: number; context: DeliveryContext } | undefined {
+    if (!/^(?:final\/|attention\/final-widget-fallback\/final\/)/u.test(delivery.key) || !delivery.sourceThreadId) return;
+    const binding = this.state.binding(delivery.sourceThreadId);
+    if (this.allowed(delivery) && binding?.topicId === delivery.topicId && binding.cwd === delivery.projectCwd)
+      return { ownerId: this.config.ownerId, context: delivery };
+  }
+  private async pinMessage(messageId: number): Promise<{ status: 'pending' | 'pinned' | 'failed' | 'uncertain'; retryAt: number }> {
+    try {
+      const result = await this.telegram.call('pinChatMessage', { chat_id: this.config.ownerId, message_id: messageId, disable_notification: true });
+      if (result !== true) throw new TelegramError('Pin receipt was not confirmed.', 0);
+      return { status: 'pinned', retryAt: 0 };
+    } catch (error) {
+      if (error instanceof TelegramError && (error.notSent || error.status === 429))
+        return { status: 'pending', retryAt: Date.now() + (error.notSent ? 3 : Math.max(1, error.retryAfter ?? 3)) * 1000 };
+      console.error(`Relay message pin unavailable (${error instanceof TelegramError ? error.status : 0}); delivery is unaffected.`);
+      return { status: error instanceof TelegramError && error.status >= 400 && error.status < 500 ? 'failed' : 'uncertain', retryAt: 0 };
+    }
+  }
+  /** Pinning has its own receipt: failures never invalidate an already delivered activity card. */
+  private async pinWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
+    const card = this.state.nextWidgetPin(guard.generation, Date.now());
+    if (!card || card.messageId === null) return false;
+    const context = { topicId: card.binding.topicId, projectCwd: card.binding.cwd, sourceThreadId: card.binding.threadId, ownerNotice: false };
+    const valid = (): boolean => {
+      const binding = this.state.binding(card.binding.threadId);
+      return this.allowed(context) && binding?.topicId === card.binding.topicId && binding.cwd === card.binding.cwd &&
+        this.state.widgetCard(card.binding.threadId, card.turnId)?.generation === guard.generation;
+    };
+    if (!valid()) { this.state.widgetPinResult(card.id, 'cancelled'); return true; }
+    try {
+      if (!await guard.allowed(card)) { this.state.widgetPinResult(card.id, 'pending', Date.now() + 5000); return false; }
+    } catch { this.state.widgetPinResult(card.id, 'pending', Date.now() + 5000); return false; }
+    if (!valid()) { this.state.widgetPinResult(card.id, 'cancelled'); return true; }
+    if (!this.state.claimWidgetPin(card.id, card.messageId)) return false;
+    const { status, retryAt } = await this.pinMessage(card.messageId);
+    this.persistWidget(`pin/${card.id}`, () => this.state.widgetPinResult(card.id, status, retryAt));
+    return true;
+  }
   /** Durable low-priority widget queue, serialized by the same sender as ordinary output. */
   async flushWidget(guard: WidgetDeliveryGuard): Promise<boolean> {
     const now = Date.now();
@@ -152,7 +190,10 @@ export class Outbox {
       catch { this.widgetNextAt = now + 3000; return false; }
     }
     let card = this.state.nextWidgetDelivery(guard.generation, now);
-    if (!card) return false;
+    if (!card) {
+      this.widgetSending = true;
+      try { return await this.pinWidget(guard); } finally { this.widgetSending = false; }
+    }
     this.widgetSending = true;
     try {
       const context = { topicId: card.binding.topicId, projectCwd: card.binding.cwd, sourceThreadId: card.binding.threadId, ownerNotice: false };
@@ -212,6 +253,7 @@ export class Outbox {
           });
         }
       }
+      await this.pinWidget(guard);
       return true;
     } finally { this.widgetSending = false; }
   }
@@ -257,7 +299,7 @@ export class Outbox {
         const result = await this.richDelivery(delivery, rich, project, approval);
         if (result.complete) {
           if (approval) this.state.completeApprovalDelivery(delivery.id, delivery.richPlan!.length,
-            delivery.richPlan!.length === 1 && !delivery.richPlan![0]!.screen);
+            delivery.nextPart === 0 && delivery.richPlan!.length === 1 && delivery.richPlan![0]!.method === 'sendMessage');
           else this.state.delivered(delivery.id, result.messageId);
         }
         return true;
@@ -293,6 +335,10 @@ export class Outbox {
           chunks.splice(index, 1, ...formatMessages(withoutFormatting(chunk), false, limit).map(part => ({ ...part, plain: true })));
           index--; continue;
         }
+        if (index === 0 && messageId !== null) {
+          const first = messageId;
+          this.persistAnswer(delivery.id, () => this.state.rememberFinalPin(delivery.id, first, this.finalPin(delivery)));
+        }
         if (this.interval > 0) await delay(this.interval);
       }
       this.state.delivered(delivery.id, messageId);
@@ -322,9 +368,52 @@ export class Outbox {
     let messageId: number | null = delivery.messageId;
     for (let index = delivery.nextPart; index < parts.length; index++) {
       const part = parts[index]!;
+      if (part.method === 'pinChatMessage') {
+        this.check(delivery);
+        const target = integer(part.params.message_id);
+        const context = part.pinContext;
+        if (parts.length !== 1 || !target || target < 1 || part.params.chat_id !== this.config.ownerId || !delivery.key.startsWith('notice/final-pin/final/') ||
+            !context || context.threadId !== delivery.sourceThreadId || context.topicId !== delivery.topicId || context.cwd !== delivery.projectCwd) {
+          this.state.cancelDelivery(delivery.id); return { messageId: null, complete: false };
+        }
+        const outcome = await this.pinMessage(target);
+        this.persistAnswer(delivery.id, () => {
+          if (outcome.status === 'pending') this.state.retryDelivery(delivery.id, outcome.retryAt);
+          else if (outcome.status === 'pinned') this.state.delivered(delivery.id, target);
+          else if (outcome.status === 'uncertain') this.state.finalPinUncertain(delivery.id);
+          else this.state.cancelDelivery(delivery.id);
+        });
+        return { messageId: target, complete: false };
+      }
+      if (part.method === 'deleteMessage') {
+        this.check(delivery);
+        const id = integer(part.params.message_id);
+        if (parts.length !== 1 || !id || id < 1 || part.params.chat_id !== this.config.ownerId ||
+            delivery.key !== `notice/widget-pin-cleanup/${this.config.ownerId}/${id}`) {
+          this.state.cancelDelivery(delivery.id); return { messageId: null, complete: false };
+        }
+        try {
+          const deleted = await this.telegram.call('deleteMessage', { chat_id: this.config.ownerId, message_id: id });
+          if (deleted !== true) throw new TelegramError('Pin notice deletion receipt was not confirmed.', 0);
+        } catch (error) {
+          const missing = error instanceof TelegramError && error.status === 400 && /message to delete not found|MESSAGE_ID_INVALID/iu.test(error.message);
+          if (!missing) {
+            if (!(error instanceof TelegramError) || error.status === 0 || error.status === 429 || error.status >= 500) {
+              const delay = error instanceof TelegramError && error.status === 429 ? Math.max(1, error.retryAfter ?? 3) : 3;
+              this.persistAnswer(delivery.id, () => this.state.retryDelivery(delivery.id, Date.now() + delay * 1000));
+            } else {
+              this.state.cancelDelivery(delivery.id);
+              console.error(`Pin service message cleanup unavailable (${error.status}); the activity card remains pinned.`);
+            }
+            return { messageId: null, complete: false };
+          }
+        }
+        this.persistAnswer(delivery.id, () => this.state.delivered(delivery.id, null));
+        return { messageId: null, complete: false };
+      }
       const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
-      if ((!approval || parts.length === 1 && !screen) && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
+      if ((!approval || parts.length === 1 && part.method === 'sendMessage') && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
       try {
         let retries = 0;
         while (true) {
@@ -360,6 +449,7 @@ export class Outbox {
             return splitFormatted(item.fallbackText, 3300).map((text, chunk) => ({ method: 'sendMessage',
               ...(chunk === 0 && item.screen ? { screen: item.screen } : {}), params: {
                 ...withProjectHeader(text, project, delivery.sessionName, delivery.projectLabel),
+                ...(item.params.reply_parameters ? { reply_parameters: item.params.reply_parameters } : {}),
                 link_preview_options: { is_disabled: true }, disable_notification: index > 0 || chunk > 0,
               } }));
           });
@@ -430,13 +520,13 @@ export class Outbox {
       } else if ((result || screen) && messageId !== null) {
         const receipt = messageId;
         const write = (): void => {
-          this.state.acceptRichPart(delivery.id, index, receipt);
+          this.state.acceptRichPart(delivery.id, index, receipt, this.finalPin(delivery));
           if (index === parts.length - 1) this.state.delivered(delivery.id, receipt);
           else this.state.retryDelivery(delivery.id, Date.now() + this.interval);
         };
         this.persistAnswer(delivery.id, write);
         return { messageId, complete: false };
-      } else this.state.acceptRichPart(delivery.id, index, messageId);
+      } else this.state.acceptRichPart(delivery.id, index, messageId, this.finalPin(delivery));
       if (this.interval > 0) await delay(this.interval);
       if (approval && index < parts.length - 1) return { messageId, complete: false };
     }

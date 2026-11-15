@@ -5,6 +5,8 @@ export interface ScreenOptions {
   editable?: boolean;
   markdown?: boolean;
   fullText?: string | undefined;
+  /** One read-only disclosure entry instead of the usual text-copy button. */
+  details?: boolean;
   caption?: string | undefined;
   meters?: { label: string; remaining: number }[] | undefined;
   widgets?: boolean | undefined;

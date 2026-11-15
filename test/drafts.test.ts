@@ -202,7 +202,7 @@ test('a slow in-flight preview settles before the single writer sends a final ta
     settle(); await inFlight;
     // Same serialization contract as the CLI output loop: await preview, then drain permanent work.
     await f.drain();
-    assert.deepEqual(sent, ['sendRichMessageDraft', 'sendRichMessage']);
+    assert.deepEqual(sent, ['sendRichMessageDraft', 'sendRichMessage', 'pinChatMessage']);
     assert.equal(await f.bridge.flushDraft(), false);
   } finally { f.close(); }
 });

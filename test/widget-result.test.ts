@@ -51,6 +51,7 @@ test('a complete formatted answer stays in one locally paged document when it fi
   const source = '# Heading\n\n**Bold** and *italic*.\n\n- Item one\n- Item two\n\n```ts\nconst value = "🧪";\n```\n\n' + 'Русский абзац с полным окончанием предложения. '.repeat(60) + 'FINAL_TAIL';
   const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'Demo' } }, source, 'a'.repeat(32)); assert.equal(parts.length, 1);
   assert.equal(parts[0]!.params.caption, 'Answer ready · Demo');
+  assert.equal(resultPayload(string(parts[0]!.params.html)).status, 'Ready');
   const data = parts.map(part => resultPayload(string(part.params.html)));
   assert.equal(data.map(item => item.text).join(''), renderMarkdown(source).text);
   assert.ok(data.some(item => JSON.stringify(item.entities).includes('bold')));
@@ -61,6 +62,21 @@ test('a complete formatted answer stays in one locally paged document when it fi
   assert.ok(parts.at(-1)!.params.reply_markup);
   assert.match(string(parts[0]!.params.html), /id="nav"/u);
   assert.match(string(parts[0]!.params.html), /pointerup/u);
+});
+
+test('approval layout removes only outside-code blank space and preserves native fallback text', () => {
+  const command = 'printf "first\\nsecond"\n\n# intentional blank line\n \t';
+  const message = renderMarkdown('**Command**\n\n```\n' + command + '\n```\n\n**Scope**\nThis operation.');
+  const html = resultDocument(card, message, 1, 1, true, { kind: 'approval', title: 'Command approval' });
+  const compact = resultPayload(html); const text = string(compact.text);
+  const code = (compact.entities as Json[]).find(entity => entity.type === 'pre')!;
+  assert.equal(text.slice(Number(code.offset), Number(code.offset) + Number(code.length)), command);
+  assert.equal(text[Number(code.offset) - 1], 'd');
+  assert.equal(text[Number(code.offset) + Number(code.length)], 'S');
+  assert.match(string(compact.text), /# intentional blank line/u); assert.match(message.text, /Command\n\n/u);
+  assert.match(html, /line-height:1\.3/u);
+  const ordinary = resultPayload(resultDocument(card, message, 1, 1));
+  assert.equal(ordinary.text, message.text, 'Final answers retain their original paragraph spacing');
 });
 
 test('untrusted text stays data in a fixed reader and every document fits server budgets', () => {
@@ -186,12 +202,14 @@ test('only real payload limits split an oversized answer, with no missing text o
     assert.equal(html.includes('<h3 id="status">'), index === 0);
     assert.doesNotMatch(html, /id="nav"|id="page"|pointerup/u, 'overflow parts must read sequentially without nested paging');
     assert.equal(part.params.disable_notification, index !== 0);
+    assert.equal(part.params.caption, index === 0 ? 'Answer ready · ' + (card.binding.projectLabel || card.binding.cwd.split(/[\\/]/u).at(-1)) : undefined);
   }
 });
 
 test("the actual three-section Russian reading test stays in one document", () => {
   const source = "**Проверка текста и оформления**\n\nЭто тестовый ответ для проверки чтения внутри одной карточки. Текст должен оставаться чётким, абзацы — отделяться друг от друга, а выделенные заголовки — помогать ориентироваться. Размер текста и цвета должны соответствовать настройкам Telegram. Внизу карточки находятся стрелки и счётчик страниц.\n\n**Проверка переключения страниц**\n\nПопробуй провести пальцем влево, а затем вправо. Карточка должна переключать страницы без новых сообщений в переписке. Тот же результат должен получаться при нажатии стрелок внизу. Вертикальное движение пальца должно прокручивать переписку. При возвращении назад текст должен оставаться прежним.\n\n**Проверка завершения ответа**\n\nЭто заключительная часть тестового ответа. Проверь, что последние предложения доступны полностью, строки не обрезаются снизу, а счётчик показывает последнюю страницу. Затем вернись к началу: перед заголовком Answer ready должна находиться зелёная галочка. Последняя строка этого ответа: **тест успешно дошёл до конца**.";
-  const parts = resultParts(card, source, "a".repeat(32));
-  assert.equal(parts.length, 1, "the full real-world sample fits below the Telegram compressed limit");
+  const parts = resultParts({ ...card, binding: { ...card.binding, projectLabel: 'codex-telegram-relay' } }, source, "a".repeat(32));
+  assert.equal(parts.length, 1, "the full real-world sample fits below the Telegram compressed limit with the full project name");
+  assert.doesNotMatch(string(parts[0]!.params.html), /[\r\n]/u, 'Template whitespace is minified; payload newlines remain JSON-escaped');
   assert.equal(resultPayload(string(parts[0]!.params.html)).text, renderMarkdown(source).text);
 });
