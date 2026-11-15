@@ -53,8 +53,8 @@ export class Screens {
   }
   enqueue(key: string, topicId: number | null, text: string, markup: Json | null, options: ScreenOptions, ownerNotice = false): void {
     const enabled = options.widgets ?? this.state.viewMode() === 'widgets';
-    if (!enabled) { if (ownerNotice) this.state.enqueueOwnerNotice(key, topicId, text, markup); else this.state.enqueue(key, topicId, text, markup); return; }
-    const parts = this.prepare(topicId, text, options);
+    if (!enabled && !options.details) { if (ownerNotice) this.state.enqueueOwnerNotice(key, topicId, text, markup); else this.state.enqueue(key, topicId, text, markup); return; }
+    const parts = this.prepare(topicId, text, { ...options, widgets: enabled });
     this.state.enqueueScreen(key, topicId, text, readerButton(markup, parts[0]!.screen!), parts, ownerNotice);
   }
   markup(key: string, markup: Json | null): Json | null {

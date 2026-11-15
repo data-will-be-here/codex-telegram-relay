@@ -299,7 +299,7 @@ export class Outbox {
         const result = await this.richDelivery(delivery, rich, project, approval);
         if (result.complete) {
           if (approval) this.state.completeApprovalDelivery(delivery.id, delivery.richPlan!.length,
-            delivery.richPlan!.length === 1 && !delivery.richPlan![0]!.screen);
+            delivery.nextPart === 0 && delivery.richPlan!.length === 1 && delivery.richPlan![0]!.method === 'sendMessage');
           else this.state.delivered(delivery.id, result.messageId);
         }
         return true;
@@ -413,7 +413,7 @@ export class Outbox {
       }
       const params = { ...part.params, chat_id: this.config.ownerId } as Json;
       if (delivery.topicId !== null) params.message_thread_id = delivery.topicId;
-      if ((!approval || parts.length === 1 && !screen) && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
+      if ((!approval || parts.length === 1 && part.method === 'sendMessage') && index === parts.length - 1 && delivery.markup) params.reply_markup = delivery.markup;
       try {
         let retries = 0;
         while (true) {

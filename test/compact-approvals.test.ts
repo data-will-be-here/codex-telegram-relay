@@ -16,7 +16,7 @@ import { fixture, click, temporary, FakeTelegram } from './helpers.js';
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 const widgets = (f: Fixture) => f.telegram.calls.filter(call => call.method === 'sendWidget').map(call => call.params);
 const buttons = (markup: unknown) => array(object(markup).inline_keyboard).flatMap(row => array(row).map(object));
-const controls = (f: Fixture) => buttons(f.telegram.calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)!.params.reply_markup);
+const controls = (f: Fixture) => buttons((f.telegram.calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)?.params ?? f.telegram.sent().at(-1)!).reply_markup);
 function data(part: Json): Json {
   const script = string(part.html).match(/<script>([\s\S]*?)<\/script>/u)![1]!;
   const context: Json = {}; runInNewContext(script.slice(0, script.indexOf('function el(')), context); return object(context.D);

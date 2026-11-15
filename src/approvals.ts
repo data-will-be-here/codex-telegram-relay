@@ -142,17 +142,21 @@ export function approvalOverview(method: string, params: Json, project: string, 
   if (command && params.kind != null && !['command', 'humanCommand', 'writeStdin'].includes(string(params.kind))) return;
   const title = command ? params.kind === 'writeStdin' ? 'Terminal input approval' : 'Command approval' : files ? 'File change approval' : 'Permission approval';
   const sections = [title];
-  if (agent) sections.push('**Agent**\n' + code(`${agent.name} · ${agent.threadId.slice(0, 8)}`));
+  if (agent) sections.push('**Agent**\n' + code(`${agent.name} · ${agent.threadId.length <= 12 ? agent.threadId : agent.threadId.slice(0, 8)}`));
   const reason = string(params.reason).replace(/\r\n?/gu, '\n');
   if (reason) {
-    if (reason.length <= 500) sections.push('**Reason**\n' + reasonMarkdown(shortenAuxiliaryQuotes(reason)));
+    const shortened = shortenAuxiliaryQuotes(reason);
+    const tokens = Lexer.lex(shortened);
+    if (shortened.length <= 500 || shortened.length <= 1800 && tokens.some(token => token.type === 'code')) sections.push('**Reason**\n' + reasonMarkdown(shortened));
     else {
-      const prefix = reason.slice(0, 400);
+      // Shorten prose after parsing excerpts so an open code fence never becomes literal summary text.
+      const prose = tokens.filter(token => token.type !== 'code').map(token => token.raw).join('');
+      const prefix = prose.slice(0, 400);
       const sentence = [...prefix.matchAll(/[.!?](?=\s|$)/gu)].at(-1);
       const end = sentence && sentence.index > 180 ? sentence.index + 1 : Math.max(prefix.lastIndexOf(' '), 1);
       sections.push('**Reason**\n' + literal(prefix.slice(0, end)) + '\nReason shortened; full reason in Details.');
     }
-  }
+  } else sections.push('**Reason**\nNot provided by Codex.');
   if (command) {
     if (params.command != null && typeof params.command !== 'string') return;
     const original = string(params.command);
@@ -189,6 +193,8 @@ export function approvalOverview(method: string, params: Json, project: string, 
       entries.push(action + ': ' + reviewPath(string(change.path), project) + (string(kind.move_path) ? '\nMove to: ' + reviewPath(string(kind.move_path), project) : ''));
     }
     sections.push('**Files (' + changes.length + ')**\n' + code(entries.join('\n')) + '\nFull diff in Details.');
+    const diff = string(object(changes[0]).diff).replace(/\r\n?/gu, '\n');
+    if (diff) sections.push('**Diff preview' + (changes.length > 1 ? ' (first file)' : '') + '**\n' + code(shortenReviewText(diff, 'Diff abbreviated'), 'diff'));
     if (params.grantRoot != null) {
       if (!string(params.grantRoot)) return;
       sections.push('**Requested write root**\n' + code(string(params.grantRoot)) + '\nCodex requests this root for the session; actual duration depends on native support.');
@@ -250,7 +256,7 @@ function literal(text: string): string {
   return text.replace(/[\\`*_{}\[\]()#+.!|>~<:@\-]/gu, '\\$&');
 }
 
-function code(text: string): string {
+function code(text: string, language = ''): string {
   // CommonMark normalizes carriage returns, and Telegram may discard invisible controls.
   // A labelled JSON string preserves their exact meaning without changing native input.
   const escaped = /[\x00-\x08\x0b-\x1f\x7f]/u.test(text);
@@ -259,7 +265,7 @@ function code(text: string): string {
   for (const run of shown.matchAll(/`+/gu)) longest = Math.max(longest, run[0].length);
   const fence = '`'.repeat(longest + 1);
   const note = escaped ? 'Control characters are shown as JSON escapes; the block is a JSON string.\n\n' : '';
-  return `${note}${fence}\n${shown}\n${fence}`;
+  return `${note}${fence}${language}\n${shown}\n${fence}`;
 }
 
 /** Only presentation changes: display the exact command, retaining unfamiliar security context. */

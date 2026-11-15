@@ -93,7 +93,7 @@ test('multipart before-connect retry preserves accepted review parts and keeps c
   const f = await fixture(); const originalNow = Date.now; let now = originalNow(); Date.now = () => now;
   try {
     f.codex.pending.add(request.id);
-    await f.bridge.request({ ...request, params: { ...request.params, reason: 'Review context without executable effects. '.repeat(250) } });
+    await f.bridge.request({ ...request, params: { ...request.params, reason: 'Review context without executable effects. '.repeat(250), futureSecurityContext: { scope: 'unrecognized-full-review' } } });
     const call = f.telegram.call.bind(f.telegram); let attempts = 0;
     f.telegram.call = async (method, params = {}) => {
       if (method === 'sendMessage' && ++attempts === 2) throw new TelegramError('Before connect', 0, undefined, true);
@@ -358,7 +358,7 @@ test('multipart approval replay edits only the final control message and preserv
   const f = await persistentFixture();
   try {
     const command = 'echo literal-command-content';
-    const long = { ...request, params: { ...request.params, command, reason: 'Complete review context. '.repeat(300) } };
+    const long = { ...request, params: { ...request.params, command, reason: 'Complete review context. '.repeat(300), futureSecurityContext: { scope: 'unrecognized-full-review' } } };
     await f.bridge.request(long); await f.drain();
     const parts = f.telegram.sent().length; const lastMessage = f.telegram.message;
     assert.ok(parts > 1);
@@ -460,7 +460,8 @@ for (const consumeBeforeLateEdit of [false, true]) test(`a late keyboard edit fr
     release(); await oldRefresh;
     const future = now() + 2000; Date.now = () => future;
     await f.bridge.flushApproval();
-    assert.equal(control(visibleMarkup), consumeBeforeLateEdit ? '' : currentControl, 'Late old work must be reconciled to the current request state');
+    const actions = array(object(visibleMarkup).inline_keyboard).flatMap(row => array(row).map(object)).filter(button => string(button.callback_data).startsWith('r:'));
+    assert.equal(string(actions[0]?.callback_data), consumeBeforeLateEdit ? '' : currentControl, 'Late old work must be reconciled to the current request state');
     assert.equal(f.telegram.sent().filter(s => messageBody(s).includes('waiting-for-owner')).length, 1);
     if (!consumeBeforeLateEdit) await f.bridge.update(click(1, currentControl));
     assert.equal(f.codex.writes.filter(w => w.method === 'respond').length, 1);

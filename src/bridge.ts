@@ -526,10 +526,10 @@ export class Bridge {
     const markup = keyboard as unknown as Json;
     prompt.approvalMarkup = markup;
     const receipt = this.state.approvalReceipt(key);
-    const overview = prompt.widgets ? approvalOverview(request.method, detailsParams, binding.cwd, agent) : undefined;
+    const overview = approvalOverview(request.method, detailsParams, binding.cwd, agent);
     if (!receipt) this.screens.enqueue(key, binding.topicId, overview ?? approvalDisplayMessage(request.method, detailsParams, agent), markup,
       { kind: 'approval', title: overview?.split('\n')[0] ?? (request.method === 'item/commandExecution/requestApproval' ? 'Command approval' : 'Approval review'),
-        markdown: true, fullText: overview ? approvalDetailsMessage(request.method, detailsParams, agent) : card, details: prompt.widgets === true, widgets: prompt.widgets });
+        markdown: true, fullText: overview ? approvalDetailsMessage(request.method, detailsParams, agent) : card, details: !!overview || prompt.widgets === true, widgets: prompt.widgets });
     prompt.approvalMarkup = this.screens.markup(key, markup)!;
     if (receipt?.status === 'pending' || receipt?.status === 'held') this.state.approvalMarkup(key, prompt.approvalMarkup, prompt.token);
     else if (receipt) await this.refreshApproval(prompt);

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { Bridge } from '../src/bridge.js';
 import { CodexClient } from '../src/codex.js';
 import { type Config } from '../src/config.js';
@@ -95,6 +96,40 @@ test('a child approval reaches only the parent topic, identifies its origin and 
     assert.equal(records.some(r => ['thread/start', 'turn/start', 'turn/steer'].includes(string(r.method))), false);
     assert.equal(f.state.reply('root-session'), undefined, 'Child approval must not register a child turn as a root reply');
     assert.equal(f.state.bindings().length, 2);
+  } finally { f.close(); }
+});
+
+for (const view of ['classic', 'widgets'] as const) test(`a reasonless child file approval in ${view} shows its real action and readable preview`, async () => {
+  const f = await nativeFixture();
+  try {
+    f.state.setViewMode(view);
+    const diff = '@@ -1,120 +1,120 @@\n' + Array.from({ length: 120 }, (_, i) => `+assert.equal(quote(${i}), 'child-${i}');`).join('\n');
+    await f.publish({ id: 'child-code-preview', method: 'item/fileChange/requestApproval', params: {
+      threadId: 'child-agent', turnId: 'child-turn', itemId: 'patch', reason: null, grantRoot: null,
+      changes: [{ path: join(f.project, 'src', 'cex.ts'), kind: { type: 'update', move_path: null }, diff }],
+    } });
+    await f.drain();
+    const primary = f.telegram.calls.filter(c => c.method === (view === 'classic' ? 'sendMessage' : 'sendWidget'));
+    assert.equal(primary.length, 1); const part = primary[0]!.params;
+    let content = part;
+    if (view === 'widgets') {
+      const script = string(part.html).match(/<script>([\s\S]*?)<\/script>/u)![1]!;
+      const context: Json = {}; runInNewContext(script.slice(0, script.indexOf('function el(')), context); content = object(context.D);
+    }
+    const text = string(content.text);
+    assert.match(text, /Not provided by Codex/u); assert.match(text, /\/root\/performance · child-agent/u);
+    assert.match(text, /src[\\/]cex\.ts/u); assert.match(text, /Diff preview/u);
+    assert.doesNotMatch(text, /"threadId"|"turnId"|"proposedChanges"|\\n/u);
+    const entities = array(content.entities).map(object);
+    const preview = entities.find(e => e.type === 'pre' && text.slice(Number(e.offset), Number(e.offset) + Number(e.length)).includes('assert.equal'));
+    assert.ok(preview); assert.ok(text.slice(Number(preview.offset), Number(preview.offset) + Number(preview.length)).split('\n').length <= 6);
+    assert.equal(part.message_thread_id, f.state.binding('root-session')!.topicId);
+    assert.equal(f.state.binding('child-agent'), undefined);
+    await f.bridge.flushApproval();
+    const controls = f.telegram.calls.filter(c => c.method === 'editMessageReplyMarkup').at(-1)?.params ?? part;
+    const keys = array(object(controls.reply_markup).inline_keyboard).flatMap(row => array(row).map(object));
+    assert.ok(keys.some(b => b.text === 'Details')); assert.ok(keys.some(b => b.text === 'Allow once'));
+    assert.equal((await f.records()).some(r => 'result' in r), false);
   } finally { f.close(); }
 });
 

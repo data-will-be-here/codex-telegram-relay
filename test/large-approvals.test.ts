@@ -22,6 +22,7 @@ async function persistentReview() {
   const request: RpcRequest = { id: 'large-request', method: 'item/commandExecution/requestApproval', params: {
     threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command,
     reason: 'Synthetic context for a complete review. '.repeat(1700), availableDecisions: ['accept', 'decline'],
+    futureSecurityContext: { scope: 'unrecognized-full-review' },
   } };
   const tick = async () => new Outbox(state, telegram, config, 0).flushOne();
   return { telegram, codex, request, command, tick,
@@ -34,7 +35,7 @@ async function persistentReview() {
   };
 }
 
-test('a long approval uses collapsed numbered review blocks and receives controls only after complete delivery', async () => {
+test('an unrecognized approval context retains complete numbered review blocks and gates controls on complete delivery', async () => {
   const f = await fixture();
   try {
     const command = 'node -e "/* synthetic 😀 α <b> [text] `code` */"';
@@ -42,6 +43,7 @@ test('a long approval uses collapsed numbered review blocks and receives control
     f.codex.pending.add('large-command');
     await f.bridge.request({ id: 'large-command', method: 'item/commandExecution/requestApproval', params: {
       threadId: 'thread-a', turnId: 'large-turn', itemId: 'command', command, reason, availableDecisions: ['accept', 'decline'],
+      futureSecurityContext: { scope: 'unrecognized-full-review' },
     } });
     await f.drain();
     const parts = f.telegram.sent();
@@ -80,9 +82,10 @@ for (const kind of ['file', 'permissions'] as const) test(`large ${kind} proposa
   try {
     const diff = '+synthetic 😀 quoted file content\n'.repeat(1800);
     const permissions = { fileSystem: { write: Array.from({ length: 2000 }, (_, index) => `/synthetic/path-${index}`) } };
-    const params = kind === 'file'
+    const rawParams = kind === 'file'
       ? { threadId: 'thread-a', turnId: 'large-turn', itemId: 'file', changes: [{ path: 'synthetic.txt', diff }] }
       : { threadId: 'thread-a', turnId: 'large-turn', permissions };
+    const params = { ...rawParams, futureSecurityContext: { scope: 'unrecognized-full-review' } };
     f.codex.pending.add(kind);
     await f.bridge.request({ id: kind, method: kind === 'file' ? 'item/fileChange/requestApproval' : 'item/permissions/requestApproval', params });
     await f.drain(); await f.bridge.flushApproval();
@@ -331,7 +334,8 @@ test('inline command code and its execution-policy copy use labelled previews wi
     assert.match(body, /Abbreviated preview/u);
     assert.match(body, /approves the complete command/u);
     assert.match(body, /Command abbreviated/u);
-    assert.match(body, /Permission-rule code abbreviated/u);
+    assert.match(body, /Open Details for the full command/u);
+    assert.doesNotMatch(body, /proposedExecpolicyAmendment/u);
     assert.match(body, /synthetic line 0/u); assert.match(body, /synthetic line 399/u);
     assert.doesNotMatch(body, /synthetic line 200/u);
     assert.ok(body.length < 6000, 'Command code must not be repeated in full in permission context');

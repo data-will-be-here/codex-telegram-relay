@@ -362,8 +362,8 @@ test('command approvals show readable literal commands without transport metadat
     const body = messageBody(sent);
     assert.ok(body.includes(command), 'The actual command must be visible with its original backslashes and quotes.');
     assert.ok(body.includes('Read the attached file outside the sandbox.'));
-    assert.ok(body.includes(f.projectA));
-    assert.ok(body.includes('additionalPermissions'), 'Permission context must not be hidden.');
+    assert.ok(body.includes('Project root'));
+    assert.ok(body.includes('Requested permissions') && body.includes('C:\\Relay cache'), 'Permission context must remain visible as readable access and paths.');
     assert.ok(!/threadId|turnId|itemId|startedAtMs|commandActions|private-turn-id/u.test(body));
     assert.ok(array(sent.entities).map(object).some(e => e.type === 'pre' && string(sent.text).slice(Number(e.offset), Number(e.offset) + Number(e.length)) === command));
     assert.ok(sent.reply_markup);
@@ -415,7 +415,7 @@ test('a multipart approval retains its entire command and offers buttons only af
     const command = 'echo literal';
     f.codex.pending.add('long-command');
     await f.bridge.request({ id: 'long-command', method: 'item/commandExecution/requestApproval', params: {
-      threadId: 'thread-a', command, reason: 'Complete review context. '.repeat(300), cwd: f.projectA,
+      threadId: 'thread-a', command, reason: 'Complete review context. '.repeat(300), cwd: f.projectA, futureSecurityContext: { scope: 'unrecognized-full-review' },
     } });
     await f.drain();
     const sent = f.telegram.sent();
@@ -572,7 +572,7 @@ test('native cancel-only rejection is offered without inventing a decline decisi
     await f.bridge.request({ id: 'r1', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command: 'echo safe', availableDecisions: ['accept', 'cancel'] } });
     await f.drain();
     const buttons = array(object(f.telegram.sent()[0]!.reply_markup).inline_keyboard).flatMap(array).map(object);
-    assert.deepEqual(buttons.map(b => b.text), ['Allow once', 'Cancel turn']);
+    assert.deepEqual(buttons.map(b => b.text), ['Allow once', 'Cancel turn', 'Details']);
     await f.bridge.update(click(1, string(buttons[1]!.callback_data)));
     assert.deepEqual(f.codex.writes[0]!.params.result, { decision: 'cancel' });
   } finally { f.close(); }
