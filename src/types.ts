@@ -19,6 +19,8 @@ export interface Session {
 }
 
 export interface Binding {
+  customTitle?: string | null;
+  titlePending?: number;
   projectLabel?: string | undefined;
   sessionName?: string | null;
   taskName?: string | null;

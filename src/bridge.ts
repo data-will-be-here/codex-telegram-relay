@@ -6,6 +6,7 @@ import { Drafts } from './drafts.js';
 import { commandHelp } from './commands.js';
 import { State, type ApprovalCard } from './state.js';
 import { Topics } from './topics.js';
+import { TopicRenames } from './topic-renames.js';
 import { Attachments, AttachmentError } from './attachments.js';
 import { agentRoute } from './subagents.js';
 import { isMissingTopic, TelegramError } from './telegram.js';
@@ -57,6 +58,7 @@ export class Bridge {
   private approvalRefreshAt = 0;
   private startedAt = Date.now();
   private topics: Topics;
+  private topicRenames: TopicRenames;
   private models: ModelPicker;
   private permissions: PermissionPicker;
   private widgets: Widgets;
@@ -71,6 +73,7 @@ export class Bridge {
   constructor(readonly config: Config, readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
     private readonly drafts = new Drafts(telegram, config.ownerId)) {
     this.topics = new Topics(config, state, telegram);
+    this.topicRenames = new TopicRenames(config, state, this.topics, telegram, () => !this.closed);
     this.screens = new Screens(state, telegram, config);
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding), this.screens);
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
@@ -237,6 +240,7 @@ export class Bridge {
     if (this.discovering) return;
     this.discovering = true;
     try {
+      await this.topics.retryPendingTitles();
       const nameVersions = new Map(this.nameVersions);
       const readSessions = () => this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
       let sessions = await readSessions();
@@ -632,6 +636,9 @@ export class Bridge {
     const topic = integer(message.message_thread_id) ?? null;
     if (!this.state.admit(id, topic)) { this.state.advance(id); return; }
     try {
+      if (Object.keys(callback).length && string(callback.data).startsWith('tr:')) {
+        await this.topicRenames.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length && string(callback.data).startsWith('recover:')) {
         await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
       }
@@ -677,6 +684,7 @@ export class Bridge {
   }
 
   private async message(message: Json, topicId: number | null, inputId: number): Promise<void> {
+    if (await this.topicRenames.message(message, topicId)) return;
     if (['photo', 'document', 'voice', 'audio', 'video', 'video_note', 'animation'].some(key => message[key])) {
       await this.mediaMessage(message, topicId, inputId); return;
     }

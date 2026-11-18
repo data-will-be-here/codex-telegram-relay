@@ -625,6 +625,28 @@ test('/clear switches the same topic to one empty conversation and keeps the old
   } finally { f.close(); }
 });
 
+test('/clear retains the custom topic name and future discovery respects it', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.bridge.update(message(8, old.topicId, '/rename Research archive')); await f.drain();
+    await f.bridge.update(message(9, old.topicId, '/rename')); await f.drain();
+    const promptId = f.telegram.message;
+    await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
+    const next = f.state.topic(old.topicId)!;
+    assert.notEqual(next.threadId, old.threadId);
+    assert.equal(next.title, 'Research archive');
+    assert.equal(next.customTitle, 'Research archive');
+    await f.bridge.discover();
+    assert.equal(f.state.topic(old.topicId)?.title, 'Research archive');
+    const late = message(11, old.topicId, 'Name for the old session');
+    object(late.message).reply_to_message = { message_id: promptId };
+    await f.bridge.update(late);
+    assert.equal(f.state.topic(old.topicId)?.title, 'Research archive');
+    assert.equal(f.native.writes.length, 0);
+  } finally { f.close(); }
+});
+
 test('/clear can replace a verified unloaded idle conversation without resuming the old client', async () => {
   const f = setup();
   try {

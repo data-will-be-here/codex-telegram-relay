@@ -1,5 +1,13 @@
 # Verification record
 
+## Current-topic renaming (development, 2026-11-18)
+
+`/rename` is exercised through authorized Telegram updates and the persistent outbox in Classic and Widgets, including an unloaded native session. Tests cover exact Cyrillic/emoji titles, length/control validation, native name/task preservation, reply-only input, cancel/reset, prompt expiry and outbox pruning, closed-prompt replies after `/clear`, process-state reopening, callback owner/topic/message checks and eligibility/generation changes during acknowledgement. Topic tests cover retained overrides during discovery and recovery, idempotent uncertain writes even when the target equals the confirmed name, durable rate limits, definite rejection rollback, serialized automatic/manual edits and stale binding responses. Pending names retry during discovery even when their native session is unloaded. No native task or permission change is used to rename a topic.
+
+Synthetic tests verify protocol and persistence; they do not establish rendering or gestures in a real Telegram client. Live activation checks only startup, schema migration and command registration, without renaming an existing user topic.
+
+Final local Windows suite: 517 discovered, 513 passed, four skipped, zero failures. Build, typecheck, package allowlist (40 files) and whitespace checks passed. Live title/menu schema migration and the English `/rename` menu entry in both default and legacy Russian scopes were confirmed after restarting the relay.
+
 ## Compact Classic and reasonless subagent approvals (development, 2026-11-15)
 
 The screenshot pattern is covered through Bridge and the persistent outbox: a file approval with `reason: null`, nullable move/grant fields and a large diff previously produced six JSON/quotation messages; it now produces one native Classic review with an explicit missing-reason label, file paths, a bounded six-line diff preview and on-demand complete Details. Native proxy fixtures verify the same reasonless subagent patch in both Classic and Widgets, preserving parent-topic routing and original decision payloads. Unknown security schemas retain full reviews rather than hiding access. Existing multipart transport/receipt tests now explicitly exercise that fallback. Reason excerpts are parsed before shortening, so code formatting survives.

@@ -36,6 +36,9 @@ export interface TopicOperation {
   error?: string | null;
 }
 export interface ApprovalCard { identity: string; deliveryKey: string; status: string; }
+export interface TopicRenameMenu {
+  token: string; threadId: string; topicId: number; cwd: string; deliveryKey: string; expires: number; closed: number; messageId?: number | null;
+}
 
 export type NewSessionPhase = 'selecting' | 'cancelled' | 'checking' | 'preparing' | 'starting' | 'uncertain' | 'known' | 'persisted' | 'topic' | 'ready' | 'failed';
 export interface NewSessionOperation {
@@ -82,6 +85,8 @@ export class State {
         CREATE TABLE IF NOT EXISTS incoming(id INTEGER PRIMARY KEY, topicId INTEGER, status TEXT NOT NULL, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, topicId INTEGER, text TEXT NOT NULL, markup TEXT, status TEXT NOT NULL DEFAULT 'pending', messageId INTEGER, at INTEGER NOT NULL, projectCwd TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS topic_rename_menus(token TEXT PRIMARY KEY, threadId TEXT NOT NULL, topicId INTEGER NOT NULL, cwd TEXT NOT NULL, deliveryKey TEXT NOT NULL UNIQUE, expires INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, messageId INTEGER);
+        CREATE INDEX IF NOT EXISTS topic_rename_reply ON topic_rename_menus(topicId,messageId);
         CREATE TABLE IF NOT EXISTS async_answers(threadId TEXT NOT NULL, callId TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,callId));
         CREATE TABLE IF NOT EXISTS host_watch(threadId TEXT PRIMARY KEY, sinceMs INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS question_progress(key TEXT PRIMARY KEY,signature TEXT NOT NULL,answers TEXT NOT NULL,at INTEGER NOT NULL);
@@ -110,6 +115,8 @@ export class State {
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'projectCwd')) this.db.exec('ALTER TABLE outbox ADD COLUMN projectCwd TEXT');
       if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE bindings ADD COLUMN sessionName TEXT');
+      if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'customTitle')) this.db.exec('ALTER TABLE bindings ADD COLUMN customTitle TEXT');
+      if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'titlePending')) this.db.exec('ALTER TABLE bindings ADD COLUMN titlePending INTEGER NOT NULL DEFAULT 0');
       if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'taskTurnId')) this.db.exec('ALTER TABLE bindings ADD COLUMN taskTurnId TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'sessionName')) this.db.exec('ALTER TABLE outbox ADD COLUMN sessionName TEXT');
       if (!this.db.prepare('PRAGMA table_info(outbox)').all().some(column => column.name === 'richPlan')) this.db.exec('ALTER TABLE outbox ADD COLUMN richPlan TEXT');
@@ -330,7 +337,7 @@ export class State {
       this.db.prepare('INSERT INTO retired_bindings VALUES(?,?,?)').run(old.threadId, JSON.stringify(old), id);
       this.db.prepare("UPDATE widget_cards SET delivery='retired' WHERE threadId=?").run(old.threadId);
       this.db.prepare('DELETE FROM bindings WHERE threadId=?').run(old.threadId);
-      this.db.prepare("INSERT INTO bindings(threadId,topicId,cwd,title,lastTurn,sessionName) VALUES(?,?,?,?,'-',?)").run(id, old.topicId, old.cwd, old.title, operation.name ?? null);
+      this.db.prepare("INSERT INTO bindings(threadId,topicId,cwd,title,lastTurn,sessionName,customTitle,titlePending) VALUES(?,?,?,?,'-',?,?,?)").run(id, old.topicId, old.cwd, current.title, operation.name ?? null, current.customTitle ?? null, current.titlePending ?? 0);
       this.db.prepare('DELETE FROM topic_operations WHERE threadId IN (?,?)').run(old.threadId, id);
       this.db.prepare('DELETE FROM replies WHERE threadId=?').run(old.threadId);
       this.db.exec('COMMIT'); return this.binding(id)!;
@@ -392,7 +399,7 @@ export class State {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const previous = this.binding(threadId);
-      this.db.prepare('INSERT INTO bindings(threadId,topicId,cwd,title) VALUES(?,?,?,?) ON CONFLICT(threadId) DO UPDATE SET topicId=excluded.topicId,cwd=excluded.cwd,title=excluded.title').run(threadId, topicId, cwd, title);
+      this.db.prepare('INSERT INTO bindings(threadId,topicId,cwd,title) VALUES(?,?,?,?) ON CONFLICT(threadId) DO UPDATE SET topicId=excluded.topicId,cwd=excluded.cwd,title=excluded.title,titlePending=0').run(threadId, topicId, cwd, title);
       if (previous && previous.topicId !== topicId) {
         this.db.prepare("UPDATE outbox SET status='cancelled' WHERE topicId=? AND key LIKE 'prompt/%' AND status IN ('pending','blocked','held')").run(previous.topicId);
         this.db.prepare("UPDATE outbox SET topicId=?,status=CASE WHEN key LIKE 'final/%' THEN 'deferred' ELSE 'pending' END WHERE topicId=? AND status IN ('pending','blocked','deferred')").run(topicId, previous.topicId);
@@ -504,9 +511,29 @@ export class State {
   deferTopicTitle(threadId: string, until: number): void {
     this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('titleRetry/' + threadId, String(until));
   }
-  confirmTopicTitle(threadId: string, title: string): void {
-    this.db.prepare('UPDATE bindings SET title=? WHERE threadId=?').run(title, threadId);
-    this.db.prepare('DELETE FROM settings WHERE key=?').run('titleRetry/' + threadId);
+  setCustomTopicTitle(binding: Binding, title: string | null, pending = 1): boolean {
+    return !!this.db.prepare('UPDATE bindings SET customTitle=?,titlePending=? WHERE threadId=? AND topicId=? AND cwd=? AND customTitle IS ?')
+      .run(title, pending, binding.threadId, binding.topicId, binding.cwd, binding.customTitle ?? null).changes;
+  }
+  confirmTopicTitle(threadId: string, title: string, expected?: Binding): boolean {
+    const changed = this.db.prepare('UPDATE bindings SET title=?,titlePending=0 WHERE threadId=?' + (expected ? ' AND topicId=? AND cwd=? AND customTitle IS ?' : ''))
+      .run(title, threadId, ...(expected ? [expected.topicId, expected.cwd, expected.customTitle ?? null] : [])).changes;
+    if (changed) this.db.prepare('DELETE FROM settings WHERE key=?').run('titleRetry/' + threadId);
+    return !!changed;
+  }
+  saveTopicRenameMenu(menu: TopicRenameMenu): void {
+    this.db.prepare('UPDATE topic_rename_menus SET closed=1 WHERE topicId=?').run(menu.topicId);
+    this.db.prepare('INSERT INTO topic_rename_menus(token,threadId,topicId,cwd,deliveryKey,expires,closed) VALUES(?,?,?,?,?,?,0)')
+      .run(menu.token, menu.threadId, menu.topicId, menu.cwd, menu.deliveryKey, menu.expires);
+  }
+  topicRenameMenu(token: string): TopicRenameMenu | undefined {
+    return this.db.prepare('SELECT * FROM topic_rename_menus WHERE token=?').get(token) as unknown as TopicRenameMenu | undefined;
+  }
+  topicRenameReply(topicId: number, messageId: number): TopicRenameMenu | undefined {
+    return this.db.prepare('SELECT * FROM topic_rename_menus WHERE topicId=? AND messageId=?').get(topicId, messageId) as unknown as TopicRenameMenu | undefined;
+  }
+  closeTopicRenameMenus(topicId: number): void {
+    this.db.prepare('UPDATE topic_rename_menus SET closed=1 WHERE topicId=?').run(topicId);
   }
   sessionDirectory(threadId: string, cwd: string): void { this.db.prepare('UPDATE bindings SET cwd=? WHERE threadId=? AND cwd!=?').run(cwd, threadId, cwd); }
   sessionName(threadId: string, name: string): void {
@@ -697,6 +724,7 @@ export class State {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare("UPDATE outbox SET status='sent',messageId=? WHERE id=?").run(messageId, id);
+      this.db.prepare('UPDATE topic_rename_menus SET messageId=? WHERE deliveryKey IN (SELECT key FROM outbox WHERE id=?)').run(messageId, id);
       this.db.prepare('UPDATE widget_answers SET messageId=? WHERE deliveryKey IN (SELECT key FROM outbox WHERE id=?)').run(messageId, id);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

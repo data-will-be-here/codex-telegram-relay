@@ -240,6 +240,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/sessions` | Show the saved session/topic bindings |
 | `/new` | Create a conversation without a project, or in a connected project (v0.1.20) |
 | `/clear` | Start a fresh conversation in this topic, preserving Telegram history (v0.1.20) |
+| `/rename [NEW NAME]` | Rename this topic; without a name, show a reply prompt and restore-default button |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (v0.1.20) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -261,6 +262,14 @@ Since v0.1.18, the main command menu is simplified. Ordinary text answers a pend
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
+
+## Rename the current topic
+
+Send `/rename Research notes` inside a bound topic to use that exact title, without an automatic project/ID suffix. `/rename` without arguments shows the current name: reply to that bot message with a new name, or choose **Cancel** / **Restore default**. Names must be a single nonempty line of at most 128 characters; Cyrillic and emoji are supported. Prompts expire after ten minutes. Ordinary messages continue to Codex; replies to closed or expired rename prompts are rejected rather than sent as instructions.
+
+The custom name survives relay restarts, topic recovery and `/clear`. Restore default returns to `project · session ID`. Renaming only changes the Telegram topic: the Codex session name, project label, current task, binding and message history are preserved. It works while a task is running or the native session is not attached. The prompt stays a normal Telegram message in both Classic and Widgets so native replies work consistently. Outside a bound topic, open the desired topic first.
+
+If Telegram rejects the request, the saved name is retained. If the result is uncertain or Telegram rate-limits the request, the relay retains the requested name and retries the same topic automatically; it reports that confirmation is pending, without creating a replacement topic. Command menus update on relay startup.
 
 ## Experimental activity widgets (v0.1.20)
 
