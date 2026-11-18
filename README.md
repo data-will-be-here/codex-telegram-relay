@@ -35,7 +35,7 @@ Install Codex Telegram Relay on my computer: https://github.com/data-will-be-her
 Follow the README's "Agent-assisted installation" instructions. Before pairing or starting the relay, explain the remote-control risk and recommend the Telegram account/device protections in that workflow. Explain automatic discovery versus selected projects and ask which mode I want before configuring it. Complete local installation and help me pair my own Telegram bot. If the installed release supports file exports, offer to help add artifact-delivery instructions to my AGENTS.md. I will enter the token locally with hidden input; do not ask me to paste it into this chat.
 ```
 
-[Public preview v0.1.22](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.22). Compact approval reviews in Classic and Widgets show the operation, short code/diff previews and on-demand Details; absent Codex reasons are explicit. Working cards and first-part final replies are pinned quietly, with pin service messages removed. Interactive Git installations offer startup updates with `Update now? [Y/n]`, staged builds and private backups. Fresh installations start in Widgets; upgrades retain their view, pairing and topics. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
+[Public preview v0.1.23](https://github.com/data-will-be-here/codex-telegram-relay/releases/tag/v0.1.23). Rename the current topic with `/rename`: type its new name in your next message, without using Reply, or choose Cancel / Restore default. Custom names survive restart, topic recovery and `/clear`; native session names and task labels are preserved. Available in Classic and Widgets, including unloaded native sessions. Fresh installations start in Widgets; upgrades retain their view, pairing and topics. Interactive Git installations offer startup updates with `Update now? [Y/n]`, staged builds and private backups. Qualified with Codex CLI 0.166.0; see the compatibility limits below.
 
 `main` is the release branch; ongoing development and contribution PRs use `dev`. Install a version tag as shown below for a reproducible release.
 
@@ -86,7 +86,7 @@ Install from the GitHub source release. No npm registry package is published.
 > **Account security:** This bot is remote control of Codex. Anyone controlling your paired Telegram account can act within the connected sessions' permissions and may obtain readable files or their contents. Protect the account, bot token and computer/server. Enable Telegram's cloud password (Two-Step Verification), an app passcode with auto-lock, and a device screen lock; review active sessions. The cloud password protects new logins, not an already unlocked session. See the [security guidance](SECURITY.md#protect-the-account-you-pair).
 
 ```sh
-git clone --branch v0.1.22 https://github.com/data-will-be-here/codex-telegram-relay.git
+git clone --branch v0.1.23 https://github.com/data-will-be-here/codex-telegram-relay.git
 cd codex-telegram-relay
 npm ci
 npm start -- doctor
@@ -117,7 +117,7 @@ codex-telegram-relay start
 
 ### Upgrade an existing installation
 
-**Before upgrading to v0.1.22, stop the relay and back up its complete private state directory** (including SQLite sidecar files, configuration and pairing). Keep that backup private. State introduced in v0.1.21 stores per-turn task labels and persists review/settings screen plans alongside widget/table/file delivery progress, status snapshots and new-session/reset state. **In-place downgrade to v0.1.19 or older is unsupported even after queues drain**: old code cannot use the upgraded database layout. Do not use an older release to handle pending v0.1.22 screen deliveries, approval Details or pin jobs. For rollback, stop every relay process and restore a compatible pre-upgrade backup; restoring it does not undo later Telegram/Codex actions, so reconcile post-backup deliveries and sessions before restarting. Prefer a forward fix if newer state must be preserved.
+**Before upgrading to v0.1.23, stop the relay and back up its complete private state directory** (including SQLite sidecar files, configuration and pairing). Keep that backup private. State introduced in v0.1.21 stores per-turn task labels and persists review/settings screen plans alongside widget/table/file delivery progress, status snapshots and new-session/reset state. **In-place downgrade to v0.1.19 or older is unsupported even after queues drain**: old code cannot use the upgraded database layout. Do not use an older release to handle pending v0.1.22 screen deliveries, approval Details or pin jobs. For rollback, stop every relay process and restore a compatible pre-upgrade backup; restoring it does not undo later Telegram/Codex actions, so reconcile post-backup deliveries and sessions before restarting. Prefer a forward fix if newer state must be preserved.
 
 Since v0.1.20, newly opened sessions wait for their first local Codex message before the relay creates a topic. Existing saved topics explain this waiting state instead of reporting a connection failure. Readiness is retried automatically without submitting or replaying instructions.
 
@@ -240,6 +240,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/sessions` | Show the saved session/topic bindings |
 | `/new` | Create a conversation without a project, or in a connected project (v0.1.20) |
 | `/clear` | Start a fresh conversation in this topic, preserving Telegram history (v0.1.20) |
+| `/rename [NEW NAME]` | Rename this topic; without a name, wait for the next text message (v0.1.23) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (v0.1.20) |
 | `/mode`, `/mode all`, `/mode compact` | Show or change the assistant-message detail for all sessions; no restart required |
@@ -261,6 +262,16 @@ Since v0.1.18, the main command menu is simplified. Ordinary text answers a pend
 Topic-creation failure notices offer “Topic appeared — bind” and “Topic did not appear — create again” buttons. The first selects the session: open the topic that appeared and send `/bind` without an ID within ten minutes. Telegram does not provide the unknown destination topic ID through the original notice button. The second explicitly retries creation. Both require current owner authorization and a live eligible session; stale attempts cannot create another topic.
 
 In v0.1.17, `/model` in a connected session topic fetches the current native model catalog. Select a model, then a complete reasoning/speed option such as `High` or `Extra High · Fast`; that second selection saves immediately. Model names, supported reasoning levels and additional speed tiers come from Codex each time, with pages for longer lists. There are no Refresh or Apply buttons. Fast may use more subscription limits or credits; only advertised native tier IDs are offered. The setting applies to following requests in that same session, including local requests, while an already-running turn keeps its previous settings. History and native permissions are preserved. Reopen `/model` after relay reconnection; stale buttons expire and uncertain settings writes are never automatically repeated. [Protocol and verification](docs/architecture.md#session-model-selection).
+
+Version 0.1.23 adds persistent custom topic names and pending name input. Older versions do not honor these settings; finish or cancel name input before a rollback.
+
+## Rename the current topic (v0.1.23)
+
+Send `/rename Research notes` inside a bound topic to use that exact title, without an automatic project/ID suffix. `/rename` without arguments shows the current name and waits for your next text message in that topic; using Telegram Reply is optional. Choose **Cancel** to leave name input or **Restore default** to reset the title. Names must be a single nonempty line of at most 128 characters; Cyrillic and emoji are supported. Invalid names and attachments are kept out of Codex, and the prompt continues waiting. Slash commands still work; other topics are unaffected. Prompts expire after ten minutes: the next attempted name is rejected with an expiry notice, then normal input resumes. Replies to closed or expired rename prompts are always rejected rather than sent as instructions.
+
+The custom name survives relay restarts, topic recovery and `/clear`. Restore default returns to `project · session ID`. Renaming only changes the Telegram topic: the Codex session name, project label, current task, binding and message history are preserved. It works while a task is running or the native session is not attached. The prompt stays a normal Telegram message in both Classic and Widgets; pending name input also survives a relay restart. Outside a bound topic, open the desired topic first.
+
+If Telegram rejects the request, the saved name is retained. If the result is uncertain or Telegram rate-limits the request, the relay retains the requested name and retries the same topic automatically; it reports that confirmation is pending, without creating a replacement topic. Command menus update on relay startup.
 
 ## Experimental activity widgets (v0.1.20)
 

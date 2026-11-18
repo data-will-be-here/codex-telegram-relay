@@ -16,6 +16,7 @@ export function topicTitle(session: TopicSession): string {
 
 /** Owns durable topic creation and repair; native Codex policy and execution are untouched. */
 export class Topics {
+  private titleLocks = new Map<string, Promise<unknown>>();
   constructor(private readonly config: Config, private readonly state: State, private readonly telegram: Telegram) {}
 
   async ensure(session: TopicSession): Promise<Binding | undefined> {
@@ -24,7 +25,7 @@ export class Topics {
     const binding = this.state.binding(session.id);
     const previous = this.state.topicOperation(session.id);
     if (binding && !previous) return this.syncTitle(binding, session);
-    const title = topicTitle(session);
+    const title = binding?.customTitle ?? topicTitle(session);
     const attempt = this.state.beginTopic(session.id, session.cwd, title);
     if (!attempt) { if (previous?.status === 'uncertain' || previous?.status === 'failed') this.problem(previous.threadId); return undefined; }
     let topicId: number;
@@ -52,18 +53,88 @@ export class Topics {
     return installed;
   }
 
-  private async syncTitle(binding: Binding, session: TopicSession): Promise<Binding | undefined> {
-    this.state.sessionDirectory(session.id, session.cwd);
-    const title = topicTitle(session);
-    if (title === binding.title || this.state.topicTitleRetryAt(session.id) > Date.now()) return this.state.binding(session.id);
+  private async titleLock<T>(threadId: string, run: () => Promise<T>): Promise<T> {
+    const pending = (this.titleLocks.get(threadId) ?? Promise.resolve()).catch(() => {}).then(run);
+    this.titleLocks.set(threadId, pending);
+    try { return await pending; }
+    finally { if (this.titleLocks.get(threadId) === pending) this.titleLocks.delete(threadId); }
+  }
+
+  private current(binding: Binding): Binding | undefined {
+    const current = this.state.binding(binding.threadId);
+    return current?.topicId === binding.topicId && current.cwd === binding.cwd &&
+      !this.state.resettingTopic(binding.topicId) && !this.state.topicOperation(binding.threadId) &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+      allowedSessionDirectory(current.cwd, this.config, this.state.ownsScratch(current.cwd, current.threadId)) ? current : undefined;
+  }
+
+  private async editTitle(binding: Binding, title: string): Promise<void> {
     try {
-      const renamed = await this.telegram.call('editForumTopic', { chat_id: this.config.ownerId, message_thread_id: binding.topicId, name: title });
-      if (renamed !== true) throw new TelegramError('Topic rename response was not confirmed.', 0);
-      this.state.confirmTopicTitle(session.id, title);
+      if (await this.telegram.call('editForumTopic', { chat_id: this.config.ownerId, message_thread_id: binding.topicId, name: title }) !== true)
+        throw new TelegramError('Topic rename response was not confirmed.', 0);
     } catch (error) {
-      if (error instanceof TelegramError && error.status === 400 && /TOPIC_NOT_MODIFIED|not modified/iu.test(error.message)) {
-        this.state.confirmTopicTitle(session.id, title);
-      } else if (isMissingTopic(error)) {
+      if (!(error instanceof TelegramError && error.status === 400 && /TOPIC_NOT_MODIFIED|not modified/iu.test(error.message))) throw error;
+    }
+    const current = this.current(binding);
+    if (!current || current.customTitle !== binding.customTitle || !this.state.confirmTopicTitle(binding.threadId, title, binding))
+      throw new Error('The topic binding changed while renaming. Open the current topic and retry /rename.');
+  }
+
+  /** Null restores the generated project/id name. Uncertain writes retain a durable, idempotent intent. */
+  async rename(binding: Binding, name: string | null, stillCurrent: () => boolean = () => true): Promise<{ status: 'confirmed' | 'pending'; title: string }> {
+    const customTitle = name === null ? null : name.trim();
+    if (customTitle !== null && (!customTitle || Array.from(customTitle).length > 128 || /[\p{Cc}\p{Cs}\u2028\u2029]/u.test(customTitle)))
+      throw new Error('Use a single-line topic name of 1–128 characters.');
+    return this.titleLock(binding.threadId, async () => {
+      const previous = this.current(binding);
+      if (!previous) throw new Error('This topic is unavailable, being cleared, ignored or outside your selected projects.');
+      if (!stillCurrent()) throw new Error('This rename prompt is closed or expired. Send /rename to open a new one.');
+      if (this.state.topicTitleRetryAt(binding.threadId) > Date.now()) throw new Error('Telegram topic renaming is waiting to retry. Please try again later.');
+      const title = customTitle ?? topicTitle({ id: previous.threadId, cwd: previous.cwd, projectLabel: this.state.workspaceLabel(previous.cwd) });
+      if (!this.state.setCustomTopicTitle(previous, customTitle)) throw new Error('The topic binding changed. Retry /rename in its current topic.');
+      const requested = this.state.binding(binding.threadId)!;
+      try {
+        await this.editTitle(requested, title);
+        return { status: 'confirmed', title };
+      } catch (error) {
+        if (!this.current(requested)) throw new Error('The topic binding changed while renaming. Open the current topic and retry /rename.');
+        if (error instanceof TelegramError && error.status >= 400 && error.status < 500 && error.status !== 429) {
+          this.state.setCustomTopicTitle(requested, previous.customTitle ?? null, previous.titlePending ?? 0);
+          throw new Error(isMissingTopic(error) ? 'Telegram could not find this topic. No replacement was created.' : 'Telegram rejected this topic name. The saved name was not changed.');
+        }
+        const rateLimited = error instanceof TelegramError && error.status === 429;
+        this.state.deferTopicTitle(rateLimited ? 'all' : binding.threadId, Date.now() + (rateLimited ? Math.max(error.retryAfter ?? 30, 1) : 30) * 1000);
+        return { status: 'pending', title };
+      }
+    });
+  }
+
+  private syncTitle(binding: Binding, session: TopicSession): Promise<Binding | undefined> {
+    return this.titleLock(session.id, () => this.syncTitleNow(binding, session));
+  }
+
+  async retryPendingTitles(): Promise<void> {
+    for (const binding of this.state.bindings()) {
+      if (binding.titlePending && this.current(binding))
+        await this.syncTitle(binding, { id: binding.threadId, cwd: binding.cwd, projectLabel: this.state.workspaceLabel(binding.cwd) });
+    }
+  }
+
+  private async syncTitleNow(binding: Binding, session: TopicSession): Promise<Binding | undefined> {
+    // Discovery may report a new eligible directory even when the old root was revoked.
+    const latest = this.state.binding(session.id);
+    if (latest?.topicId !== binding.topicId || this.state.resettingTopic(binding.topicId) || this.state.topicOperation(session.id) ||
+        this.config.ignoredThreadIds?.includes(session.id) || !allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)))
+      return latest;
+    this.state.sessionDirectory(session.id, session.cwd);
+    binding = this.state.binding(session.id)!;
+    const title = binding.customTitle ?? topicTitle(session);
+    if ((title === binding.title && !binding.titlePending) || this.state.topicTitleRetryAt(session.id) > Date.now()) return binding;
+    try {
+      await this.editTitle(binding, title);
+    } catch (error) {
+      if (!this.current(binding)) return this.state.binding(session.id);
+      if (isMissingTopic(error)) {
         this.state.missingTopic(binding);
         return undefined;
       } else {

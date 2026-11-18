@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.23 — 2026-11-18
+
+- Add `/rename [NEW NAME]` for the current Telegram topic. Without arguments, accept the next text message in that topic, with Cancel and Restore default buttons; Telegram Reply is optional. Invalid names and attachments stay out of Codex, slash commands still work, and other topics are unaffected.
+- Persist custom titles across discovery, relay restarts, topic recovery and `/clear`, keeping native session names, task labels and history intact. Support renaming unloaded sessions in Classic and Widgets without starting a native task.
+- Serialize automatic and manual title edits, retain uncertain rename intents for idempotent retry, respect Telegram rate limits and roll back definite rejections. Recheck binding and callback identity; expired/retired prompt replies never become instructions.
+- Update English and Russian setup/upgrade documentation and pin installation to v0.1.23. Local Windows validation: 518 tests, 514 passed, four skipped, zero failures.
+
 ## Unreleased
 
 - Distinguish a saved Telegram binding from a connected native session. Show saved topic IDs in `/sessions`, explain unloaded/failed attachments, and let `/bind` or `/repair` in the saved topic retry attachment without creating a replacement or submitting an instruction.

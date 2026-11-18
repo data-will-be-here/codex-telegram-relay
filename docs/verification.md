@@ -1,5 +1,23 @@
 # Verification record
 
+## Release v0.1.23 preparation
+
+The release contains current-topic renaming and the next-message input correction. Both READMEs identify v0.1.23, pin installation to its tag, document Cancel / Restore default, retained custom names and state compatibility; CHANGELOG and package/lockfile versions agree. The implementation's full local Windows suite passed with 518 discovered, 514 passed and four skipped. Release-candidate build, typecheck, package allowlist (40 files), dependency audit (zero vulnerabilities), 41 local documentation links and official Codex 0.166.0 native install/proxy qualification passed. Cross-platform checks run on the protected release PR before merge. No Telegram topic was renamed for release validation.
+
+## Next-message topic-name input (development, 2026-11-18)
+
+`/rename` now captures the next text message in its topic without requiring Telegram Reply. Integration tests cover the reported `Обнова MCP` name, invalid names and media retaining input mode, ordinary instructions after success/cancel, slash-command handling, topic isolation, input before prompt delivery, expiry and pending input after reopening the state database. Explicit replies to retired prompts keep their rejection path, and binding checks prevent pre-`/clear` menus capturing a new session. README instructions and architecture now describe the same interaction.
+
+Final local Windows suite: 518 discovered, 514 passed, four skipped, zero failures. Build, typecheck, package allowlist and whitespace checks passed.
+
+## Current-topic renaming (development, 2026-11-18)
+
+`/rename` is exercised through authorized Telegram updates and the persistent outbox in Classic and Widgets, including an unloaded native session. Tests cover exact Cyrillic/emoji titles, length/control validation, native name/task preservation, reply-only input, cancel/reset, prompt expiry and outbox pruning, closed-prompt replies after `/clear`, process-state reopening, callback owner/topic/message checks and eligibility/generation changes during acknowledgement. Topic tests cover retained overrides during discovery and recovery, idempotent uncertain writes even when the target equals the confirmed name, durable rate limits, definite rejection rollback, serialized automatic/manual edits and stale binding responses. Pending names retry during discovery even when their native session is unloaded. No native task or permission change is used to rename a topic.
+
+Synthetic tests verify protocol and persistence; they do not establish rendering or gestures in a real Telegram client. Live activation checks only startup, schema migration and command registration, without renaming an existing user topic.
+
+Final local Windows suite: 517 discovered, 513 passed, four skipped, zero failures. Build, typecheck, package allowlist (40 files) and whitespace checks passed. Live title/menu schema migration and the English `/rename` menu entry in both default and legacy Russian scopes were confirmed after restarting the relay.
+
 ## Compact Classic and reasonless subagent approvals (development, 2026-11-15)
 
 The screenshot pattern is covered through Bridge and the persistent outbox: a file approval with `reason: null`, nullable move/grant fields and a large diff previously produced six JSON/quotation messages; it now produces one native Classic review with an explicit missing-reason label, file paths, a bounded six-line diff preview and on-demand complete Details. Native proxy fixtures verify the same reasonless subagent patch in both Classic and Widgets, preserving parent-topic routing and original decision payloads. Unknown security schemas retain full reviews rather than hiding access. Existing multipart transport/receipt tests now explicitly exercise that fallback. Reason excerpts are parsed before shortening, so code formatting survives.

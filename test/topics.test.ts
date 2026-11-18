@@ -12,6 +12,120 @@ function setup() {
   return { temp, state, telegram, config, topics: new Topics(config, state, telegram), close: () => { state.close(); temp.close(); } };
 }
 
+test('a custom topic name survives discovery, restart and recovery, and can be reset', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir };
+    const first = (await f.topics.ensure(session))!;
+    assert.equal((await f.topics.rename(first, 'Исследование 🎁')).status, 'confirmed');
+    assert.equal((await f.topics.ensure(session))?.title, 'Исследование 🎁');
+    f.state.close();
+    const reopened = new State(join(f.temp.dir, 'state'));
+    try {
+      const topics = new Topics(f.config, reopened, f.telegram);
+      assert.equal((await topics.ensure(session))?.title, 'Исследование 🎁');
+      reopened.missingTopic(reopened.binding(session.id)!);
+      const restored = (await topics.ensure(session))!;
+      assert.notEqual(restored.topicId, first.topicId);
+      assert.equal(restored.title, 'Исследование 🎁');
+      await topics.rename(restored, null);
+      assert.equal(reopened.binding(session.id)?.title, topicTitle(session));
+      assert.equal(reopened.binding(session.id)?.customTitle, null);
+    } finally { reopened.close(); }
+  } finally { f.close(); }
+});
+
+test('uncertain manual rename retries the same intent, even when its target equals the saved title', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir };
+    const binding = (await f.topics.ensure(session))!;
+    let attempts = 0;
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      if (method === 'editForumTopic') { attempts++; throw new TelegramError(attempts === 1 ? 'Response lost' : 'TOPIC_NOT_MODIFIED', attempts === 1 ? 0 : 400); }
+      return call(method, params);
+    };
+    assert.equal((await f.topics.rename(binding, binding.title)).status, 'pending');
+    assert.equal(f.state.binding(session.id)?.titlePending, 1);
+    await f.topics.ensure(session); assert.equal(attempts, 1);
+    f.state.deferTopicTitle(session.id, 0);
+    await new Topics(f.config, f.state, f.telegram).ensure(session);
+    assert.equal(attempts, 2);
+    assert.equal(f.state.binding(session.id)?.customTitle, binding.title);
+    assert.equal(f.state.binding(session.id)?.titlePending, 0);
+    assert.equal(f.telegram.calls.filter(c => c.method === 'createForumTopic').length, 1);
+  } finally { f.close(); }
+});
+
+test('manual rename validates names, rolls back rejections, and respects durable global rate limits', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir };
+    const binding = (await f.topics.ensure(session))!;
+    for (const invalid of ['', '  ', 'a'.repeat(129), 'a\nb', 'a\0b', '\ud800'])
+      await assert.rejects(f.topics.rename(binding, invalid), /single-line/u);
+    const emojiName = '🎁'.repeat(128);
+    await f.topics.rename(binding, emojiName);
+    assert.equal(f.state.binding(session.id)?.title, emojiName);
+    f.telegram.call = async () => { throw new TelegramError('Bad Request: synthetic rejection', 400); };
+    await assert.rejects(f.topics.rename(binding, 'Rejected'), /rejected/u);
+    assert.equal(f.state.binding(session.id)?.customTitle, emojiName);
+    assert.equal(f.state.binding(session.id)?.titlePending, 0);
+    f.telegram.call = async () => { throw new TelegramError('Too Many Requests', 429, 60); };
+    assert.equal((await f.topics.rename(binding, 'Waiting')).status, 'pending');
+    assert.equal(f.state.binding(session.id)?.customTitle, 'Waiting');
+    let attempts = 0; f.telegram.call = async () => { attempts++; return true; };
+    await assert.rejects(f.topics.rename(binding, 'Another'), /waiting to retry/u);
+    assert.equal(attempts, 0);
+  } finally { f.close(); }
+});
+
+test('discovery and manual rename serialize; a changed binding cannot receive an old confirmation', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir };
+    const binding = (await f.topics.ensure(session))!;
+    f.state.confirmTopicTitle(session.id, 'Legacy');
+    let release!: () => void; let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const call = f.telegram.call.bind(f.telegram); const names: unknown[] = [];
+    f.telegram.call = async (method, params) => {
+      if (method === 'editForumTopic') {
+        names.push(params?.name);
+        if (names.length === 1) { entered(); await waiting; }
+      }
+      return call(method, params);
+    };
+    const discovery = f.topics.ensure(session); await started;
+    const rename = f.topics.rename(binding, 'Manual'); release();
+    await Promise.all([discovery, rename]);
+    assert.deepEqual(names, [topicTitle(session), 'Manual']);
+    assert.equal(f.state.binding(session.id)?.title, 'Manual');
+    f.telegram.call = async () => { f.state.installTopic(session.id, 999, session.cwd, 'Replacement'); return true; };
+    await assert.rejects(f.topics.rename(f.state.binding(session.id)!, 'Stale'), /binding changed/u);
+    assert.equal(f.state.binding(session.id)?.title, 'Replacement');
+  } finally { f.close(); }
+});
+
+test('queued rename rechecks its prompt and discovery can adopt a newly eligible directory', async () => {
+  const f = setup();
+  try {
+    const session = { id: 'thread-a', cwd: f.temp.dir };
+    const binding = (await f.topics.ensure(session))!;
+    let valid = true;
+    const rename = f.topics.rename(binding, 'Cancelled before dispatch', () => valid);
+    valid = false;
+    await assert.rejects(rename, /closed or expired/u);
+    assert.equal(f.telegram.calls.some(c => c.method === 'editForumTopic'), false);
+    f.state.sessionDirectory(session.id, join(f.temp.dir, 'revoked-root'));
+    assert.equal((await f.topics.ensure(session))?.cwd, f.temp.dir);
+    await f.topics.rename(f.state.binding(session.id)!, 'Eligible again');
+    assert.equal(f.state.binding(session.id)?.title, 'Eligible again');
+  } finally { f.close(); }
+});
+
 test('a definite creation rejection waits for explicit retry and never stops other sessions', async () => {
   const f = setup();
   try {
