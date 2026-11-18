@@ -6,6 +6,7 @@ import { Bridge } from '../src/bridge.js';
 import { Outbox } from '../src/telegram.js';
 import { permissionSignature } from '../src/permission-settings.js';
 import { RpcError } from '../src/codex.js';
+import { ClearSettingsError, captureClearSettingsSnapshot, equivalentClearSettings, type ClearSettingsSnapshot } from '../src/clear-settings.js';
 import { array, object, string, type Codex, type Json, type Session, type Telegram, type MessageMode, type UserInput, type ModelSettings, type PermissionPatch, type PermissionSnapshot } from '../src/types.js';
 
 export function messageBody(message: Json): string {
@@ -39,7 +40,7 @@ export class FakeCodex implements Codex {
     this.permissionReads++;
     let settings = this.permissionStates.get(threadId);
     if (!settings) {
-      settings = { cwd, sandboxPolicy: { type: 'workspaceWrite' }, activePermissionProfile: { id: ':workspace' },
+      settings = { cwd, sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }, runtimeWorkspaceRoots: [cwd], activePermissionProfile: { id: ':workspace' },
         approvalPolicy: 'on-request', approvalsReviewer: 'user', model: 'test-model', modelProvider: 'openai' };
       this.permissionStates.set(threadId, settings);
     }
@@ -57,6 +58,17 @@ export class FakeCodex implements Codex {
     if (patch.approvalsReviewer) current.approvalsReviewer = patch.approvalsReviewer;
   }
   async rateLimits(): Promise<Json> { return {}; }
+  async captureClearSettings(threadId: string, cwd: string): Promise<ClearSettingsSnapshot> {
+    return captureClearSettingsSnapshot((await this.permissionCatalog(threadId, cwd)).settings, cwd);
+  }
+  async validateClearSettings(threadId: string, snapshot: ClearSettingsSnapshot): Promise<void> {
+    const settings = (await this.permissionCatalog(threadId, string(snapshot.settings.cwd))).settings;
+    if (!equivalentClearSettings(snapshot, settings)) throw new ClearSettingsError('The replacement session permissions do not match. The original session was preserved.');
+  }
+  clearSettingsCurrent(threadId: string, snapshot: ClearSettingsSnapshot): boolean {
+    try { return equivalentClearSettings(snapshot, this.permissionStates.get(threadId) ?? {}); } catch { return false; }
+  }
+  async unsubscribe(_threadId: string): Promise<void> { /* Separate native lifecycle, not a model/settings write. */ }
   sessions: Session[] = [];
   histories = new Map<string, Json[]>();
   writes: { method: string; params: Json }[] = [];

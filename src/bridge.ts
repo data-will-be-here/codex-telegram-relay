@@ -110,6 +110,7 @@ export class Bridge {
   }
   private async connectCreated(binding: Binding): Promise<void> {
     for (const id of this.attached) if (this.state.retiredSession(id)) {
+      for (const [childId, rootId] of this.agentSubscriptions) if (rootId === id) this.state.enqueueUnsubscribe(childId, binding.threadId);
       this.attached.delete(id); this.drafts.finish(id); await this.retireTopicPrompts(id);
     }
     if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
@@ -133,6 +134,53 @@ export class Bridge {
         ['idle', 'active'].includes(string(object(thread.status).type)) && !thread.parentThreadId && thread.canAcceptDirectInput !== false) return thread;
   }
 
+  private async stopCurrentTurn(binding: Binding): Promise<void> {
+    if (!this.codex.interrupt) { this.notice(binding.topicId, 'This Codex version does not support stopping a turn.'); return; }
+    const thread = await this.settingsThread(binding);
+    if (!thread || thread.id !== binding.threadId) { this.notice(binding.topicId, 'The session is unavailable for this topic. No stop request was sent.'); return; }
+    if (object(thread.status).type === 'idle') { this.notice(binding.topicId, 'There is no active turn to stop.'); return; }
+    const turns = await this.codex.turns(binding.threadId);
+    const running = turns.filter(turn => turn.status === 'inProgress');
+    const turnId = running.length === 1 ? string(running[0]!.id) : '';
+    if (!turnId) { this.notice(binding.topicId, 'The active turn could not be identified safely. No stop request was sent.'); return; }
+    const current = await this.settingsThread(binding);
+    if (!current || current.id !== binding.threadId || object(current.status).type !== 'active') {
+      this.notice(binding.topicId, 'The session changed or its turn finished. No stop request was sent.'); return;
+    }
+    const latest = (await this.codex.turns(binding.threadId)).filter(turn => turn.status === 'inProgress');
+    const saved = this.state.binding(binding.threadId);
+    if (this.closed || !this.attached.has(binding.threadId) || saved?.topicId !== binding.topicId || saved.cwd !== binding.cwd ||
+        this.state.resettingTopic(binding.topicId) || this.state.topicOperation(binding.threadId) ||
+        this.config.ignoredThreadIds?.includes(binding.threadId) || !this.allowed(binding.cwd, binding.threadId) ||
+        latest.length !== 1 || latest[0]!.id !== turnId) {
+      this.notice(binding.topicId, 'The session changed or its turn finished. No stop request was sent.'); return;
+    }
+    if (!this.state.reserveTurnStop(binding.threadId, turnId)) {
+      this.notice(binding.topicId, 'A stop request for this turn is already saved. Its outcome will be checked without sending it again.'); return;
+    }
+    try {
+      await this.codex.interrupt(binding.threadId, turnId);
+      if (this.state.turnStop(binding.threadId, turnId)?.status !== 'completed') this.state.markTurnStop(binding.threadId, turnId, 'acknowledged');
+      // The terminal event or read-only recovery delivers the existing final result once.
+    } catch (error) {
+      if (this.state.turnStop(binding.threadId, turnId)?.status === 'completed') return;
+      if (error instanceof RpcError && !error.uncertain) this.state.rejectTurnStop(binding.threadId, turnId);
+      else this.state.markTurnStop(binding.threadId, turnId, 'uncertain');
+      throw error;
+    }
+  }
+
+  private async reconcileTurnStops(binding: Binding): Promise<void> {
+    const pending = this.state.pendingTurnStops(binding.threadId);
+    if (!pending.length || !await this.settingsThread(binding)) return;
+    const turns = await this.codex.turns(binding.threadId);
+    if (!await this.settingsThread(binding)) return;
+    for (const stop of pending) {
+      const turn = turns.find(turn => turn.id === stop.turnId);
+      if (turn && ['completed', 'failed', 'interrupted'].includes(string(turn.status))) await this.complete(binding, turn);
+    }
+  }
+
   private async clearBlocker(binding: Binding): Promise<string | undefined> {
     const routed = (): boolean => !this.closed && !this.state.retiredSession(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
@@ -151,6 +199,16 @@ export class Bridge {
           !['cli', 'vscode', 'appServer'].includes(string(saved.source))) return 'The saved conversation is archived or unavailable.';
       if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return 'The Codex task is still active. Finish it and retry /clear.';
     } else if (status !== 'idle') return 'The Codex task is still active. Finish it and retry /clear.';
+    const children = [...this.agentSubscriptions].filter(([, rootId]) => rootId === binding.threadId).map(([id]) => id);
+    for (const id of children) {
+      const child = await this.codex.read(id, 1000);
+      const changed = blocker(); if (changed) return changed;
+      if (this.agentSubscriptions.get(id) !== binding.threadId) return 'Connected subagents changed during the check. Retry /clear.';
+      if (child.id !== id) return 'A connected subagent could not be verified. Reconnect Codex before retrying /clear.';
+      if (!['idle', 'notLoaded'].includes(string(object(child.status).type))) return 'A connected subagent is still active. Finish its work in Codex before retrying /clear.';
+    }
+    if ([...this.agentSubscriptions].some(([id, rootId]) => rootId === binding.threadId && !children.includes(id)))
+      return 'Connected subagents changed during the check. Retry /clear.';
     const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
     const turns = await this.codex.turns(binding.threadId);
     const changed = blocker(); if (changed) return changed;
@@ -166,13 +224,18 @@ export class Bridge {
       if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
       return 'A completed reply is being recovered. Wait for delivery and retry /clear.';
     }
-    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId))).length) return 'Answer the pending question in Codex, then retry /clear.';
+    if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId)))
+      .some(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed')) return 'Answer the pending question in Codex, then retry /clear.';
     return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? 'The conversation changed during the check. Retry /clear.' :
       this.state.reply(binding.threadId) ? 'A submitted instruction is still awaiting its result. Wait and retry /clear.' : undefined);
   }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
   streamEvent(method: string, params: Json): void {
+    if (method === 'thread/started') this.newSessions.observeStarted(object(params.thread));
+    if (method === 'turn/started' || method === 'item/started' && object(params.item).type === 'userMessage') {
+      this.newSessions.observeTurn(string(params.threadId));
+    }
     if (['turn/started', 'turn/plan/updated', 'turn/completed', 'item/started', 'item/completed'].includes(method)) {
       const activityThread = string(params.threadId) || string(object(params.thread).id);
       const activityBinding = this.state.binding(activityThread);
@@ -260,7 +323,9 @@ export class Bridge {
           if (!binding) { this.attached.delete(session.id); continue; }
           if ((this.nameVersions.get(session.id) ?? 0) === (nameVersions.get(session.id) ?? 0)) this.state.sessionName(session.id, session.name);
           binding = this.state.binding(session.id)!;
-          if (this.attached.has(session.id) && previous?.topicId === binding.topicId) { await this.syncAsyncQuestions(binding); continue; }
+          if (this.attached.has(session.id) && previous?.topicId === binding.topicId) {
+            await this.reconcileTurnStops(binding); await this.syncAsyncQuestions(binding); continue;
+          }
           if (previous && previous.topicId !== binding.topicId) {
             await this.retireTopicPrompts(session.id);
           }
@@ -460,6 +525,7 @@ export class Bridge {
     if (!exists && recovery?.advance !== false) this.state.baselineIfCurrent(binding.threadId, turnId, previous);
     const reply = this.state.reply(binding.threadId);
     if (reply && (!reply.turnId || reply.turnId === turnId)) this.state.clearReply(binding.threadId, reply.inputId);
+    if (this.state.turnStop(binding.threadId, turnId)) this.state.markTurnStop(binding.threadId, turnId, 'completed');
     this.finals.delete(`${binding.threadId}/${turnId}`);
     await this.clearTurnPrompts(binding.threadId, turnId);
   }
@@ -701,6 +767,11 @@ export class Bridge {
       this.notice(topicId, commandHelp()); return;
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
+    if (/^\/stop(?:\s|$)/u.test(text)) {
+      const binding = topicId === null ? undefined : this.state.topic(topicId);
+      if (text !== '/stop' || !binding) { this.notice(topicId, 'Send /stop without arguments inside an attached session topic.'); return; }
+      await this.stopCurrentTurn(binding); return;
+    }
     if (/^\/clear(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
       if (text !== '/clear' || !binding) { this.notice(topicId, 'Send /clear without arguments inside an attached session topic.'); return; }
@@ -927,6 +998,7 @@ export class Bridge {
     if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This question is closed or cannot currently be verified. Check Codex.' }); return; }
     if (!await this.promptAllowed(prompt)) { await this.clearPrompt(prompt); await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, text: 'This session or its parent is no longer eligible for this topic.' }); return; }
     await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id });
+    if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) return;
     const code = match![2]!;
     if (prompt.questions.length) {
       if (code === 't') {
@@ -964,6 +1036,7 @@ export class Bridge {
   private async answer(prompt: Prompt, text: string, inputId: number, images: UserInput[] = []): Promise<void> {
     if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); return; }
     if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); this.notice(prompt.binding.topicId, 'This question is closed or cannot currently be verified. Check Codex before answering again.'); return; }
+    if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) return;
     const question = prompt.questions[prompt.index]!;
     prompt.answers[string(question.id)] = { answers: [text] };
     const saved = this.progressIdentity(prompt);
@@ -1001,6 +1074,7 @@ export class Bridge {
     }
   }
   private pending(prompt: Prompt): boolean {
+    if (this.state.turnStop(prompt.binding.threadId, string(prompt.request.params.turnId))?.status === 'completed') return false;
     return prompt.asyncCallId ? !this.state.asyncAnswered(prompt.binding.threadId, prompt.asyncCallId) :
       (!prompt.approval || this.state.approvalPending(prompt.approval.identity) && this.state.ownsApprovalCard(prompt.approval.deliveryKey, prompt.token)) && this.codex.hasRequest(prompt.request.id);
   }
@@ -1020,6 +1094,7 @@ export class Bridge {
       this.state.enqueue(`question-source-unavailable/${this.generation}/${binding.threadId}`, binding.topicId,
         'Host questions cannot currently be read from this Codex session. Check the terminal for questions; ordinary messages and native approvals remain connected.'); return;
     }
+    questions = questions.filter(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed');
     this.state.trackHostQuestions(binding.threadId, questions);
     const current = new Set(questions.map(q => q.callId));
     for (const p of [...this.prompts.values()]) {
@@ -1127,6 +1202,8 @@ export class Bridge {
     if (!threadId || !turnId) return;
     this.state.resolveApprovalTurn(threadId, turnId);
     for (const prompt of [...this.prompts.values()]) {
+      if (prompt.asyncCallId && prompt.binding.threadId === threadId && prompt.request.params.turnId === turnId &&
+          this.state.turnStop(threadId, turnId)?.status === 'completed') { await this.clearPrompt(prompt); continue; }
       if (!prompt.asyncCallId && (string(prompt.request.params.threadId) || prompt.binding.threadId) === threadId &&
           (!prompt.request.params.turnId || prompt.request.params.turnId === turnId)) await this.clearPrompt(prompt);
     }

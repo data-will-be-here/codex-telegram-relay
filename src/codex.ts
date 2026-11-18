@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
 import { permissionSignature, validPermissionSettings } from './permission-settings.js';
+import { captureClearSettingsSnapshot, clearStartSettings, equivalentClearSettings, ClearSettingsError, type ClearSettingsSnapshot } from './clear-settings.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings, type PermissionPatch, type PermissionSnapshot } from './types.js';
 
@@ -44,7 +45,8 @@ export class CodexClient extends EventEmitter implements Codex {
   private cachePermissions(threadId: string, settings: Json): void {
     const selected = { cwd: settings.cwd, sandboxPolicy: settings.sandboxPolicy, approvalPolicy: settings.approvalPolicy,
       approvalsReviewer: settings.approvalsReviewer, activePermissionProfile: settings.activePermissionProfile,
-      model: settings.model, modelProvider: settings.modelProvider };
+      model: settings.model, modelProvider: settings.modelProvider,
+      runtimeWorkspaceRoots: settings.runtimeWorkspaceRoots ?? this.permissionSettings.get(threadId)?.settings.runtimeWorkspaceRoots };
     this.permissionSettings.set(threadId, { settings: structuredClone(selected), version: (this.permissionSettings.get(threadId)?.version ?? 0) + 1 });
   }
 
@@ -163,9 +165,49 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async read(threadId: string, timeoutMs?: number): Promise<Json> { return object(object(await this.call('thread/read', { threadId }, timeoutMs)).thread); }
-  async createThread(cwd: string, marker: string, source?: 'clear'): Promise<Json> {
-    return object(object(await this.call('thread/start', { cwd, ephemeral: false, threadSource: marker, ...(source ? { sessionStartSource: source } : {}) })).thread);
+  async captureClearSettings(threadId: string, cwd: string): Promise<ClearSettingsSnapshot> {
+    const before = this.permissionSettings.get(threadId)?.version;
+    const result = object(await this.call('thread/resume', { threadId, excludeTurns: true }));
+    if (object(result.thread).id !== threadId) throw new ClearSettingsError('Native permission snapshot returned another session.');
+    if (this.permissionSettings.get(threadId)?.version !== before) throw new RpcError('Native permissions changed while checking the session. Retry /clear.', false);
+    const settings = { ...result, sandboxPolicy: result.sandbox };
+    try {
+      const snapshot = captureClearSettingsSnapshot(settings, cwd);
+      this.cachePermissions(threadId, settings);
+      return snapshot;
+    } catch (error) {
+      if (error instanceof ClearSettingsError) throw error;
+      throw new RpcError(error instanceof Error ? error.message : 'Native permissions cannot be transferred safely.', false);
+    }
   }
+  async validateClearSettings(threadId: string, snapshot: ClearSettingsSnapshot): Promise<void> {
+    const actual = await this.captureClearSettings(threadId, string(snapshot.settings.cwd));
+    if (!equivalentClearSettings(snapshot, actual.settings)) throw new ClearSettingsError('The native permissions differ from the saved /clear selection. The topic was not switched.');
+  }
+  clearSettingsCurrent(threadId: string, snapshot: ClearSettingsSnapshot): boolean {
+    const settings = this.permissionSettings.get(threadId)?.settings;
+    if (this.closed || !settings) return false;
+    try { return equivalentClearSettings(snapshot, settings); } catch { return false; }
+  }
+  async createThread(cwd: string, marker: string, source?: 'clear', snapshot?: ClearSettingsSnapshot): Promise<Json> {
+    if (snapshot && source !== 'clear') throw new RpcError('Permission carryover is only supported for /clear.', false);
+    let overrides: Json = {};
+    if (snapshot) {
+      try { overrides = clearStartSettings(snapshot, cwd); }
+      catch (error) { throw new RpcError(error instanceof Error ? error.message : 'Invalid permission snapshot.', false); }
+    }
+    const result = object(await this.call('thread/start', { ...overrides, cwd, ephemeral: false, threadSource: marker, ...(source ? { sessionStartSource: source } : {}) }));
+    const thread = object(result.thread);
+    // Return the known native ID before any settings qualification; callers durably record it first.
+    if (string(thread.id)) this.cachePermissions(string(thread.id), { ...result, sandboxPolicy: result.sandbox });
+    return thread;
+  }
+  async unsubscribe(threadId: string): Promise<void> {
+    const result = object(await this.call('thread/unsubscribe', { threadId }));
+    if (!['unsubscribed', 'notSubscribed', 'notLoaded'].includes(String(result.status))) throw new RpcError('Native subscription cleanup could not be confirmed.', true);
+    this.permissionSettings.delete(threadId); this.questionReaders.delete(threadId);
+  }
+  async interrupt(threadId: string, turnId: string): Promise<void> { await this.call('turn/interrupt', { threadId, turnId }); }
   async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
   async nonArchivedThread(threadId: string): Promise<Json | undefined> {
     const thread = await this.read(threadId);

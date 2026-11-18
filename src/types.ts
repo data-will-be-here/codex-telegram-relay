@@ -48,7 +48,12 @@ export interface PermissionSnapshot { settings: Json; profiles: Json[]; requirem
 export interface Codex {
   permissionCatalog?(threadId: string, cwd: string): Promise<PermissionSnapshot>;
   updatePermissions?(threadId: string, patch: PermissionPatch, expected: string): Promise<void>;
-  createThread?(cwd: string, marker: string, source?: 'clear'): Promise<Json>;
+  captureClearSettings?(threadId: string, cwd: string): Promise<import('./clear-settings.js').ClearSettingsSnapshot>;
+  validateClearSettings?(threadId: string, snapshot: import('./clear-settings.js').ClearSettingsSnapshot): Promise<void>;
+  clearSettingsCurrent?(threadId: string, snapshot: import('./clear-settings.js').ClearSettingsSnapshot): boolean;
+  unsubscribe?(threadId: string): Promise<void>;
+  interrupt?(threadId: string, turnId: string): Promise<unknown>;
+  createThread?(cwd: string, marker: string, source?: 'clear', snapshot?: import('./clear-settings.js').ClearSettingsSnapshot): Promise<Json>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   storedThreads?(cwd: string): Promise<Json[]>;
   nonArchivedThread?(threadId: string): Promise<Json | undefined>;

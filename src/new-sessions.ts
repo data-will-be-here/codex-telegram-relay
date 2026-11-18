@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { allowedSessionDirectory, newSessionDefaults, type Config } from './config.js';
 import { RpcError } from './codex.js';
+import { ClearSettingsError } from './clear-settings.js';
 import { TelegramError } from './telegram.js';
 import { State, type NewSessionOperation, type NewSessionPhase } from './state.js';
 import { Topics } from './topics.js';
@@ -24,6 +25,7 @@ const inside = (child: string, root: string): boolean => {
 export class NewSessions {
   private working = false;
   private closed = false;
+  private cleaning = false;
   private restoreAfter = new Map<string, number>();
   private pendingTopicBind: { id: string; attempt: number; expires: number } | undefined;
   constructor(private readonly config: Config, private readonly state: State, private readonly codex: Codex,
@@ -34,7 +36,8 @@ export class NewSessions {
   close(): void { this.closed = true; }
   clearPendingBind(): void { this.pendingTopicBind = undefined; }
   async clear(binding: Binding): Promise<void> {
-    if (!this.creationEnabled() || !this.codex.createThread || !this.codex.setThreadName || !this.codex.nonArchivedThread || !this.codex.findCreatedThread) {
+    if (!this.creationEnabled() || !this.codex.createThread || !this.codex.setThreadName || !this.codex.nonArchivedThread || !this.codex.findCreatedThread ||
+        !this.codex.captureClearSettings || !this.codex.validateClearSettings || !this.codex.clearSettingsCurrent || !this.codex.unsubscribe) {
       this.notice(binding.topicId, 'Session creation is unavailable. Check Codex and local relay settings.'); return;
     }
     if (this.state.newSessions(active).some(op => op.topicId === binding.topicId)) {
@@ -59,11 +62,14 @@ export class NewSessions {
         this.state.changeNewSession(id, 'checking', { status: 'failed' });
         this.notice(binding.topicId, `Cannot clear this session now. ${blocker}`); return;
       }
-      this.state.changeNewSession(id, 'checking', { status: 'preparing' });
+      const clearSettings = await this.codex.captureClearSettings(binding.threadId, binding.cwd);
+      if (!this.operationAllowed(op) || await this.clearBlocker(binding)) throw new Error('The session changed during the permissions check.');
+      this.state.changeNewSession(id, 'checking', { status: 'preparing', clearSettings });
       this.notice(binding.topicId, 'Starting a fresh conversation in this topic. Telegram history and the previous Codex session are preserved.');
-    } catch {
+    } catch (error) {
       this.state.changeNewSession(id, 'checking', { status: 'failed' });
-      this.notice(binding.topicId, 'Could not verify the current session. No new conversation was created; retry /clear when Codex is available.');
+      this.notice(binding.topicId, error instanceof Error && error.message.includes('original session was preserved') ? error.message :
+        'Could not verify the current session permissions. No new conversation was created; retry /clear when Codex is available.');
     }
   }
   async recoverOwned(threadId: string): Promise<boolean> {
@@ -87,6 +93,13 @@ export class NewSessions {
     if (!op || !['starting', 'uncertain'].includes(op.status) || op.threadId || !this.operationAllowed(op)) return;
     try { this.verify(thread, op); } catch { return; }
     this.state.changeNewSession(op.id, op.status, { threadId: string(thread.id) });
+  }
+  observeTurn(threadId: string): void {
+    if (this.closed || !threadId) return;
+    const op = this.state.findNewSession('threadId', threadId);
+    if (op?.reset && !op.candidateUsed && !['ready', 'cancelled'].includes(op.status)) {
+      this.state.changeNewSession(op.id, op.status, { candidateUsed: true });
+    }
   }
   busy(threadId: string, marker?: string): boolean {
     const op = this.state.findNewSession('threadId', threadId) ?? (marker?.startsWith(MARKER) ? this.state.newSession(marker.slice(MARKER.length)) : undefined);
@@ -336,10 +349,35 @@ export class NewSessions {
   async tick(): Promise<void> {
     if (this.working || this.closed) return;
     const op = this.state.newSessions(active).find(item => item.status !== 'checking' && (item.retryAt ?? 0) <= Date.now());
-    if (!op) return;
-    this.working = true;
-    try { await this.advance(op); }
-    finally { this.working = false; }
+    if (op) {
+      this.working = true;
+      try { await this.advance(op); }
+      finally { this.working = false; }
+    }
+    await this.cleanupSubscriptions();
+  }
+
+  private async cleanupSubscriptions(): Promise<void> {
+    if (this.cleaning || this.closed || !this.codex.unsubscribe) return;
+    this.cleaning = true;
+    try {
+      const pending = this.state.pendingUnsubscribes()[0];
+      if (!pending || this.state.binding(pending.threadId)) return;
+      try {
+        await this.codex.unsubscribe(pending.threadId);
+        if (!this.closed) this.state.completeUnsubscribe(pending.threadId);
+      } catch { if (!this.closed) this.state.deferUnsubscribe(pending.threadId); }
+    } finally { this.cleaning = false; }
+  }
+
+  private async checkClearSettings(op: NewSessionOperation): Promise<void> {
+    if (!op.reset || !op.clearSettings || !this.codex.captureClearSettings || !this.codex.clearSettingsCurrent) {
+      throw new ClearSettingsError('A verified permissions snapshot is required. The original session was preserved.');
+    }
+    const current = await this.codex.captureClearSettings(op.reset.threadId, op.reset.cwd);
+    if (current.fingerprint !== op.clearSettings.fingerprint || !this.codex.clearSettingsCurrent(op.reset.threadId, op.clearSettings)) {
+      throw new ClearSettingsError('Permissions changed during /clear. Restore the selected permissions before retrying; the original session was preserved.');
+    }
   }
 
   private async advance(initial: NewSessionOperation): Promise<void> {
@@ -367,9 +405,13 @@ export class NewSessions {
         }
         if (op.reset && await this.clearBlocker(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
         if (this.closed || !this.creationEnabled() || !this.operationAllowed(op)) throw new Error('Session creation or its directory is no longer allowed. No Codex session was created.');
+        if (op.reset) {
+          await this.checkClearSettings(op);
+          if (this.closed || !this.creationEnabled() || !this.operationAllowed(op) || this.state.topic(op.reset.topicId)?.threadId !== op.reset.threadId) throw new Error('The original topic changed before creation.');
+        }
         save({ status: 'starting' });
         let thread: Json;
-        try { thread = await this.codex.createThread!(op.cwd!, MARKER + op.id, op.reset ? 'clear' : undefined); }
+        try { thread = await this.codex.createThread!(op.cwd!, MARKER + op.id, op.reset ? 'clear' : undefined, op.clearSettings); }
         catch (error) {
           if (error instanceof RpcError && !error.uncertain && !this.state.newSession(op.id)?.threadId) {
             save({ status: 'failed', error: 'Codex rejected session creation.' }); throw error;
@@ -413,6 +455,14 @@ export class NewSessions {
             this.state.enqueueOwnerNotice(`notice/clear-wait/${op.id}`, op.topicId, 'The new conversation is saved. Waiting for the previous session and its deliveries to become idle before switching this topic. No replacement will be created.');
             return;
           }
+          const attached = await this.codex.attach(op.threadId!); this.verify(attached, op);
+          if (!op.clearSettings || !this.codex.validateClearSettings || !this.codex.clearSettingsCurrent) throw new ClearSettingsError('A verified permissions snapshot is required. The original session was preserved.');
+          await this.codex.validateClearSettings(op.threadId!, op.clearSettings);
+          await this.checkClearSettings(op);
+          if (await this.clearBlocker(op.reset)) { save({ retryAt: Date.now() + 5000 }); return; }
+          if ((await this.codex.turns(op.threadId!)).length || this.state.newSession(op.id)?.candidateUsed) throw new ClearSettingsError('The replacement conversation already contains a task. The original session was preserved.');
+          if (this.closed || !this.operationAllowed(op) || !this.codex.clearSettingsCurrent(op.threadId!, op.clearSettings) ||
+              !this.codex.clearSettingsCurrent(op.reset.threadId, op.clearSettings)) throw new ClearSettingsError('Permissions or access changed before switching. The original session was preserved.');
           this.state.resetTopic(op);
         }
         if (op.targetTopic && !this.state.binding(op.threadId!)) {
@@ -426,12 +476,18 @@ export class NewSessions {
           save({ retryAt: topic?.status === 'retry' ? topic.retryAt : Date.now() + 10_000 }); return;
         }
         await this.connected(binding);
-        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.reset ? `Fresh conversation started.\nSession: ${binding.threadId}\n\nTelegram history is preserved. An open terminal remains on the previous session. Model and permissions use this project's Codex defaults. Send the first task.` :
+        this.state.enqueue(`new-ready/${op.id}`, binding.topicId, op.reset ? `Fresh conversation started.\nSession: ${binding.threadId}\n\nTelegram history and selected permissions are preserved. An open terminal remains on the previous session. Model settings use this project's Codex defaults. Send the first task.` :
           op.kind === 'scratch' ? 'New conversation without a project. Send a question or task.' : 'Session created. Send the first task.');
         save({ status: 'ready', retryAt: 0 });
         if (!op.reset) await this.edit(op, `Session created: ${binding.title}. Open the new topic and send the first task.`);
       }
     } catch (error) {
+      if (error instanceof ClearSettingsError && op.reset && this.state.binding(op.reset.threadId)) {
+        save({ status: 'failed', error: error.message });
+        this.state.enqueueOwnerNotice(`notice/clear-settings/${op.id}`, op.topicId, error.message +
+          (op.threadId ? ` Session ${op.threadId} is saved; no additional conversation will be created.` : ' No new conversation was created.'));
+        return;
+      }
       if (op.status === 'uncertain' || op.status === 'starting') {
         save({ status: 'uncertain', retryAt: Date.now() + 30_000 }); await this.reportUnknown(op); return;
       }

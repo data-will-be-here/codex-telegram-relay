@@ -7,6 +7,7 @@ const commands = [
   { command: 'sessions', args: '', en: 'List attached Codex sessions and their IDs' },
   { command: 'new', args: '', en: 'Start a new conversation or project session' },
   { command: 'clear', args: '', en: 'Start a fresh conversation in this topic; keep Telegram history' },
+  { command: 'stop', args: '', en: 'Stop the current Codex turn in this topic' },
   { command: 'rename', args: '[NEW NAME]', en: 'Rename this topic or restore its default name' },
   { command: 'model', args: '', en: 'Choose this session’s model, reasoning and speed' },
   { command: 'permissions', args: '', en: 'Choose this session’s access and approval review mode' },

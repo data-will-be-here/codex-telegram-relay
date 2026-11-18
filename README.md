@@ -239,7 +239,8 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
 | `/new` | Create a conversation without a project, or in a connected project (v0.1.20) |
-| `/clear` | Start a fresh conversation in this topic, preserving Telegram history (v0.1.20) |
+| `/clear` | Start a fresh conversation in this topic, preserving Telegram history and supported permission settings |
+| `/stop` | Interrupt this topic's current turn, including while it waits for approval |
 | `/rename [NEW NAME]` | Rename this topic; without a name, wait for the next text message (v0.1.23) |
 | `/status` | Show connection and uncertain-delivery counts |
 | `/limits` | Show fresh account limits and reset times (v0.1.20) |
@@ -256,6 +257,8 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
 The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, account-login commands or automatic history imports. New conversations use an automatically prepared workspace or known projects within the current discovery scope. Instructions follow the session's effective native Codex permissions; only an explicit `/permissions` selection changes them.
+
+`/stop` is available in the command list and `/help`, without a separate Stop button. It interrupts the exact current turn through native Codex, including while approval or a question is pending. The existing turn result confirms completion; the relay does not approve requests or send additional waiting acknowledgements. Ordinary text such as ?stop? remains model input and may wait behind an approval.
 
 Since v0.1.18, the main command menu is simplified. Ordinary text answers a pending question; with several pending questions, select “Type an answer” on the intended card first. `/questions` brings those cards back with working choice buttons; it does not merely list their titles. `/bind` and `/repair` remain available through help/manual input but are hidden from the main command menu.
 
@@ -303,7 +306,7 @@ Opening, paging and cancelling never change settings. Buttons expire after ten m
 
 ## Fresh conversation in the current topic: /clear (v0.1.20)
 
-Send `/clear` without arguments in a saved session topic to start a new empty conversation in the same canonical directory. Telegram messages and the previous native transcript remain available. No new Telegram topic is created and no model task is started. An open terminal stays on the previous native session; the bot reports the new session ID. The new conversation uses Codex's project/default model and permissions, and the relay-wide Classic/Widgets preference is preserved. A verified non-archived unloaded conversation can also be cleared without resuming its old terminal; active work, pending input, deliveries and unverifiable history still block the switch. Refusals identify the concrete blocker.
+Send `/clear` without arguments in a saved session topic. It creates one empty native conversation in the same cwd and reuses this Telegram topic. Telegram and native history remain available; an open terminal stays on its previous conversation. The relay captures supported permission settings, including approval reviewer, workspace roots and network access, and verifies the replacement before switching. An unsupported custom policy leaves the original topic usable instead of falling back to project defaults. Model settings still use project defaults. Old relay subscriptions are released after the durable switch; other clients and history are preserved. Codex controls when an idle unsubscribed runtime unloads. Active work, pending input and deliveries block `/clear`; uncertain creation is recovered without another start.
 
 The current session must be idle, with no pending questions/approvals or queued deliveries/uploads. During the switch new input and settings controls are blocked. A definite creation rejection keeps the original topic usable. Unknown creation outcomes are reconciled by an operation marker without replaying creation; known IDs survive attachment or local persistence failures. After the atomic handoff the old session is excluded from automatic relay discovery and its old controls cannot change the new session. Saved Full answer buttons remain readable in the same eligible topic/project lineage. Native files/history are not deleted, archived or reverted. Explicitly moved or unrelated topic bindings invalidate the historical read route.
 

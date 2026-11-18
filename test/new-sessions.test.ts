@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Bridge } from '../src/bridge.js';
 import { RpcError } from '../src/codex.js';
+import { type ClearSettingsSnapshot } from '../src/clear-settings.js';
 import { Outbox, TelegramError } from '../src/telegram.js';
 import { State } from '../src/state.js';
 import { allowedSessionDirectory, type Config } from '../src/config.js';
@@ -13,16 +14,25 @@ import { FakeCodex, FakeTelegram, message, temporary } from './helpers.js';
 class Native extends FakeCodex {
   threads = new Map<string, Json>();
   starts = 0; names = 0; resumes: string[] = [];
+  clearSettings: ClearSettingsSnapshot[] = [];
+  releases: string[] = [];
+  loseRelease = false;
   loseStart = false; rejectStart = false; loseName = false;
-  async createThread(cwd: string, marker: string): Promise<Json> {
+  async createThread(cwd: string, marker: string, _source?: 'clear', settings?: ClearSettingsSnapshot): Promise<Json> {
     this.starts++;
     if (this.rejectStart) throw new RpcError('Rejected', false);
     const id = `new-thread-${this.starts}`;
     const thread = { id, cwd, threadSource: marker, source: 'cli', ephemeral: false, name: '', status: { type: 'idle' } };
     this.threads.set(id, thread);
+    if (settings) { this.clearSettings.push(structuredClone(settings)); this.permissionStates.set(id, structuredClone(settings.settings)); }
     this.sessions.push({ id, cwd, name: '', status: 'idle', threadSource: marker });
+    if (!settings) await this.permissionCatalog(id, cwd);
     if (this.loseStart) throw new RpcError('Response lost', true);
     return thread;
+  }
+  override async unsubscribe(id: string): Promise<void> {
+    this.releases.push(id);
+    if (this.loseRelease) { this.loseRelease = false; throw new RpcError('Unsubscribe response lost', true); }
   }
   async setThreadName(threadId: string, name: string): Promise<void> {
     this.names++; this.threads.get(threadId)!.name = name;
@@ -69,7 +79,7 @@ function setup(automatic = false, legacy = false) {
         ...(op.topicId === null ? {} : { message_thread_id: op.topicId }) } } };
     await bridge.update(update); return update;
   };
-  return { ...temp, config, project, scratch, state, native, telegram, bridge, drain, open, choose,
+  return { ...temp, config, project, scratch, state, native, telegram, bridge, drain, open, choose, remove: temp.close,
     close: () => { bridge.close(); state.close(); temp.close(); } };
 }
 
@@ -647,7 +657,246 @@ test('/clear retains the custom topic name and future discovery respects it', as
   } finally { f.close(); }
 });
 
-test('/clear can replace a verified unloaded idle conversation without resuming the old client', async () => {
+test('/clear preserves the effective permission policy without changing model settings or submitting a task', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.native.permissionCatalog(old.threadId, old.cwd);
+    const settings = f.native.permissionStates.get(old.threadId)!;
+    settings.approvalsReviewer = 'auto_review';
+    settings.activePermissionProfile = { id: ':workspace' };
+    settings.sandboxPolicy = { type: 'workspaceWrite', writableRoots: [old.cwd, f.scratch].sort(), networkAccess: true,
+      excludeTmpdirEnvVar: true, excludeSlashTmp: true };
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession();
+    const next = f.state.topic(old.topicId)!;
+    assert.notEqual(next.threadId, old.threadId);
+    assert.equal(f.native.clearSettings.length, 1);
+    const transferred = f.native.permissionStates.get(next.threadId)!;
+    assert.deepEqual(transferred.sandboxPolicy, settings.sandboxPolicy);
+    assert.equal(object(transferred.activePermissionProfile).id, object(settings.activePermissionProfile).id);
+    assert.equal(transferred.approvalsReviewer, 'auto_review');
+    assert.equal(transferred.approvalPolicy, settings.approvalPolicy);
+    assert.equal('model' in f.native.clearSettings[0]!.start, false);
+    assert.deepEqual(f.native.writes, []);
+  } finally { f.close(); }
+});
+
+test('/clear refuses an unsupported custom native profile without creating or retiring a session', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.native.permissionCatalog(old.threadId, old.cwd);
+    f.native.permissionStates.get(old.threadId)!.activePermissionProfile = { id: 'custom-project' };
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession(); await f.drain();
+    assert.equal(f.native.starts, 0);
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    assert.equal(f.state.retiredSession(old.threadId), false);
+    assert.deepEqual(f.native.releases, []);
+    assert.ok(f.telegram.sent().some(item => /custom|permissions|verify/iu.test(string(item.text))));
+  } finally { f.close(); }
+});
+
+test('a permissions change during /clear pre-creation reads prevents native creation', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    await f.native.permissionCatalog(old.threadId, old.cwd);
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    const list = f.native.list.bind(f.native);
+    f.native.list = async (...args) => {
+      const result = await list(...args);
+      f.native.permissionStates.get(old.threadId)!.approvalsReviewer = 'auto_review';
+      return result;
+    };
+    await f.bridge.workNewSession();
+    assert.equal(f.native.starts, 0);
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    assert.deepEqual(f.native.releases, []);
+  } finally { f.close(); }
+});
+
+test('a permissions change after /clear creation preserves the old route and the one known replacement', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); const create = f.native.createThread.bind(f.native);
+    await f.native.permissionCatalog(old.threadId, old.cwd);
+    f.native.createThread = async (...args) => {
+      const result = await create(...args);
+      f.native.permissionStates.get(old.threadId)!.approvalsReviewer = 'auto_review';
+      return result;
+    };
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession();
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    assert.equal(f.native.starts, 1);
+    assert.equal(f.state.newSessions().at(-1)!.threadId, 'new-thread-1');
+    assert.equal(f.state.newSessions().at(-1)!.status, 'failed');
+    assert.equal(f.state.resettingTopic(old.topicId), false);
+    assert.deepEqual(f.native.releases, []);
+    const op = f.state.newSessions().at(-1)!;
+    f.state.changeNewSession(op.id, op.status, { retryAt: 0 });
+    await f.bridge.workNewSession();
+    assert.equal(f.native.starts, 1);
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    await f.bridge.update(message(11, old.topicId, 'Continue original'));
+    assert.deepEqual(f.native.writes, [{ method: 'start', params: { threadId: old.threadId, text: 'Continue original' } }]);
+  } finally { f.close(); }
+});
+
+test('a permanent replacement permissions mismatch unlocks the original topic and retains the known native ID', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f); const create = f.native.createThread.bind(f.native);
+    f.native.createThread = async (...args) => {
+      const result = await create(...args);
+      f.native.permissionStates.get(string(result.id))!.approvalsReviewer = 'auto_review';
+      return result;
+    };
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession();
+    const op = f.state.newSessions().at(-1)!;
+    assert.equal(op.threadId, 'new-thread-1');
+    assert.equal(op.status, 'failed');
+    assert.equal(f.state.resettingTopic(old.topicId), false);
+    assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+    await f.bridge.update(message(11, old.topicId, 'Continue original'));
+    assert.deepEqual(f.native.writes, [{ method: 'start', params: { threadId: old.threadId, text: 'Continue original' } }]);
+    await f.bridge.workNewSession();
+    assert.equal(f.native.starts, 1);
+    assert.deepEqual(f.native.releases, []);
+  } finally { f.close(); }
+});
+
+test('legacy unfinished /clear operations without a saved permissions snapshot fail and unlock the original route', async () => {
+  for (const known of [false, true]) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      const op = { id: 'legacy-clear', status: 'preparing' as const, topicId: old.topicId, targetTopic: old.topicId,
+        topicTitle: old.title, topicFirst: false, reset: old, cwd: old.cwd, root: old.cwd, kind: 'project' as const,
+        menuKey: 'notice/clear/legacy-clear', token: '', expires: Date.now() + 600_000, choices: [], page: 0 };
+      if (known) {
+        const thread = await f.native.createThread(old.cwd, `codex-telegram-relay:new:${op.id}`, 'clear');
+        f.state.createNewSession({ ...op, threadId: string(thread.id), status: 'known' });
+      } else f.state.createNewSession(op);
+      await f.bridge.workNewSession(); await f.bridge.workNewSession();
+      assert.equal(f.state.newSession(op.id)!.status, 'failed', String(known));
+      assert.equal(f.state.resettingTopic(old.topicId), false, String(known));
+      assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId, String(known));
+      assert.equal(f.native.starts, known ? 1 : 0);
+      assert.deepEqual(f.native.releases, []);
+      await f.bridge.update(message(11, old.topicId, 'Continue original'));
+      assert.equal(f.native.writes[0]!.params.threadId, old.threadId);
+    } finally { f.close(); }
+  }
+});
+
+test('/clear refuses replacement input arriving during source checks or the final empty-history read', async () => {
+  for (const eventOnly of [false, true]) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      await f.bridge.update(message(10, old.topicId, '/clear'));
+      const capture = f.native.captureClearSettings.bind(f.native);
+      f.native.captureClearSettings = async (threadId, cwd) => {
+        const snapshot = await capture(threadId, cwd);
+        if (!eventOnly && threadId === old.threadId && f.native.starts) f.native.histories.set('new-thread-1', [{ id: 'foreign-task', status: 'inProgress' }]);
+        return snapshot;
+      };
+      const turns = f.native.turns.bind(f.native);
+      f.native.turns = async threadId => {
+        const snapshot = await turns(threadId);
+        if (eventOnly && threadId === 'new-thread-1') f.bridge.streamEvent('turn/started', { threadId, turn: { id: 'foreign-task', status: 'inProgress' } });
+        return snapshot;
+      };
+      await f.bridge.workNewSession();
+      assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+      assert.equal(f.state.resettingTopic(old.topicId), false);
+      assert.equal(f.native.starts, 1);
+      assert.deepEqual(f.native.releases, []);
+    } finally { f.close(); }
+  }
+});
+
+test('/clear does not retire the old route before replacement attachment and effective permissions are verified', async () => {
+  for (const failure of ['attach', 'permissions']) {
+    const f = setup();
+    try {
+      const old = await originalSession(f);
+      if (failure === 'attach') {
+        const attach = f.native.attach.bind(f.native);
+        f.native.attach = async id => {
+          if (id.startsWith('new-thread-')) {
+            assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId);
+            throw new RpcError('Attachment response unavailable', true);
+          }
+          return attach(id);
+        };
+      } else {
+        const create = f.native.createThread.bind(f.native);
+        f.native.createThread = async (...args) => {
+          const result = await create(...args);
+          f.native.permissionStates.get(string(result.id))!.approvalsReviewer = 'auto_review';
+          return result;
+        };
+      }
+      await f.bridge.update(message(10, old.topicId, '/clear'));
+      await f.bridge.workNewSession();
+      assert.equal(f.native.starts, 1, failure);
+      assert.equal(f.state.topic(old.topicId)!.threadId, old.threadId, failure);
+      assert.equal(f.state.retiredSession(old.threadId), false, failure);
+      assert.deepEqual(f.native.releases, [], failure);
+    } finally { f.close(); }
+  }
+});
+
+test('/clear releases only the retired native subscription after the replacement is verified and bound', async () => {
+  const f = setup();
+  try {
+    const old = await originalSession(f);
+    const unsubscribe = f.native.unsubscribe.bind(f.native);
+    f.native.unsubscribe = async id => {
+      assert.equal(id, old.threadId);
+      assert.equal(f.state.topic(old.topicId)!.threadId, 'new-thread-1');
+      assert.ok(f.native.resumes.includes('new-thread-1'));
+      return unsubscribe(id);
+    };
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession(); await f.bridge.workNewSession();
+    assert.deepEqual(f.native.releases, [old.threadId]);
+    assert.deepEqual(f.state.pendingUnsubscribes(), []);
+    assert.equal(f.native.starts, 1);
+    assert.equal((await f.native.turns(old.threadId))[0]!.id, 'old');
+  } finally { f.close(); }
+});
+
+test('unknown native unsubscribe survives disk recovery without recreating or resuming the retired session', async t => {
+  const f = setup(); let reopened: State | undefined; let restarted: Bridge | undefined; let originalClosed = false;
+  try {
+    const old = await originalSession(f); f.native.loseRelease = true;
+    await f.bridge.update(message(10, old.topicId, '/clear'));
+    await f.bridge.workNewSession();
+    if (!f.native.releases.length) await f.bridge.workNewSession();
+    assert.equal(f.state.topic(old.topicId)!.threadId, 'new-thread-1');
+    const retryTime = Date.now() + 6000;
+    t.mock.method(Date, 'now', () => retryTime);
+    assert.deepEqual(f.state.pendingUnsubscribes().map(row => ({ ...row })), [{ threadId: old.threadId, replacementId: 'new-thread-1' }]);
+    f.bridge.close(); f.state.close(); originalClosed = true;
+    reopened = new State(join(f.dir, 'private'));
+    assert.deepEqual(reopened.pendingUnsubscribes().map(row => ({ ...row })), [{ threadId: old.threadId, replacementId: 'new-thread-1' }]);
+    restarted = new Bridge(f.config, reopened, f.native, f.telegram);
+    f.native.resumes = [];
+    await restarted.workNewSession(); await restarted.workNewSession();
+    assert.deepEqual(reopened.pendingUnsubscribes(), []);
+    assert.equal(f.native.starts, 1);
+    assert.equal(f.native.resumes.includes(old.threadId), false);
+    assert.equal(reopened.topic(old.topicId)!.threadId, 'new-thread-1');
+  } finally { restarted?.close(); reopened?.close(); if (originalClosed) f.remove(); else f.close(); }
+});
+
+test('/clear can replace a verified unloaded idle conversation without submitting input to it', async () => {
   const f = setup();
   try {
     const old = await originalSession(f);
@@ -657,8 +906,7 @@ test('/clear can replace a verified unloaded idle conversation without resuming 
     await f.bridge.update(message(10, old.topicId, '/clear')); await f.bridge.workNewSession(); await f.drain();
     assert.equal(f.native.starts, 1);
     assert.notEqual(f.state.topic(old.topicId)!.threadId, old.threadId);
-    assert.equal(f.native.resumes.includes(old.threadId), true); // Initial discovery only.
-    assert.equal(f.native.resumes.filter(id => id === old.threadId).length, 1);
+    assert.deepEqual(f.native.writes, []);
   } finally { f.close(); }
 });
 

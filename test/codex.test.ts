@@ -8,6 +8,68 @@ import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
 import { permissionSignature } from '../src/permission-settings.js';
+import { captureClearSettingsSnapshot, clearStartSettings, equivalentClearSettings, ClearSettingsError } from '../src/clear-settings.js';
+
+test('clear creation carries the captured native permission selection rather than project defaults', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.call('thread/settings/update', { threadId: 'a', approvalsReviewer: 'auto_review' });
+    const snapshot = await c.captureClearSettings('a', process.cwd());
+    const start = snapshot.start;
+    const thread = await c.createThread(process.cwd(), 'clear-capture', 'clear', snapshot);
+    assert.equal(thread.id, 'new-thread');
+    await c.validateClearSettings('new-thread', snapshot);
+    assert.equal(c.clearSettingsCurrent('a', snapshot), true);
+    assert.equal(c.clearSettingsCurrent('new-thread', snapshot), true);
+    await c.call('thread/settings/update', { threadId: 'a', approvalsReviewer: 'user' });
+    assert.equal(c.clearSettingsCurrent('a', snapshot), false, 'a delivered native settings change fences the final handoff');
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.find(record => record.method === 'thread/start')!.params,
+      { cwd: process.cwd(), ephemeral: false, threadSource: 'clear-capture', sessionStartSource: 'clear', ...start });
+  } finally { c.close(); }
+});
+
+test('clear snapshots preserve network and roots, detect native changes and reject unrepresentable or altered policies', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const settings = { cwd: process.cwd(), runtimeWorkspaceRoots: [process.cwd(), resolve('test')],
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [resolve('docs')], networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true },
+      activePermissionProfile: { id: ':workspace' }, approvalPolicy: 'untrusted', approvalsReviewer: 'user' };
+    await c.call('test/permissions', { settings });
+    const snapshot = await c.captureClearSettings('a', process.cwd());
+    assert.deepEqual(snapshot.start.config, { sandbox_workspace_write: { writable_roots: [resolve('docs')], network_access: true,
+      exclude_tmpdir_env_var: true, exclude_slash_tmp: true } });
+    assert.equal(equivalentClearSettings(snapshot, { ...settings, runtimeWorkspaceRoots: [...settings.runtimeWorkspaceRoots].reverse() }), true);
+    await c.call('test/permissions', { startOverrides: { approvalsReviewer: 'auto_review' } });
+    const thread = await c.createThread(process.cwd(), 'managed-change', 'clear', snapshot);
+    assert.equal(thread.id, 'new-thread', 'the acknowledged ID is returned before qualification for durable recovery');
+    await assert.rejects(c.validateClearSettings('new-thread', snapshot), error => error instanceof ClearSettingsError && /differ/u.test(error.message));
+    const altered = structuredClone(snapshot); altered.start.approvalsReviewer = 'auto_review';
+    assert.throws(() => clearStartSettings(altered, process.cwd()), ClearSettingsError);
+    for (const patch of [{ activePermissionProfile: { id: 'custom' } }, { runtimeWorkspaceRoots: undefined },
+      { sandboxPolicy: { type: 'workspaceWrite' } }, { approvalsReviewer: 'guardian_subagent' },
+      { sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false, unknownRestriction: true } }]) {
+      assert.throws(() => captureClearSettingsSnapshot({ ...settings, ...patch }, process.cwd()));
+    }
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.equal(records.some(record => ['turn/start', 'config/value/write'].includes(record.method)), false);
+  } finally { c.close(); }
+});
+
+test('native unsubscribe and interrupt target only the explicit thread and turn', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    await c.unsubscribe('retired-thread'); await c.interrupt('active-thread', 'active-turn');
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.deepEqual(records.filter(record => ['thread/unsubscribe', 'turn/interrupt'].includes(record.method)).map(record => ({ method: record.method, params: record.params })), [
+      { method: 'thread/unsubscribe', params: { threadId: 'retired-thread' } },
+      { method: 'turn/interrupt', params: { threadId: 'active-thread', turnId: 'active-turn' } },
+    ]);
+  } finally { c.close(); }
+});
 
 test('native permission catalog is live and paginated; writes use only explicit permission fields and require an applied event', async () => {
   const c = new CodexClient();

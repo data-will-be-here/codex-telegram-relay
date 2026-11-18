@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Preserve supported permissions across `/clear`, verify the empty replacement before switching, and durably release the relay's retired native subscriptions. Unsupported custom policies keep the original topic usable.
+- Add `/stop` to the command list and help for exact native turn interruption, including approval/question waits. Deduplicate uncertain requests and retire stopped-turn controls; keep ordinary text and existing cards free of extra waiting notifications.
+
 ## 0.1.23 — 2026-11-18
 
 - Add `/rename [NEW NAME]` for the current Telegram topic. Without arguments, accept the next text message in that topic, with Cancel and Restore default buttons; Telegram Reply is optional. Invalid names and attachments stay out of Codex, slash commands still work, and other topics are unaffected.

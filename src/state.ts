@@ -43,6 +43,8 @@ export interface TopicRenameMenu {
 export type NewSessionPhase = 'selecting' | 'cancelled' | 'checking' | 'preparing' | 'starting' | 'uncertain' | 'known' | 'persisted' | 'topic' | 'ready' | 'failed';
 export interface NewSessionOperation {
   reset?: Binding;
+  clearSettings?: import('./clear-settings.js').ClearSettingsSnapshot;
+  candidateUsed?: boolean;
   id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
   choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
   reportedTopicAttempt?: string;
@@ -51,6 +53,8 @@ export interface NewSessionOperation {
   kind?: 'project' | 'scratch'; root?: string; cwd?: string; threadId?: string; name?: string;
   retryAt?: number; error?: string;
 }
+
+export type TurnStopStatus = 'requested' | 'uncertain' | 'acknowledged' | 'completed';
 
 export class State {
   private db: DatabaseSync;
@@ -98,6 +102,8 @@ export class State {
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS retired_bindings(threadId TEXT PRIMARY KEY, binding TEXT NOT NULL, replacementId TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS subscription_cleanup(threadId TEXT PRIMARY KEY, replacementId TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS turn_stops(threadId TEXT NOT NULL, turnId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,turnId));
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
           retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
@@ -110,6 +116,7 @@ export class State {
         UPDATE new_sessions SET status='failed' WHERE status='checking';
         UPDATE topic_operations SET status='uncertain' WHERE status='creating';
         UPDATE incoming SET status='uncertain' WHERE status='dispatching';
+        UPDATE turn_stops SET status='uncertain' WHERE status='requested';
         UPDATE outbox SET status='uncertain' WHERE status='sending';
         UPDATE outbox SET status='held' WHERE status='pending' AND key IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status='pending');
         UPDATE outbox SET status='cancelled' WHERE status='pending' AND key LIKE 'prompt/%';`);
@@ -335,6 +342,7 @@ export class State {
       if (current?.threadId === id && this.retiredSession(old.threadId)) { this.db.exec('COMMIT'); return current; }
       if (current?.threadId !== old.threadId || current.cwd !== old.cwd || this.sessionDeliveryBusy(old.threadId)) throw new Error('The previous topic is busy or its binding changed.');
       this.db.prepare('INSERT INTO retired_bindings VALUES(?,?,?)').run(old.threadId, JSON.stringify(old), id);
+      this.db.prepare('INSERT OR IGNORE INTO subscription_cleanup(threadId,replacementId) VALUES(?,?)').run(old.threadId, id);
       this.db.prepare("UPDATE widget_cards SET delivery='retired' WHERE threadId=?").run(old.threadId);
       this.db.prepare('DELETE FROM bindings WHERE threadId=?').run(old.threadId);
       this.db.prepare("INSERT INTO bindings(threadId,topicId,cwd,title,lastTurn,sessionName,customTitle,titlePending) VALUES(?,?,?,?,'-',?,?,?)").run(id, old.topicId, old.cwd, current.title, operation.name ?? null, current.customTitle ?? null, current.titlePending ?? 0);
@@ -575,6 +583,31 @@ export class State {
     this.db.prepare('UPDATE replies SET turnId=? WHERE threadId=? AND inputId=?').run(turnId, threadId, inputId);
   }
   clearReply(threadId: string, inputId: number): void { this.db.prepare('DELETE FROM replies WHERE threadId=? AND inputId=?').run(threadId, inputId); }
+  reserveTurnStop(threadId: string, turnId: string): boolean {
+    return Number(this.db.prepare("INSERT OR IGNORE INTO turn_stops VALUES(?,?,'requested',?)").run(threadId, turnId, Date.now()).changes) > 0;
+  }
+  turnStop(threadId: string, turnId: string): { status: TurnStopStatus } | undefined {
+    return this.db.prepare('SELECT status FROM turn_stops WHERE threadId=? AND turnId=?').get(threadId, turnId) as { status: TurnStopStatus } | undefined;
+  }
+  markTurnStop(threadId: string, turnId: string, status: TurnStopStatus): void {
+    this.db.prepare("UPDATE turn_stops SET status=?,at=? WHERE threadId=? AND turnId=? AND status<>'completed'").run(status, Date.now(), threadId, turnId);
+  }
+  rejectTurnStop(threadId: string, turnId: string): void {
+    this.db.prepare("DELETE FROM turn_stops WHERE threadId=? AND turnId=? AND status='requested'").run(threadId, turnId);
+  }
+  pendingTurnStops(threadId?: string): { threadId: string; turnId: string; status: TurnStopStatus }[] {
+    return this.db.prepare("SELECT threadId,turnId,status FROM turn_stops WHERE status<>'completed' AND (? IS NULL OR threadId=?) ORDER BY at LIMIT 128")
+      .all(threadId ?? null, threadId ?? null) as { threadId: string; turnId: string; status: TurnStopStatus }[];
+  }
+  pendingUnsubscribes(): { threadId: string; replacementId: string }[] {
+    return this.db.prepare('SELECT threadId,replacementId FROM subscription_cleanup WHERE retryAt<=? ORDER BY rowid LIMIT 64')
+      .all(Date.now()) as { threadId: string; replacementId: string }[];
+  }
+  enqueueUnsubscribe(threadId: string, replacementId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO subscription_cleanup(threadId,replacementId) VALUES(?,?)').run(threadId, replacementId);
+  }
+  completeUnsubscribe(threadId: string): void { this.db.prepare('DELETE FROM subscription_cleanup WHERE threadId=?').run(threadId); }
+  deferUnsubscribe(threadId: string): void { this.db.prepare('UPDATE subscription_cleanup SET retryAt=? WHERE threadId=?').run(Date.now() + 5000, threadId); }
   enqueueOwnerNotice(key: string, topicId: number | null, text: string, markup: Json | null = null): void {
     if (!key.startsWith('notice/') && !key.startsWith('attention/status/')) throw new Error('Owner notices require a notice or status key.');
     this.enqueue(key, null, text, markup);
@@ -758,6 +791,7 @@ export class State {
     return files + Number(this.db.prepare("SELECT (SELECT count(*) FROM incoming WHERE status='uncertain')+(SELECT count(*) FROM outbox WHERE status='uncertain')+(SELECT count(*) FROM widget_cards WHERE everUncertain=1) AS n").get()?.n ?? 0);
   }
   prune(): void {
+    this.db.prepare("DELETE FROM turn_stops WHERE status='completed' AND at<?").run(Date.now() - 7 * 24 * 60 * 60_000);
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
     this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled','pin-uncertain') AND key NOT IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status IN ('pending','consumed'))").run(cutoff);

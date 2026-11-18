@@ -21,8 +21,10 @@ let permissionPages = [{ cursor: null, response: { data: [':read-only', ':worksp
 let permissionRequirements = null;
 let permissionFeatures = [{ name: 'guardian_approval', enabled: true }];
 let permissionAcknowledgementOnly = false;
+let startPermissionOverrides = {};
 function currentPermissions(id) {
-  if (!permissionSettings.has(id)) permissionSettings.set(id, { cwd: process.cwd(), sandboxPolicy: { type: 'workspaceWrite' },
+  if (!permissionSettings.has(id)) permissionSettings.set(id, { cwd: process.cwd(), runtimeWorkspaceRoots: [process.cwd()],
+    sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
     activePermissionProfile: { id: ':workspace' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', model: 'test-model', modelProvider: 'openai' });
   return permissionSettings.get(id);
 }
@@ -33,6 +35,8 @@ wss.on('connection', ws => ws.on('message', bytes => {
   records.push(message);
   let result = {};
   if (message.method === 'test/permissions') {
+    if (message.params.settings) permissionSettings.set(message.params.threadId ?? 'a', message.params.settings);
+    if (message.params.startOverrides) startPermissionOverrides = message.params.startOverrides;
     if (message.params.pages) permissionPages = message.params.pages;
     if ('requirements' in message.params) permissionRequirements = message.params.requirements;
     if (message.params.features) permissionFeatures = message.params.features;
@@ -80,6 +84,23 @@ wss.on('connection', ws => ws.on('message', bytes => {
     const settings = currentPermissions(message.params.threadId);
     result = { ...settings, sandbox: settings.sandboxPolicy, thread: { id: message.params.threadId } };
   }
+  if (message.method === 'thread/start') {
+    const settings = structuredClone(currentPermissions('new-thread'));
+    settings.cwd = message.params.cwd;
+    if (message.params.permissions) settings.activePermissionProfile = { id: message.params.permissions, extends: null };
+    if (message.params.approvalPolicy) settings.approvalPolicy = message.params.approvalPolicy;
+    if (message.params.approvalsReviewer) settings.approvalsReviewer = message.params.approvalsReviewer;
+    if (message.params.runtimeWorkspaceRoots) settings.runtimeWorkspaceRoots = message.params.runtimeWorkspaceRoots;
+    if (message.params.permissions === ':danger-full-access') settings.sandboxPolicy = { type: 'dangerFullAccess' };
+    if (message.params.permissions === ':read-only') settings.sandboxPolicy = { type: 'readOnly', networkAccess: false };
+    const workspace = message.params.config?.sandbox_workspace_write;
+    if (workspace) settings.sandboxPolicy = { type: 'workspaceWrite', writableRoots: workspace.writable_roots,
+      networkAccess: workspace.network_access, excludeTmpdirEnvVar: workspace.exclude_tmpdir_env_var, excludeSlashTmp: workspace.exclude_slash_tmp };
+    Object.assign(settings, startPermissionOverrides);
+    permissionSettings.set('new-thread', settings);
+    result = { ...settings, sandbox: settings.sandboxPolicy, thread: { id: 'new-thread', cwd: settings.cwd, source: 'cli', status: { type: 'idle' } } };
+  }
+  if (message.method === 'thread/unsubscribe') result = { status: 'unsubscribed' };
   if (message.method === 'thread/turns/list') result = { data: [] };
   if (message.method === 'thread/turns/list' && histories.has(message.params.threadId)) result = { data: histories.get(message.params.threadId) };
   if (message.method === 'thread/turns/list' && message.params.threadId === 'large') result = { data: [{ id: 'large-turn', status: 'completed', items: message.params.itemsView === 'full' ? [{ type: 'commandExecution', aggregatedOutput: 'x'.repeat(17 * 1024 * 1024) }] : [{ type: 'agentMessage', phase: 'final_answer', text: 'Display summary' }] }] };
