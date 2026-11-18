@@ -1,5 +1,11 @@
 # Verification record
 
+## Next-message topic-name input (development, 2026-11-18)
+
+`/rename` now captures the next text message in its topic without requiring Telegram Reply. Integration tests cover the reported `Обнова MCP` name, invalid names and media retaining input mode, ordinary instructions after success/cancel, slash-command handling, topic isolation, input before prompt delivery, expiry and pending input after reopening the state database. Explicit replies to retired prompts keep their rejection path, and binding checks prevent pre-`/clear` menus capturing a new session. README instructions and architecture now describe the same interaction.
+
+Final local Windows suite: 518 discovered, 514 passed, four skipped, zero failures. Build, typecheck, package allowlist and whitespace checks passed.
+
 ## Current-topic renaming (development, 2026-11-18)
 
 `/rename` is exercised through authorized Telegram updates and the persistent outbox in Classic and Widgets, including an unloaded native session. Tests cover exact Cyrillic/emoji titles, length/control validation, native name/task preservation, reply-only input, cancel/reset, prompt expiry and outbox pruning, closed-prompt replies after `/clear`, process-state reopening, callback owner/topic/message checks and eligibility/generation changes during acknowledgement. Topic tests cover retained overrides during discovery and recovery, idempotent uncertain writes even when the target equals the confirmed name, durable rate limits, definite rejection rollback, serialized automatic/manual edits and stale binding responses. Pending names retry during discovery even when their native session is unloaded. No native task or permission change is used to rename a topic.

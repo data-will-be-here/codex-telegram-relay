@@ -4,7 +4,7 @@ import { State, type TopicRenameMenu } from './state.js';
 import { Topics } from './topics.js';
 import { integer, object, string, type Binding, type Json, type Telegram } from './types.js';
 
-/** Native reply prompts keep title input separate from instructions, questions and widget callbacks. */
+/** Per-topic title input is consumed before Codex instructions and pending questions. */
 export class TopicRenames {
   constructor(private readonly config: Config, private readonly state: State, private readonly topics: Topics, private readonly telegram: Telegram,
     private readonly active: () => boolean = () => true) {}
@@ -17,7 +17,7 @@ export class TopicRenames {
       allowedSessionDirectory(binding.cwd, this.config, this.state.ownsScratch(binding.cwd, binding.threadId));
   }
   private valid(menu: TopicRenameMenu): boolean {
-    return !menu.closed && this.state.topicRenameMenu(menu.token)?.closed === 0 && menu.expires > Date.now() && !!menu.messageId &&
+    return !menu.closed && this.state.topicRenameMenu(menu.token)?.closed === 0 && menu.expires > Date.now() &&
       this.available({ ...menu, title: '', lastTurn: null });
   }
   private notice(topicId: number | null, text: string): void {
@@ -46,17 +46,23 @@ export class TopicRenames {
       const deliveryKey = `notice/topic-rename-menu/${token}`;
       this.state.saveTopicRenameMenu({ token, threadId: binding.threadId, topicId: binding.topicId, cwd: binding.cwd, deliveryKey,
         expires: Date.now() + 10 * 60 * 1000, closed: 0 });
-      this.state.enqueue(deliveryKey, binding.topicId, `Current topic: ${binding.title}\n\nReply to this message with a new single-line name (1–128 characters).\nOther messages continue to Codex normally. This prompt expires in 10 minutes.`,
+      this.state.enqueue(deliveryKey, binding.topicId, `Current topic: ${binding.title}\n\nSend the new name as your next text message in this topic (one line, 1–128 characters). No Reply is needed.\nUntil you choose a valid name or Cancel, messages here are kept out of Codex. Slash commands still work. This prompt expires in 10 minutes.`,
         { inline_keyboard: [[{ text: 'Cancel', callback_data: `tr:${token}:cancel` }, { text: 'Restore default', callback_data: `tr:${token}:reset` }]] });
       return true;
     }
+    if (text.startsWith('/')) return false;
     const replyId = integer(object(message.reply_to_message).message_id);
-    const menu = topicId !== null && replyId ? this.state.topicRenameReply(topicId, replyId) : undefined;
+    const repliedMenu = topicId !== null && replyId ? this.state.topicRenameReply(topicId, replyId) : undefined;
+    // An explicit reply to an old prompt cannot rename through a newer menu or leak into Codex.
+    const menu = repliedMenu ?? (topicId !== null ? this.state.waitingTopicRenameMenu(topicId) : undefined);
     if (!menu) return false;
     // Even expired or cancelled prompt replies must never become a Codex instruction.
-    if (!this.valid(menu)) { this.notice(topicId, 'This rename prompt is closed or expired. Send /rename to open a new one.'); return true; }
+    if (!this.valid(menu)) {
+      if (!repliedMenu) this.state.closeTopicRenameMenus(menu.topicId);
+      this.notice(topicId, 'This rename prompt is closed or expired. This message was not sent to Codex. Send /rename to open a new one.'); return true;
+    }
     if (!text || message.photo || message.document || message.voice || message.audio || message.video || message.animation || message.video_note) {
-      this.notice(topicId, 'Reply with a text name, or choose Cancel.'); return true;
+      this.notice(topicId, 'Send a text name, or choose Cancel.'); return true;
     }
     await this.apply(this.state.binding(menu.threadId)!, text, menu);
     return true;
@@ -65,7 +71,7 @@ export class TopicRenames {
   async callback(callback: Json, message: Json, topicId: number | null): Promise<void> {
     const match = /^tr:([a-f0-9]{32}):(cancel|reset)$/u.exec(string(callback.data));
     const menu = match ? this.state.topicRenameMenu(match[1]!) : undefined;
-    const valid = (): boolean => !!menu && menu.topicId === topicId && menu.messageId === integer(message.message_id) &&
+    const valid = (): boolean => !!menu && !!menu.messageId && menu.topicId === topicId && menu.messageId === integer(message.message_id) &&
       this.valid(menu);
     const accepted = valid();
     try { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id,

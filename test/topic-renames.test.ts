@@ -43,24 +43,27 @@ test('/rename changes only the topic, in Classic and Widgets, without a native s
   }
 });
 
-test('only replies to the rename prompt are names; cancellation, old menus and expiry never send instructions', async () => {
+test('the next text names the topic without Reply; cancellation and old prompt replies never send instructions', async () => {
   const f = await fixture();
   try {
     const first = await open(f);
-    await f.bridge.update(message(2, 101, 'Ordinary instruction'));
+    await f.bridge.update(message(2, 101, 'Обнова MCP'));
+    assert.equal(f.state.binding('thread-a')?.title, 'Обнова MCP');
+    assert.equal(f.codex.writes.length, 0);
+    await f.bridge.update(message(3, 101, 'Ordinary instruction'));
     assert.equal(f.codex.writes.length, 1);
-    const second = await open(f, 3);
-    await f.bridge.update(reply(4, first.id, 'Stale name'));
-    await f.bridge.update(control(5, second.cancel, second.id));
-    await f.bridge.update(reply(6, second.id, 'Cancelled name'));
-    assert.equal(f.state.binding('thread-a')?.customTitle, null);
+    const second = await open(f, 4);
+    await f.bridge.update(reply(5, first.id, 'Stale name'));
+    await f.bridge.update(control(6, second.cancel, second.id));
+    await f.bridge.update(reply(7, second.id, 'Cancelled name'));
+    assert.equal(f.state.binding('thread-a')?.customTitle, 'Обнова MCP');
     assert.equal(f.codex.writes.length, 1);
-    const expired = await open(f, 7);
+    const expired = await open(f, 8);
     const realNow = Date.now; Date.now = () => realNow() + 8 * 24 * 60 * 60 * 1000;
-    try { f.state.prune(); await f.bridge.update(reply(8, expired.id, 'Expired name')); }
+    try { f.state.prune(); await f.bridge.update(reply(9, expired.id, 'Expired name')); }
     finally { Date.now = realNow; }
     assert.equal(f.codex.writes.length, 1);
-    assert.equal(f.state.binding('thread-a')?.customTitle, null);
+    assert.equal(f.state.binding('thread-a')?.customTitle, 'Обнова MCP');
   } finally { f.close(); }
 });
 
@@ -75,7 +78,8 @@ test('rename prompts and their reply routing survive a relay restart; reset retu
     const outbox = new Outbox(state, f.telegram, bridge.config, 0);
     const drain = async () => { while (await outbox.flushOne()) { /* Deliver persisted controls. */ } };
     try {
-      await bridge.update(reply(2, prompt.id, 'My conversation')); await drain();
+      assert.ok(prompt.id);
+      await bridge.update(message(2, 101, 'My conversation')); await drain();
       assert.equal(state.binding('thread-a')?.title, 'My conversation');
       await bridge.update(message(3, 101, '/rename')); await drain();
       const sent = f.telegram.sent().at(-1)!;
@@ -113,16 +117,37 @@ test('rename controls validate owner, chat, topic, message and current binding a
 test('invalid rename replies stay in the prompt and media is never forwarded', async () => {
   const f = await fixture();
   try {
-    const prompt = await open(f);
-    await f.bridge.update(reply(2, prompt.id, 'a'.repeat(129)));
-    await f.bridge.update(reply(3, prompt.id, 'Two\nlines'));
-    const photo = reply(4, prompt.id, ''); object(photo.message).photo = [{ file_id: 'never-download' }];
+    await open(f);
+    await f.bridge.update(message(2, 101, 'a'.repeat(129)));
+    await f.bridge.update(message(3, 101, 'Two\nlines'));
+    const photo = message(4, 101, ''); object(photo.message).photo = [{ file_id: 'never-download' }];
     await f.bridge.update(photo);
     assert.equal(f.state.binding('thread-a')?.customTitle, null);
-    await f.bridge.update(reply(5, prompt.id, 'Valid name'));
+    await f.bridge.update(message(5, 101, 'Valid name'));
     assert.equal(f.state.binding('thread-a')?.title, 'Valid name');
     assert.deepEqual(f.codex.writes, []);
     assert.equal(f.telegram.calls.some(c => c.method === 'getFile'), false);
+  } finally { f.close(); }
+});
+
+test('pending name input is scoped to one topic, preserves slash commands and works before prompt delivery', async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.update(message(1, 101, '/rename'));
+    await f.bridge.update(message(2, 102, 'Instruction in another topic'));
+    await f.bridge.update(message(3, 101, '/status'));
+    assert.equal(f.state.binding('thread-a')?.customTitle, null);
+    await f.bridge.update(message(4, 101, 'Обнова MCP'));
+    assert.equal(f.state.binding('thread-a')?.title, 'Обнова MCP');
+    assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-b', text: 'Instruction in another topic' } }]);
+    await f.bridge.update(message(5, 101, '/rename')); await f.drain();
+    const realNow = Date.now; Date.now = () => realNow() + 11 * 60 * 1000;
+    try { await f.bridge.update(message(6, 101, 'Late name')); }
+    finally { Date.now = realNow; }
+    assert.equal(f.state.binding('thread-a')?.title, 'Обнова MCP');
+    assert.equal(f.codex.writes.length, 1);
+    await f.bridge.update(message(7, 101, 'Instruction after expiry'));
+    assert.equal(f.codex.writes.length, 2);
   } finally { f.close(); }
 });
 

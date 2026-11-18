@@ -529,6 +529,10 @@ export class State {
   topicRenameMenu(token: string): TopicRenameMenu | undefined {
     return this.db.prepare('SELECT * FROM topic_rename_menus WHERE token=?').get(token) as unknown as TopicRenameMenu | undefined;
   }
+  waitingTopicRenameMenu(topicId: number): TopicRenameMenu | undefined {
+    return this.db.prepare('SELECT m.* FROM topic_rename_menus m JOIN bindings b ON b.threadId=m.threadId AND b.topicId=m.topicId AND b.cwd=m.cwd WHERE m.topicId=? AND m.closed=0 ORDER BY m.rowid DESC LIMIT 1')
+      .get(topicId) as unknown as TopicRenameMenu | undefined;
+  }
   topicRenameReply(topicId: number, messageId: number): TopicRenameMenu | undefined {
     return this.db.prepare('SELECT * FROM topic_rename_menus WHERE topicId=? AND messageId=?').get(topicId, messageId) as unknown as TopicRenameMenu | undefined;
   }
