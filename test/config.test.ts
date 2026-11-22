@@ -1,10 +1,95 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { loadConfig, saveConfig, validateBinary, findCodex } from '../src/config.js';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, realpathSync, unlinkSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
+import { codexCandidates, loadConfig, readConfig, saveConfig, validateBinary, findCodex, type Config } from '../src/config.js';
 import { temporary } from './helpers.js';
 import { spawnSync } from 'node:child_process';
+
+test('automatic Codex discovery prefers the current managed installation over a PATH executable', () => {
+  const f = temporary(); const previousPath = process.env.PATH; const previousHome = process.env.CODEX_HOME;
+  try {
+    const name = process.platform === 'win32' ? 'codex.exe' : 'codex';
+    const pathBinary = join(f.dir, 'path', name);
+    const managed = join(f.dir, 'codex-home', 'packages', 'app-server-daemon', 'current', 'bin', name);
+    for (const binary of [pathBinary, managed]) { mkdirSync(dirname(binary), { recursive: true }); copyFileSync(process.execPath, binary); chmodSync(binary, 0o755); }
+    process.env.PATH = dirname(pathBinary); process.env.CODEX_HOME = join(f.dir, 'codex-home');
+    assert.equal(findCodex(), realpathSync(managed));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    f.close();
+  }
+});
+
+test('automatic candidates re-resolve the managed channel, then PATH, retaining the previous successful binary last', () => {
+  const f = temporary(); const previousPath = process.env.PATH; const previousHome = process.env.CODEX_HOME;
+  try {
+    const name = process.platform === 'win32' ? 'codex.exe' : 'codex';
+    const managed = join(f.dir, 'codex-home', 'packages', 'app-server-daemon', 'current', 'bin', name);
+    const pathBinary = join(f.dir, 'path', name); const previous = join(f.dir, 'previous', name);
+    for (const binary of [managed, pathBinary, previous]) { mkdirSync(dirname(binary), { recursive: true }); copyFileSync(process.execPath, binary); chmodSync(binary, 0o755); }
+    process.env.PATH = [dirname(pathBinary), dirname(pathBinary)].join(delimiter); process.env.CODEX_HOME = join(f.dir, 'codex-home');
+    const config = { codexBinary: previous, codexSelection: { mode: 'auto' as const, source: 'path' as const } };
+    assert.deepEqual(codexCandidates(config), [
+      { binary: realpathSync(managed), source: 'managed' }, { binary: realpathSync(pathBinary), source: 'path' }, { binary: realpathSync(previous), source: 'previous' },
+    ]);
+    unlinkSync(managed);
+    assert.deepEqual(codexCandidates(config).map(candidate => candidate.source), ['path', 'previous']);
+    writeFileSync(pathBinary, 'not native');
+    assert.deepEqual(codexCandidates(config), [{ binary: realpathSync(previous), source: 'previous' }]);
+    copyFileSync(process.execPath, managed); chmodSync(managed, 0o755);
+    assert.equal(codexCandidates(config)[0]!.source, 'managed', 'each attempt sees a newly installed current binary');
+    assert.deepEqual(codexCandidates({ ...config, codexBinary: managed }).map(candidate => candidate.source), ['managed'], 'canonical duplicates retain the preferred source');
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    f.close();
+  }
+});
+
+test('explicit and fixed executable choices never fall back, while legacy paths retain missing-only recovery', () => {
+  const f = temporary(); const previousPath = process.env.PATH; const previousHome = process.env.CODEX_HOME;
+  try {
+    const name = process.platform === 'win32' ? 'codex.exe' : 'codex';
+    const managed = join(f.dir, 'codex-home', 'packages', 'app-server-daemon', 'current', 'bin', name);
+    const pinned = join(f.dir, 'pinned', name); const missing = join(f.dir, 'missing', name);
+    for (const binary of [managed, pinned]) { mkdirSync(dirname(binary), { recursive: true }); copyFileSync(process.execPath, binary); chmodSync(binary, 0o755); }
+    process.env.PATH = ''; process.env.CODEX_HOME = join(f.dir, 'codex-home');
+    assert.deepEqual(codexCandidates({ codexBinary: pinned }), [{ binary: realpathSync(pinned), source: 'fixed' }]);
+    assert.deepEqual(codexCandidates({ codexBinary: missing }), [{ binary: realpathSync(managed), source: 'managed' }]);
+    assert.throws(() => codexCandidates({ codexBinary: missing, codexSelection: { mode: 'fixed' } }), /native/u);
+    assert.throws(() => codexCandidates({ codexBinary: pinned, codexSelection: { mode: 'auto' } }, missing), /native/u);
+    assert.throws(() => codexCandidates({ codexBinary: pinned, codexSelection: { mode: 'auto' } }, ''), /absolute/u);
+    writeFileSync(pinned, 'invalid');
+    assert.throws(() => codexCandidates({ codexBinary: pinned }), /native/u);
+    assert.throws(() => codexCandidates({ codexBinary: pinned, codexSelection: { mode: 'fixed' } }), /native/u);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    f.close();
+  }
+});
+
+test('selection preferences round-trip and deferred loading preserves the previous binary without writing preferences or token', () => {
+  const f = temporary();
+  try {
+    const config: Config = { version: 1, ownerId: 42, roots: [f.dir], codexBinary: join(f.dir, 'removed', process.platform === 'win32' ? 'codex.exe' : 'codex'),
+      codexSelection: { mode: 'auto', source: 'path' } };
+    saveConfig(f.dir, config, String(12345) + ':' + 'synthetic'.repeat(4));
+    const before = readFileSync(join(f.dir, 'config.json'), 'utf8'); const token = readFileSync(join(f.dir, 'bot.token'), 'utf8');
+    assert.deepEqual(readConfig(f.dir).codexSelection, { mode: 'auto', source: 'path' });
+    const loaded = loadConfig(f.dir, { deferBinary: true });
+    assert.equal(loaded.config.codexBinary, config.codexBinary); assert.equal(loaded.binaryChanged, false);
+    assert.deepEqual(loadConfig(f.dir, { deferBinary: true, codexBinary: process.execPath }).config.codexSelection, { mode: 'fixed' });
+    assert.equal(readFileSync(join(f.dir, 'config.json'), 'utf8'), before);
+    assert.equal(readFileSync(join(f.dir, 'bot.token'), 'utf8'), token);
+    for (const selection of [{ mode: 'unknown' }, { mode: 'auto', source: 'other' }, { mode: 'fixed', source: 'managed' }, null, []]) {
+      writeFileSync(join(f.dir, 'config.json'), JSON.stringify({ ...config, codexSelection: selection }));
+      assert.throws(() => readConfig(f.dir), /selection/u);
+    }
+  } finally { f.close(); }
+});
 
 test('saving configuration removes pre-existing broad Windows grants from both the directory and token file', { skip: process.platform !== 'win32' }, () => {
   const temp = temporary();
@@ -63,7 +148,7 @@ test('automatic session scope persists with no project allowlist and invalid sco
 });
 
 test('a missing saved Codex binary is rediscovered without rewriting the token or saved config before compatibility checks', () => {
-  const f = temporary(); const previousPath = process.env.PATH;
+  const f = temporary(); const previousPath = process.env.PATH; const previousHome = process.env.CODEX_HOME;
   try {
     const binary = join(f.dir, process.platform === 'win32' ? 'codex.exe' : 'codex');
     writeFileSync(binary, Buffer.from(process.platform === 'win32' ? '4d5a0000' : process.platform === 'darwin' ? 'cffaedfe' : '7f454c46', 'hex')); chmodSync(binary, 0o755);
@@ -71,12 +156,14 @@ test('a missing saved Codex binary is rediscovered without rewriting the token o
     saveConfig(home, { version: 1, ownerId: 42, roots: [f.dir], codexBinary: join(f.dir, 'removed', process.platform === 'win32' ? 'codex.exe' : 'codex') }, String(12345) + ':' + 'synthetic'.repeat(4));
     const before = readFileSync(join(home, 'config.json'), 'utf8'); const token = readFileSync(join(home, 'bot.token'), 'utf8');
     process.env.PATH = f.dir;
+    process.env.CODEX_HOME = join(f.dir, 'isolated-codex-home');
     const recovered = loadConfig(home, { recoverBinary: true });
     assert.equal(recovered.config.codexBinary, realpathSync(binary));
     assert.equal(recovered.binaryChanged, true);
     assert.equal(readFileSync(join(home, 'config.json'), 'utf8'), before);
     assert.equal(readFileSync(join(home, 'bot.token'), 'utf8'), token);
-  } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; f.close(); }
+  } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome; f.close(); }
 });
 
 test('an existing invalid executable is not silently replaced, but an explicit native override preserves pairing', () => {
@@ -105,7 +192,7 @@ test('Unix native executable symlinks resolve without running a shell wrapper', 
 });
 
 test('Unix npm launcher resolves the hoisted native platform package without executing JavaScript', { skip: process.platform === 'win32' }, () => {
-  const temp = temporary(); const oldPath = process.env.PATH;
+  const temp = temporary(); const oldPath = process.env.PATH; const previousHome = process.env.CODEX_HOME;
   try {
     const root = join(temp.dir, 'lib', 'node_modules', '@openai', 'codex');
     const launcher = join(root, 'bin', 'codex.js');
@@ -122,7 +209,9 @@ test('Unix npm launcher resolves the hoisted native platform package without exe
     symlinkSync(process.execPath, native);
     const bin = join(temp.dir, 'bin'); mkdirSync(bin); symlinkSync(launcher, join(bin, 'codex'));
     process.env.PATH = bin;
+    process.env.CODEX_HOME = join(temp.dir, 'isolated-codex-home');
     assert.equal(findCodex(), realpathSync(process.execPath));
     assert.equal(validateBinary(join(bin, 'codex')), realpathSync(process.execPath));
-  } finally { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; temp.close(); }
+  } finally { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome; temp.close(); }
 });

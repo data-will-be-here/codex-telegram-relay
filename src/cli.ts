@@ -9,9 +9,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Bridge } from './bridge.js';
 import { CodexClient } from './codex.js';
+import { connectCodex } from './codex-connection.js';
+import { relayVersion } from './runtime-info.js';
+import { latestCodexVersion } from './codex-release.js';
 import { Drafts } from './drafts.js';
 import { syncCommandMenu } from './commands.js';
-import { configExists, dataDirectory, findCodex, loadConfig, readConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
+import { configExists, dataDirectory, loadConfig, readConfig, saveConfig, validateBinary, protectWindowsDirectory, allowedSessionDirectory, type Config } from './config.js';
 import { Files, type FileRequest } from './files.js';
 import { Outbox, TelegramClient, TelegramError } from './telegram.js';
 import { array, integer, object, string, type Json } from './types.js';
@@ -66,10 +69,11 @@ async function setup(args: string[]): Promise<void> {
   const scope = scopeIndex >= 0 ? args[scopeIndex + 1] : 'selected';
   if (scope !== 'all' && scope !== 'selected') throw new Error('Use setup --scope all or setup --scope selected.');
   console.log('Security: this bot is remote control of Codex. Anyone controlling your paired Telegram account can act within connected-session permissions and may access readable data.\nProtect your account, bot token and computer/server. Enable Telegram Two-Step Verification, an app passcode with auto-lock, and device screen lock; review active sessions.\nThe cloud password protects new logins, not an already unlocked session. See SECURITY.md.');
-  const binary = binaryFlag(args) ?? findCodex();
-  const codex = new CodexClient();
+  const override = binaryFlag(args);
+  const selection = await connectCodex({ version: 1, ownerId: 1, roots: [], sessionScope: 'all', codexBinary: override ?? '',
+    codexSelection: override ? { mode: 'fixed' } : { mode: 'auto' } }, { createClient: () => new CodexClient(), ...(override ? { override } : {}) });
+  const codex = selection.client;
   try {
-    await codex.connect(binary);
     const sessions = await codex.list();
     console.log('Existing Codex projects (terminal / IDE):');
     const paths = [...new Set(sessions.map(s => s.cwd))];
@@ -107,7 +111,8 @@ async function setup(args: string[]): Promise<void> {
       }
     }
     if (!ownerId) throw new Error('Pairing timed out. No configuration saved.');
-    const config: Config = { version: 1, ownerId, roots, codexBinary: binary, sessionScope: scope };
+    const config: Config = { version: 1, ownerId, roots, codexBinary: selection.config.codexBinary,
+      codexSelection: selection.config.codexSelection!, sessionScope: scope };
     saveConfig(home, config, token);
     await telegram.call('sendMessage', { chat_id: ownerId, ...withProjectHeader({ text: `Paired with your local Codex Telegram Relay. Start the relay on your computer to connect ${scope === 'all' ? 'all interactive Codex sessions, including future projects' : 'the selected projects'}.`, entities: [] }) });
     await commandMenu(telegram, ownerId);
@@ -117,11 +122,18 @@ async function setup(args: string[]): Promise<void> {
 
 async function doctor(args: string[]): Promise<void> {
   const override = binaryFlag(args);
-  const configured = configExists(dataDirectory()) ? loadConfig(dataDirectory(), { recoverBinary: true, ...(override ? { codexBinary: override } : {}) }) : undefined;
-  const binary = configured?.config.codexBinary ?? override ?? findCodex();
-  const codex = new CodexClient();
+  const configured = configExists(dataDirectory()) ? loadConfig(dataDirectory(), { deferBinary: true }) : undefined;
+  const config: Config = configured?.config ?? { version: 1, ownerId: 1, roots: [], sessionScope: 'all', codexBinary: '', codexSelection: { mode: 'auto' } };
+  if (args.includes('--codex-auto') && !override) config.codexSelection = { mode: 'auto' };
+  const selection = await connectCodex(config, { createClient: () => new CodexClient(), ...(override ? { override } : {}) });
+  const codex = selection.client;
   try {
-    await codex.connect(binary);
+    const info = codex.runtimeInfo();
+    console.log(`Relay: ${info.relayVersion}\nProxy: ${info.proxyVersion ?? 'unknown'}\nDaemon: ${info.daemonVersion ?? 'unknown'}\nAPI: ${info.compatibility}\nSelection: ${selection.config.codexSelection?.mode ?? 'fixed (legacy)'}; source: ${selection.candidate.source}${selection.fallback ? ' (fallback)' : ''}\nExecutable: ${selection.candidate.binary}`);
+    if (args.includes('--check-codex-update')) {
+      const latest = await latestCodexVersion();
+      console.log(`Latest stable Codex: ${latest ?? 'unavailable'} (public metadata only; nothing installed).`);
+    }
     const sessions = await codex.list();
     console.log(`Native shared-daemon connection: OK\nLoaded interactive sessions: ${sessions.length}\nNo threads resumed, no model turns started, no settings changed.`);
     if (configured) console.log(`Session discovery: ${configured.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}`);
@@ -133,7 +145,7 @@ async function doctor(args: string[]): Promise<void> {
       const { config, token } = configured;
       const username = await verifyBot(new TelegramClient(token));
       console.log(`Bot: @${username}; private topics: OK; owner configured; project roots: ${config.roots.length}`);
-      if (configured.binaryChanged) console.log('A replacement Codex executable was found. Doctor changed no files; start will save it after checking the shared daemon.');
+      if (selection.changed) console.log('A verified Codex selection is available. Doctor changed no files; start will save it after the shared-daemon check.');
     } else console.log('Bot configuration: not yet created. Run setup.');
   } finally { codex.close(); }
 }
@@ -151,7 +163,9 @@ async function start(args: string[]): Promise<void> {
     if (await consoleUpdate(installRoot, home, args)) return;
   }
   const override = binaryFlag(args);
-  const { config, token, binaryChanged } = loadConfig(home, { recoverBinary: true, ...(override ? { codexBinary: override } : {}) });
+  const { config, token } = loadConfig(home, { deferBinary: true });
+  let selectionNeedsSave = false;
+  if (args.includes('--codex-auto') && !override) { config.codexSelection = { mode: 'auto' }; selectionNeedsSave = true; }
   const telegram = new TelegramClient(token);
   for (;;) {
     try { await verifyBot(telegram); break; }
@@ -172,7 +186,6 @@ async function start(args: string[]): Promise<void> {
   let liveBridge: Bridge | undefined;
   let stopping = false;
   let current: CodexClient | undefined;
-  let saveRecoveredBinary = binaryChanged;
   let pollFailures = 0;
   let nextPollAt = 0;
   const stop = (): void => { stopping = true; uploadStop.abort(); current?.close(); };
@@ -221,13 +234,25 @@ async function start(args: string[]): Promise<void> {
   }).catch(() => { /* Optional release metadata and notices must not interrupt startup or messaging. */ });
   try {
     while (!stopping) {
-      const codex = new CodexClient(); current = codex;
+      let attemptClient: CodexClient | undefined;
       let connected = true;
       let pendingEvents = Promise.resolve();
       let discovery = Promise.resolve();
       let discovering = false;
       let eventCount = 0;
       try {
+        const selection = await connectCodex(config, { createClient: () => { const client = new CodexClient(); current = client; return client; },
+          signal: uploadStop.signal, ...(override ? { override } : {}) });
+        const codex = selection.client; attemptClient = codex;
+        if (stopping) break;
+        if (selection.changed || selectionNeedsSave) {
+          try { saveConfig(home, selection.config); selectionNeedsSave = false; }
+          catch { selectionNeedsSave = true; console.error('Using the verified Codex connection, but its selection could not be saved. Local preferences will be retried after reconnect.'); }
+        }
+        config.codexBinary = selection.config.codexBinary;
+        if (selection.config.codexSelection) config.codexSelection = selection.config.codexSelection;
+        const info = codex.runtimeInfo();
+        console.log(`Relay ${relayVersion}; proxy ${info.proxyVersion ?? 'unknown'}; daemon ${info.daemonVersion ?? 'unknown'}; API ${info.compatibility}; source ${selection.candidate.source}${selection.fallback ? ' (fallback)' : ''}.`);
         const bridge = new Bridge(config, state, codex, telegram, drafts);
         const unavailable = new Set<string>();
         codex.on('sessionUnavailable', (id: string) => {
@@ -253,13 +278,6 @@ async function start(args: string[]): Promise<void> {
           if (['item/completed', 'turn/completed', 'serverRequest/resolved', 'thread/name/updated', 'thread/started'].includes(method) || (method === 'item/started' && object(params.item).type === 'fileChange')) schedule(() => bridge.notification(method, params));
         });
         codex.on('request', request => schedule(() => bridge.request(request)));
-        await codex.connect(config.codexBinary);
-        if (saveRecoveredBinary) {
-          if (!Array.isArray(object(await codex.call('thread/loaded/list', {})).data)) throw new Error('Replacement Codex returned an incompatible loaded-session response. Its path was not saved.');
-          saveConfig(home, config);
-          saveRecoveredBinary = false;
-          console.log('Codex executable path updated after a successful shared-daemon check. Bot pairing and topic bindings are preserved.');
-        }
         await bridge.discover();
         liveBridge = bridge;
         console.log(`Relay connected. Discovery: ${config.sessionScope === 'all' ? 'automatic, all interactive sessions' : 'selected projects'}. Keep this process running. Ctrl+C stops the relay, not your Codex daemon.`);
@@ -297,7 +315,7 @@ async function start(args: string[]): Promise<void> {
         if (error instanceof TelegramError && error.status === 409) throw new Error('Another process consumes this bot. Stop it before restarting the relay.');
         if (error instanceof TelegramError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
         console.error(string(object(error).message) || 'Relay connection failed.');
-      } finally { liveBridge?.close(); liveBridge = undefined; drafts.clear(); codex.close(); await discovery; await pendingEvents; }
+      } finally { liveBridge?.close(); liveBridge = undefined; drafts.clear(); attemptClient?.close(); await discovery; await pendingEvents; }
       if (!stopping) { console.log('Reconnecting in 3 seconds. Ambiguous native writes will not be replayed.'); await delay(3000); }
     }
   } finally {
@@ -336,7 +354,7 @@ async function sendFile(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const command = ['--codex-bin', '--no-update-check'].includes(args[0] ?? '') ? 'start' : args[0] ?? 'start';
+  const command = ['--codex-bin', '--codex-auto', '--no-update-check'].includes(args[0] ?? '') ? 'start' : args[0] ?? 'start';
   if (command === 'setup') return setup(args);
   if (command === 'doctor') return doctor(args);
   if (command === 'start') return start(args);
@@ -391,7 +409,7 @@ async function main(): Promise<void> {
   if (command === 'sessions' && args[1] === 'scope') {
     const mode = args[2];
     if (args[3] || (mode !== undefined && mode !== 'all' && mode !== 'selected')) throw new Error('Use sessions scope all or sessions scope selected.');
-    const home = dataDirectory(); const { config } = loadConfig(home);
+    const home = dataDirectory(); const { config } = loadConfig(home, { deferBinary: true });
     if (mode === 'selected' && !config.roots.length) throw new Error('No selected projects. Add roots with projects add PATH before enabling selected mode.');
     if (mode) { config.sessionScope = mode; saveConfig(home, config); }
     console.log(`Session discovery: ${config.sessionScope === 'all' ? 'automatic (all interactive sessions and future projects)' : 'selected projects'}.${mode ? ' Restart the relay to apply; ignored sessions remain ignored.' : ''}`);
@@ -400,7 +418,7 @@ async function main(): Promise<void> {
   if (command === 'sessions' && ['ignore', 'unignore'].includes(args[1] ?? '')) {
     const prefix = args[2];
     if (!prefix || !/^[a-zA-Z0-9-]{6,128}$/u.test(prefix)) throw new Error('Usage: sessions ignore|unignore SESSION_ID_OR_UNIQUE_PREFIX');
-    const home = dataDirectory(); const { config } = loadConfig(home);
+    const home = dataDirectory(); const { config } = loadConfig(home, { deferBinary: true });
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(join(home, 'state.sqlite'), { readOnly: true });
     let matches: string[];
@@ -418,14 +436,14 @@ async function main(): Promise<void> {
   if (command === 'projects' && args[1] === 'add') {
     const path = args[2];
     if (!path || !existsSync(path)) throw new Error('Usage: projects add EXISTING_PROJECT_DIRECTORY');
-    const home = dataDirectory(); const { config, token } = loadConfig(home);
+    const home = dataDirectory(); const { config, token } = loadConfig(home, { deferBinary: true });
     const root = realpathSync(path);
     if (!statSync(root).isDirectory()) throw new Error('Project root must be a directory.');
     config.roots = [...new Set([...config.roots, root])]; saveConfig(home, config, token);
     console.log('Project added. Restart the relay to apply.'); return;
   }
   if (command !== 'help' && command !== '--help' && command !== '-h') throw new Error('Unknown command. Run with --help.');
-  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup, doctor and start accept --codex-bin /absolute/path/to/native/codex[.exe].\nConfiguration: ' + dataDirectory());
+  console.log('Codex Telegram Relay\n\nsetup                 Pair your own bot and select existing CLI projects\nsetup --scope all     Explicitly connect all interactive sessions and future projects\nstart                 Relay events and replies through private project topics\ndoctor                Read-only shared-daemon/bot diagnostics\nprojects add PATH     Add a project to selected mode (restart afterwards)\nsessions scope        Show the local discovery mode\nsessions scope all    Automatically include new projects (restart afterwards)\nsessions scope selected  Limit discovery to selected projects (restart afterwards)\nsessions ignore ID    Stop relaying one session (restart afterwards)\nsessions unignore ID  Re-enable an existing session (restart afterwards)\n\nRequires Node.js 22.13+, Codex CLI with app-server proxy, and a running Codex session.\nSetup defaults to automatic Codex selection (managed current, then PATH). Existing installations keep their saved executable.\nStart and doctor accept --codex-auto to opt into automatic selection, or --codex-bin /absolute/path/to/native/codex[.exe] for a fixed executable. Doctor never saves selection changes.\nUse doctor --check-codex-update for an optional public stable-version lookup; it never installs updates.\nConfiguration: ' + dataDirectory());
   console.log('\nFile export (local opt-in):\nfiles enable|disable   Allow or revoke outgoing files for this installation\nfiles                 Show export setting\nsend-file PATH        Send one project file to its session topic\n  --session ID        Exact ID or unique prefix (default: CODEX_THREAD_ID, then unique project)\n  --as document       Preserve any file as a document; auto sends MP4 as video\n  --caption TEXT      Optional literal caption\n  --request-id ID     Stable caller ID; reuse it for the same attempt\n  --no-wait           Return queued receipt immediately\nfiles status ID       Inspect durable result; uncertain uploads are never auto-replayed');
   console.log('\nNew sessions work out of the box. Optional customization (restart afterwards):\nnew                         Show effective creation locations\nnew enable --project PATH   Add a project for /new\nnew enable --scratch-root PATH  Override the conversations directory\nnew disable                 Disable new creation, preserving existing conversations');
   console.log('\nStartup updates: interactive Git installations offer Update now? [Y/n].\nBackground launches only show update notices; installation requires terminal consent.\nstart --no-update-check      Skip the release check and prompt for this launch');

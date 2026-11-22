@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add opt-in automatic Codex selection with managed/current preference, verified fallback and reconnect discovery; preserve legacy/fixed executable choices and pairing.
+- Report actual relay, proxy and daemon versions in doctor and requested status. Add an explicit public stable-metadata lookup and cross-platform latest installation smoke without automatic Codex updates or extra Telegram notices.
 - Preserve supported permissions across `/clear`, verify the empty replacement before switching, and durably release the relay's retired native subscriptions. Unsupported custom policies keep the original topic usable.
 - Add `/stop` to the command list and help for exact native turn interruption, including approval/question waits. Deduplicate uncertain requests and retire stopped-turn controls; keep ordinary text and existing cards free of extra waiting notifications.
 

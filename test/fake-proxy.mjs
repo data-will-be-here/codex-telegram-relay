@@ -5,7 +5,12 @@ import { WebSocketServer } from 'ws';
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
 const records = [];
+const initializeArgument = process.argv.find(argument => argument.startsWith('--initialize-result='));
+const initializeResult = initializeArgument ? JSON.parse(initializeArgument.slice('--initialize-result='.length)) :
+  { userAgent: 'codex-tui/0.169.1 (test peer)', codexHome: 'PRIVATE_NATIVE_HOME', platformFamily: 'windows', platformOs: 'windows' };
 let discoveryThreads;
+let runtimeLoadedResult;
+let runtimeLoadedError = false;
 const waitingThreads = new Set(['empty']);
 const histories = new Map();
 const historyErrors = new Map();
@@ -34,6 +39,11 @@ wss.on('connection', ws => ws.on('message', bytes => {
   if (message.id === undefined) return;
   records.push(message);
   let result = {};
+  if (message.method === 'initialize') result = initializeResult;
+  if (message.method === 'test/runtime') {
+    if ('loadedResult' in message.params) runtimeLoadedResult = message.params.loadedResult;
+    runtimeLoadedError = message.params.loadedError === true;
+  }
   if (message.method === 'test/permissions') {
     if (message.params.settings) permissionSettings.set(message.params.threadId ?? 'a', message.params.settings);
     if (message.params.startOverrides) startPermissionOverrides = message.params.startOverrides;
@@ -74,6 +84,10 @@ wss.on('connection', ws => ws.on('message', bytes => {
   }
   if (message.method === 'thread/loaded/list') result = { data: ['a', 'b', 'worker', 'empty', 'ephemeral'] };
   if (message.method === 'thread/loaded/list' && discoveryThreads) result = { data: discoveryThreads.map(thread => thread.id) };
+  if (message.method === 'thread/loaded/list' && runtimeLoadedResult !== undefined) result = runtimeLoadedResult;
+  if (message.method === 'thread/loaded/list' && runtimeLoadedError) {
+    ws.send(JSON.stringify({ id: message.id, error: { code: -32601, message: 'Read-only probe unavailable.' } })); return;
+  }
   if (message.method === 'thread/read') result = { thread: { id: message.params.threadId, source: message.params.threadId === 'worker' ? { subAgent: {} } : message.params.threadId === 'a' ? 'cli' : 'vscode', cwd: process.cwd(), status: { type: 'idle' }, path: message.params.threadId === 'empty' ? null : '/synthetic/history', ephemeral: message.params.threadId === 'ephemeral' } };
   if (message.method === 'thread/read' && discoveryThreads) result = { thread: discoveryThreads.find(thread => thread.id === message.params.threadId) };
   if (message.method === 'thread/read' && result.thread && modelSettings.has(message.params.threadId)) {

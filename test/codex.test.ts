@@ -2,13 +2,80 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { resolve, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { CodexClient, FirstMessageRequiredError, RpcError } from '../src/codex.js';
 import { allowedDirectory, validateBinary } from '../src/config.js';
 import { type Json } from '../src/types.js';
 import { temporary } from './helpers.js';
 import { permissionSignature } from '../src/permission-settings.js';
 import { captureClearSettingsSnapshot, clearStartSettings, equivalentClearSettings, ClearSettingsError } from '../src/clear-settings.js';
+import { daemonVersion, proxyVersion, readProxyVersion } from '../src/runtime-info.js';
+
+test('version metadata accepts bounded Codex version tokens and treats unknown executables as informational', async () => {
+  assert.equal(proxyVersion('codex-cli 0.170.0\r\n'), '0.170.0');
+  assert.equal(proxyVersion('codex 0.170.0-alpha.1+build.7'), '0.170.0-alpha.1+build.7');
+  assert.equal(daemonVersion('codex-tui/0.171.1 (Windows; PRIVATE_NATIVE_HOME)'), '0.171.1');
+  assert.equal(daemonVersion('codex/0.171.1-alpha.2'), '0.171.1-alpha.2');
+  for (const value of [null, 170, {}, 'v22.13.0', 'codex-cli 0.170.0 PRIVATE_NATIVE_HOME', 'codex-cli 0.170.0\nextra', 'codex-cli 1.2.3-' + 'a'.repeat(300)]) assert.equal(proxyVersion(value), null);
+  assert.equal(await readProxyVersion(process.execPath), null, 'Node version is not a Codex proxy version');
+  const temp = temporary();
+  try { assert.equal(await readProxyVersion(join(temp.dir, 'missing-native-executable')), null); }
+  finally { temp.close(); }
+});
+
+test('runtime metadata separates relay, proxy and daemon versions without assuming compatibility or exposing native paths', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    const expectedVersion = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.equal((records.find(record => record.method === 'initialize')!.params.clientInfo as Json).version, expectedVersion);
+    assert.deepEqual(c.runtimeInfo(), { relayVersion: expectedVersion, proxyVersion: null, daemonVersion: '0.169.1', compatibility: 'unknown' });
+    assert.ok(!JSON.stringify(c.runtimeInfo()).includes('PRIVATE_NATIVE_HOME'));
+    assert.ok(!JSON.stringify(c.runtimeInfo()).includes('test peer'));
+    assert.equal(records.some(record => ['turn/start', 'thread/settings/update', 'thread/start', 'config/value/write'].includes(record.method)), false);
+  } finally { c.close(); }
+});
+
+test('malformed or missing native version metadata remains unknown without blocking a valid protocol', async () => {
+  for (const userAgent of [undefined, null, 169, { version: '0.169.1' }, ['codex-tui/0.169.1'], 'v22.1.0', 'codex-tui/1.2.3-' + 'a'.repeat(300)]) {
+    const c = new CodexClient();
+    try {
+      await c.connect(process.execPath, [resolve('test/fake-proxy.mjs'), '--initialize-result=' + JSON.stringify({ userAgent, codexHome: 'PRIVATE_NATIVE_HOME' })]);
+      assert.equal(c.runtimeInfo().daemonVersion, null);
+      assert.equal(c.runtimeInfo().proxyVersion, null);
+      assert.equal(c.runtimeInfo().compatibility, 'unknown');
+      assert.equal(await c.probeReadOnly(), true);
+      assert.equal(c.runtimeInfo().compatibility, 'verified');
+    } finally { c.close(); }
+  }
+});
+
+test('compatibility requires a fresh bounded read-only response and resets on malformed data, rejection or disconnect', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    assert.equal(await c.probeReadOnly(), true);
+    const copied = c.runtimeInfo(); copied.compatibility = 'unknown';
+    assert.equal(c.runtimeInfo().compatibility, 'verified', 'diagnostics return a snapshot, not mutable client state');
+    for (const loadedResult of [null, {}, { data: null }, { data: [1] }, { data: [''] }, { data: ['a\nb'] }, { data: ['a'.repeat(257)] }, { data: Array(10_001).fill('a') }]) {
+      await c.call('test/runtime', { loadedResult });
+      assert.equal(await c.probeReadOnly(), false);
+      assert.equal(c.runtimeInfo().compatibility, 'unknown');
+    }
+    await c.call('test/runtime', { loadedResult: { data: [] } });
+    assert.equal(await c.probeReadOnly(), true, 'a daemon with no loaded threads is still compatible');
+    await c.call('test/runtime', { loadedError: true });
+    assert.equal(await c.probeReadOnly(), false);
+    assert.equal(c.runtimeInfo().compatibility, 'unknown');
+    await c.call('test/runtime', { loadedError: false, loadedResult: { data: ['safe-id'] } });
+    assert.equal(await c.probeReadOnly(), true);
+    const records = await c.call('test/records', {}) as { method: string; params: Json }[];
+    assert.equal(records.some(record => ['turn/start', 'turn/steer', 'thread/resume', 'thread/start', 'thread/settings/update', 'config/value/write'].includes(record.method)), false);
+    c.close();
+    assert.equal(c.runtimeInfo().compatibility, 'unknown');
+  } finally { c.close(); }
+});
 
 test('clear creation carries the captured native permission selection rather than project defaults', async () => {
   const c = new CodexClient();

@@ -10,6 +10,8 @@ export interface Config {
   ownerId: number;
   roots: string[];
   codexBinary: string;
+  /** Missing selection retains legacy pinned-path and missing-file recovery behavior. */
+  codexSelection?: { mode: 'fixed' } | { mode: 'auto'; source?: 'managed' | 'path' };
   sessionScope?: 'all' | 'selected';
   ignoredThreadIds?: string[];
   outgoingFiles?: boolean;
@@ -131,6 +133,13 @@ export function readConfig(home: string): Config {
   }
   if (raw.outgoingFiles !== undefined && typeof raw.outgoingFiles !== 'boolean') throw new Error('Invalid outgoing file setting.');
   const config: Config = { version: 1, ownerId: Number(raw.ownerId), roots: raw.roots as string[], codexBinary: string(raw.codexBinary) };
+  if (raw.codexSelection !== undefined) {
+    const selection = object(raw.codexSelection);
+    if (selection.mode === 'fixed' && selection.source === undefined) config.codexSelection = { mode: 'fixed' };
+    else if (selection.mode === 'auto' && (selection.source === undefined || selection.source === 'managed' || selection.source === 'path')) {
+      config.codexSelection = { mode: 'auto', ...(selection.source === undefined ? {} : { source: selection.source }) };
+    } else throw new Error('Invalid Codex executable selection in configuration.');
+  }
   if (raw.sessionScope === 'all' || raw.sessionScope === 'selected') config.sessionScope = raw.sessionScope;
   if (raw.outgoingFiles !== undefined) config.outgoingFiles = raw.outgoingFiles;
   if (raw.newSessions !== undefined) {
@@ -155,16 +164,19 @@ export function readConfig(home: string): Config {
   return config;
 }
 
-export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
+export function loadConfig(home: string, options: { codexBinary?: string; recoverBinary?: boolean; deferBinary?: boolean } = {}): { config: Config; token: string; binaryChanged: boolean } {
   const config = readConfig(home);
   const savedBinary = config.codexBinary;
-  let binary: string;
-  try { binary = validateBinary(options.codexBinary ?? savedBinary); }
-  catch (error) {
-    // An existing but invalid executable is a configuration/security error, not permission to replace it.
-    if (!options.recoverBinary || options.codexBinary || !isAbsolute(savedBinary) || existsSync(savedBinary) || (process.platform === 'win32' && !savedBinary.toLowerCase().endsWith('.exe'))) throw error;
-    try { binary = findCodex(); }
-    catch { throw new Error('The saved Codex executable is missing and no replacement was found. Install/start Codex, or run start --codex-bin PATH. Bot pairing and topics are preserved.'); }
+  let binary: string = options.codexBinary ?? savedBinary;
+  if (options.codexBinary !== undefined) config.codexSelection = { mode: 'fixed' };
+  if (!options.deferBinary) {
+    try { binary = config.codexSelection ? codexCandidates(config, options.codexBinary)[0]!.binary : validateBinary(options.codexBinary ?? savedBinary); }
+    catch (error) {
+      // An existing but invalid executable is a configuration/security error, not permission to replace it.
+      if (config.codexSelection || !options.recoverBinary || options.codexBinary !== undefined || !missingNativeBinary(savedBinary)) throw error;
+      try { binary = findCodex(); }
+      catch { throw new Error('The saved Codex executable is missing and no replacement was found. Install/start Codex, or run start --codex-bin PATH. Bot pairing and topics are preserved.'); }
+    }
   }
   config.codexBinary = binary;
   const token = privateRead(join(home, 'bot.token'), 4096).trim();
@@ -246,21 +258,49 @@ export function validateBinary(path: string): string {
   } catch { throw new Error('Cannot locate a runnable native Codex executable. Check its installation or pass --codex-bin PATH.'); }
 }
 
-export function findCodex(): string {
-  const candidates: string[] = [];
+export interface CodexCandidate { binary: string; source: 'fixed' | 'managed' | 'path' | 'previous'; }
+
+function missingNativeBinary(path: string): boolean {
+  return isAbsolute(path) && !existsSync(path) && (process.platform !== 'win32' || path.toLowerCase().endsWith('.exe'));
+}
+
+function discoveredCodexCandidates(): CodexCandidate[] {
+  const name = process.platform === 'win32' ? 'codex.exe' : 'codex';
+  const candidates: CodexCandidate[] = [{ binary: join(resolve(process.env.CODEX_HOME ?? join(homedir(), '.codex')),
+    'packages', 'app-server-daemon', 'current', 'bin', name), source: 'managed' }];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (!dir) continue;
-    candidates.push(join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex'));
+    candidates.push({ binary: join(dir, name), source: 'path' });
     if (process.platform === 'win32') {
-      candidates.push(...packageBinaries(join(dir, 'node_modules', '@openai', 'codex')));
+      candidates.push(...packageBinaries(join(dir, 'node_modules', '@openai', 'codex')).map(binary => ({ binary, source: 'path' as const })));
     }
   }
-  candidates.push(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'packages', 'app-server-daemon', 'current', 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex'));
-  for (const path of candidates) {
-    try { return validateBinary(path); } catch { /* Try the next native executable. */ }
+  return candidates;
+}
+
+/** Resolve anew at each connection attempt; this function never launches or saves a candidate. */
+export function codexCandidates(config: Pick<Config, 'codexBinary' | 'codexSelection'>, override?: string): CodexCandidate[] {
+  if (override !== undefined) return [{ binary: validateBinary(override), source: 'fixed' }];
+  if (config.codexSelection?.mode !== 'auto') {
+    try { return [{ binary: validateBinary(config.codexBinary), source: 'fixed' }]; }
+    catch (error) {
+      if (config.codexSelection?.mode === 'fixed' || !missingNativeBinary(config.codexBinary)) throw error;
+    }
   }
+  const raw = discoveredCodexCandidates();
+  if (config.codexSelection?.mode === 'auto' && config.codexBinary) raw.push({ binary: config.codexBinary, source: 'previous' });
+  const seen = new Set<string>(); const candidates: CodexCandidate[] = [];
+  for (const candidate of raw) {
+    try {
+      const binary = validateBinary(candidate.binary); const key = process.platform === 'win32' ? binary.toLowerCase() : binary;
+      if (!seen.has(key)) { seen.add(key); candidates.push({ binary, source: candidate.source }); }
+    } catch { /* Automatic discovery may skip an unavailable/invalid installation; fixed paths never do. */ }
+  }
+  if (candidates.length) return candidates;
   throw new Error('Native Codex executable not found. Install Codex CLI, start a normal session, then run setup with --codex-bin PATH.');
 }
+
+export function findCodex(): string { return codexCandidates({ codexBinary: '', codexSelection: { mode: 'auto' } })[0]!.binary; }
 
 export function configExists(home: string): boolean {
   return existsSync(join(home, 'config.json'));

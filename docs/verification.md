@@ -1,3 +1,9 @@
+## Automatic selection and independent Codex versions
+
+Public-interface regressions first reproduced PATH priority over managed/current, a failed managed proxy preventing fallback, probing after cancellation and an ordinary preference edit saving an unverified candidate. Tests cover fixed/legacy preservation, missing-only recovery, explicit override, managed relocation across reconnects, candidate closure, abort during initialization/probe, unchanged configuration on failure and safe status metadata. Native protocol tests check real package-version identification, malformed/missing version metadata and fresh bounded read-only compatibility checks without model/settings/resume writes.
+
+A read-only local doctor --codex-auto check selected the managed proxy, distinguished its version from the daemon and confirmed the configuration and token hashes remained unchanged. Final local verification passed 562 tests with 6 opt-in tests skipped, plus typecheck and package checks. Isolated Windows installation smoke passed both the pinned 0.166.0 baseline and resolved stable 0.171.0. Installation smoke checks run against an isolated temporary prefix and CODEX_HOME for both the pinned baseline and explicitly resolved latest stable; they do not upgrade the user's installation or start a daemon.
+
 ## Permission-preserving clear and explicit stop
 
 Regression tests first reproduced missing permission carryover, premature retirement and missing native unsubscribe. Coverage now includes complete workspace roots/network/reviewer transfer, unsupported profiles, settings races, attachment failure, mismatch unlocking, legacy operations without a snapshot, known-ID recovery and durable subscription cleanup. An isolated real native qualification exercises Ask for approval, Approve for me, Full Access and Read Only, plus custom effective workspace roots and network/tmp flags, without model turns or changes to the user's Codex home.

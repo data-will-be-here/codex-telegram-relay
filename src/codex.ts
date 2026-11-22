@@ -9,6 +9,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { AsyncQuestionReader, type AsyncQuestion } from './async-questions.js';
 import { permissionSignature, validPermissionSettings } from './permission-settings.js';
 import { captureClearSettingsSnapshot, clearStartSettings, equivalentClearSettings, ClearSettingsError, type ClearSettingsSnapshot } from './clear-settings.js';
+import { daemonVersion, readProxyVersion, relayVersion, type RuntimeInfo } from './runtime-info.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { array, object, string, type Codex, type Json, type RpcRequest, type Session, type UserInput, type ModelSettings, type PermissionPatch, type PermissionSnapshot } from './types.js';
 
@@ -33,6 +34,7 @@ export class CodexClient extends EventEmitter implements Codex {
   private failure?: Error;
   private questionReaders = new Map<string, AsyncQuestionReader>();
   private permissionSettings = new Map<string, { settings: Json; version: number }>();
+  private runtime: RuntimeInfo = { relayVersion, proxyVersion: null, daemonVersion: null, compatibility: 'unknown' };
 
   constructor() {
     super();
@@ -51,6 +53,7 @@ export class CodexClient extends EventEmitter implements Codex {
   }
 
   async connect(binary: string, args = ['app-server', 'proxy']): Promise<void> {
+    const proxyVersion = readProxyVersion(binary);
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/telegram.*token|bot.*token|relay.*token/iu.test(key)) delete env[key];
@@ -87,11 +90,26 @@ export class CodexClient extends EventEmitter implements Codex {
       socket.once('close', fail);
       socket.once('open', () => { socket.off('error', fail); socket.off('close', fail); resolve(); });
     });
-    await this.call('initialize', {
-      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: '0.1.21' },
+    const initialized = object(await this.call('initialize', {
+      clientInfo: { name: 'codex_telegram_relay', title: 'Codex Telegram Relay', version: relayVersion },
       capabilities: { experimentalApi: true, optOutNotificationMethods: ['item/commandExecution/outputDelta', 'item/reasoning/textDelta'] },
-    });
+    }));
+    this.runtime.daemonVersion = daemonVersion(initialized.userAgent);
     socket.send(JSON.stringify({ method: 'initialized' }));
+    this.runtime.proxyVersion = await proxyVersion;
+  }
+
+  runtimeInfo(): RuntimeInfo { return { ...this.runtime }; }
+
+  async probeReadOnly(): Promise<boolean> {
+    this.runtime.compatibility = 'unknown';
+    try {
+      const result = object(await this.call('thread/loaded/list', {}, 8000));
+      if (!Array.isArray(result.data) || result.data.length > 10_000 ||
+          !result.data.every(id => typeof id === 'string' && /^[^\s\x00-\x1f\x7f]{1,256}$/u.test(id)) || this.closed) return false;
+      this.runtime.compatibility = 'verified';
+      return true;
+    } catch { return false; }
   }
 
   private receive(message: Json): void {
@@ -377,6 +395,7 @@ export class CodexClient extends EventEmitter implements Codex {
   }
   close(): void { this.closed = true; this.socket?.terminate(); this.child?.kill(); this.disconnect(new RpcError('Codex disconnected.', true)); }
   private disconnect(error: Error): void {
+    this.runtime.compatibility = 'unknown';
     this.failure ??= error;
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear(); this.requests.clear(); this.permissionSettings.clear();

@@ -197,7 +197,7 @@ Private snapshots freeze the queued bytes and are removed on completion/rejectio
 
 ### Windows
 
-The relay launches a **native `codex.exe`**, never a `.cmd`/`.bat` shell wrapper. It searches the npm Codex installation and the managed daemon package. If needed, pass the native executable explicitly:
+The relay launches a **native `codex.exe`**, never a `.cmd`/`.bat` shell wrapper. New setups use automatic selection: the current managed installation in this `CODEX_HOME`, then supported PATH/npm binaries. If needed, pass the native executable explicitly:
 
 ```powershell
 npm start -- doctor --codex-bin 'C:\absolute\path\to\codex.exe'
@@ -206,7 +206,7 @@ npm start -- setup --codex-bin 'C:\absolute\path\to\codex.exe'
 
 ### macOS and Linux
 
-Executable links from Homebrew/native installers are resolved. For npm installations, the relay locates the actual platform binary behind `codex.js`, including hoisted and nested optional packages; the JavaScript/shell launcher is never executed by the relay. Unix execute permissions and ELF/Mach-O format are checked. CI installs official Codex 0.166.0 and checks its native version and proxy command on each OS; a complete real-session/Telegram exchange on macOS/Linux still needs acceptance testing.
+Executable links from Homebrew/native installers are resolved. For npm installations, the relay locates the actual platform binary behind `codex.js`, including hoisted and nested optional packages; the JavaScript/shell launcher is never executed by the relay. Unix execute permissions and ELF/Mach-O format are checked. CI checks the pinned Codex 0.166.0 baseline and a separate current stable installation/proxy command on each OS; a complete real-session/Telegram exchange on macOS/Linux still needs acceptance testing.
 
 ### Automatically include new projects
 
@@ -404,7 +404,11 @@ Since v0.1.17, supported command, file-change and permission approvals from load
 
 ## Updating Codex and recovering its executable
 
-If a Codex update removes the saved executable, restart the relay after starting your normal Codex sessions. The relay searches the supported native installation locations and saves a replacement path only after initialization and a successful shared-daemon session-list check. Pairing, bot token, session/topic IDs and native permissions are preserved. No CLI is downloaded, no alternate daemon is started, and no model turn is used for this check. Compatibility beyond the qualified Codex version still needs acceptance testing.
+Existing configurations keep their saved executable; an old configuration without a selection mode retains missing-file recovery. To opt into automatic selection, run `npm start -- start --codex-auto`. Every reconnect resolves managed/current and PATH again, retaining the previous available executable as the last automatic candidate. Each candidate uses a fresh proxy and must pass initialization and a bounded read-only loaded-session check before its selection is saved. Failed candidates are closed; no alternate daemon or model turn is started. A selection-save failure keeps the verified live connection running. Pairing, token, topics and permissions are preserved.
+
+An explicit `--codex-bin PATH` selects fixed mode. A failed fixed choice does not silently switch installations. `npm start -- doctor --codex-auto` previews automatic selection without changing files. `doctor` shows separate relay/proxy/daemon versions, source, path and the basic API check; `/status` shows only safe version fields without local paths. Different version numbers do not themselves imply incompatibility. Metadata that cannot be read is reported as unknown.
+
+`npm start -- doctor --check-codex-update` optionally reads the official public stable-version metadata. Normal startup and reconnect do not check or install Codex updates, change `CODEX_HOME`, or restart the shared daemon. CI checks both the pinned baseline and a separately resolved current stable installation/proxy command; this smoke test is not a full Telegram acceptance test.
 
 If discovery fails, select the installed native executable explicitly:
 
@@ -412,7 +416,7 @@ If discovery fails, select the installed native executable explicitly:
 npm start -- --codex-bin /absolute/path/to/native/codex
 ```
 
-On Windows use an absolute path to codex.exe. An existing but invalid executable is rejected rather than silently replaced. doctor --codex-bin PATH can inspect a replacement without saving any configuration.
+On Windows use an absolute path to codex.exe. An existing but invalid fixed or legacy executable is rejected rather than silently replaced. doctor --codex-bin PATH can inspect a replacement without saving any configuration.
 
 Known unanswered host questions now survive later turns and reconnects. Recovery extends only as far back as those known questions require; unrelated older questions are not imported. Very large questions and capacity limits produce terminal notices. Partial question answers are kept privately for up to seven days and restored only when stable identity and question contents match. A rejected native input remains retryable; accepted or uncertain input is not automatically repeated.
 ## Recovering approval cards

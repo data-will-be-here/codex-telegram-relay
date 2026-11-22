@@ -46,6 +46,7 @@ export interface PermissionPatch { permissions?: string; approvalPolicy?: 'on-re
 export interface PermissionSnapshot { settings: Json; profiles: Json[]; requirements: Json; autoReview: boolean; }
 
 export interface Codex {
+  runtimeInfo?(): import('./runtime-info.js').RuntimeInfo;
   permissionCatalog?(threadId: string, cwd: string): Promise<PermissionSnapshot>;
   updatePermissions?(threadId: string, patch: PermissionPatch, expected: string): Promise<void>;
   captureClearSettings?(threadId: string, cwd: string): Promise<import('./clear-settings.js').ClearSettingsSnapshot>;
