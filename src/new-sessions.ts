@@ -440,7 +440,8 @@ export class NewSessions {
         const loaded = await this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) &&
           allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)));
         if (loaded.length >= 64) throw new Error('The limit of 64 attached sessions has been reached. Free a slot before using /new.');
-        if (this.closed || !this.creationEnabled() || !this.operationAllowed(op)) throw new Error('The directory is no longer allowed.');
+        if (this.closed) return;
+        if (!this.creationEnabled() || !this.operationAllowed(op)) throw new Error('The directory is no longer allowed.');
         if (op.explicitProject && op.createDirectory && !existsSync(op.cwd!)) {
           try { mkdirSync(op.cwd!, { recursive: true, mode: 0o700 }); }
           catch {

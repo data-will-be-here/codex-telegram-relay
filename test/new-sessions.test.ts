@@ -263,6 +263,26 @@ test('missing-folder creation rechecks revoked scope after awaiting native disco
   } finally { f.close(); }
 });
 
+test('reconnecting before missing-folder creation retains confirmed consent and resumes once', async () => {
+  const f = setup();
+  try {
+    const project = join(f.project, 'reconnected folder');
+    await f.bridge.update(message(355, 999, `/new ${project}`)); await f.drain(); await f.choose(0);
+    const op = f.state.newSessions().at(-1)!;
+    const list = f.native.list.bind(f.native);
+    f.native.list = async (...args) => { f.bridge.close(); return list(...args); };
+    await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'preparing'); assert.equal(existsSync(project), false);
+    f.native.list = list;
+    const bridge = new Bridge(f.config, f.state, f.native, f.telegram);
+    try {
+      await bridge.workNewSession();
+      assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(existsSync(project), true);
+      assert.equal(f.native.starts, 1); assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+    } finally { bridge.close(); }
+  } finally { f.close(); }
+});
+
 test('a failed relay-owned creation keeps its reserved topic and discovery never creates a replacement', async () => {
   const f = setup();
   try {
