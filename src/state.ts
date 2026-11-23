@@ -46,6 +46,7 @@ export interface NewSessionOperation {
   clearSettings?: import('./clear-settings.js').ClearSettingsSnapshot;
   candidateUsed?: boolean;
   explicitProject?: boolean;
+  createDirectory?: boolean;
   id: string; status: NewSessionPhase; topicId: number | null; menuKey: string; token: string; expires: number;
   choices: { cwd: string; label: string; kind: 'project' | 'scratch' }[]; page: number;
   reportedTopicAttempt?: string;

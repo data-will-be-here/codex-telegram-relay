@@ -14,6 +14,7 @@ import { integer, object, string, type Binding, type Codex, type Json, type Keyb
 const LIFETIME = 10 * 60_000;
 const PAGE = 7;
 const MARKER = 'codex-telegram-relay:new:';
+const nativeDrive = (path: string): string => process.platform === 'win32' ? path.replace(/^[a-z]:/u, drive => drive.toUpperCase()) : path;
 const active: NewSessionPhase[] = ['checking', 'preparing', 'starting', 'uncertain', 'known', 'persisted', 'topic'];
 const clean = (text: string): string => Array.from(text.replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim()).slice(0, 70).join('');
 const inside = (child: string, root: string): boolean => {
@@ -103,7 +104,10 @@ export class NewSessions {
   }
   busy(threadId: string, marker?: string): boolean {
     const op = this.state.findNewSession('threadId', threadId) ?? (marker?.startsWith(MARKER) ? this.state.newSession(marker.slice(MARKER.length)) : undefined);
-    return !!op && !['ready', 'failed', 'cancelled'].includes(op.status);
+    if (!op || op.status === 'ready') return false;
+    // A failed creation still owns its reserved topic. Discovery must not replace it.
+    if (op.status === 'failed' || op.status === 'cancelled') return !this.state.binding(threadId) && (!!op.threadId || !!op.targetTopic);
+    return true;
   }
 
   async open(topicId: number | null, text: string): Promise<void> {
@@ -123,7 +127,7 @@ export class NewSessions {
       'A session is already being created for this menu. Please wait; creation will not be repeated.'); return; }
     const project = argument ? this.projectFromText(argument) : undefined;
     if (argument && !project) {
-      this.notice(topicId, 'Use an existing project folder allowed by local relay settings. Windows: /new D:/code/project. macOS: /new /Users/name/code/project or /new ~/code/project. Paths with spaces may be quoted.'); return;
+      this.notice(topicId, 'Use a project folder path allowed by local relay settings. Windows: /new D:/code/project. macOS: /new /Users/name/code/project or /new ~/code/project. Paths with spaces may be quoted.'); return;
     }
     for (const op of this.state.newSessions(['selecting']).filter(op => op.topicId === topicId || op.expires < Date.now())) {
       this.state.changeNewSession(op.id, 'selecting', { status: 'cancelled' }); this.state.cancelPrompt(op.menuKey);
@@ -133,10 +137,13 @@ export class NewSessions {
     }
     if (project) {
       const id = randomUUID();
-      const op: NewSessionOperation = { id, status: 'preparing', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
-        expires: Date.now() + LIFETIME, choices: [], page: 0, topicFirst: true, explicitProject: true, kind: 'project', root: project, cwd: project };
+      const createDirectory = !existsSync(project);
+      const op: NewSessionOperation = { id, status: 'selecting', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
+        expires: Date.now() + LIFETIME, choices: [{ cwd: project, label: createDirectory ? 'Create folder and open' : 'Open session', kind: 'project' }],
+        page: 0, topicFirst: true, explicitProject: true, createDirectory, kind: 'project', root: project, cwd: project };
       this.state.createNewSession(op);
-      this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Creating Telegram topic…'); return;
+      this.state.enqueueOwnerNotice(op.menuKey, topicId, createDirectory ? `The folder does not exist:\n${project}\n\nCreate it and open a session here?` :
+        `Open a session in this folder?\n${project}`, this.keyboard(op)); return;
     }
     const choices: NewSessionOperation['choices'] = [];
     const scratch = this.config.newSessions?.scratchRoot;
@@ -208,7 +215,9 @@ export class NewSessions {
       return;
     }
     const choice = op.choices[Number(action)];
-    if (!choice || this.config.newSessions?.enabled === false || !this.choiceAllowed(choice.cwd, choice.kind)) { await this.edit(op, 'This directory is no longer allowed. Send /new.'); return; }
+    if (!choice || this.config.newSessions?.enabled === false || !(op.explicitProject ? this.explicitProjectAllowed(choice.cwd, op.createDirectory === true) : this.choiceAllowed(choice.cwd, choice.kind))) {
+      await this.edit(op, 'This directory is no longer allowed. Send /new.'); return;
+    }
     const next = this.state.changeNewSession(op.id, 'selecting', { status: 'preparing', choices: [], kind: choice.kind, root: choice.cwd,
       cwd: choice.kind === 'scratch' ? join(choice.cwd, op.id) : choice.cwd, topicFirst: op.topicFirst ?? true });
     if (next) await this.edit(next, next.topicFirst ? 'Creating Telegram topic…' : 'Creating session…');
@@ -306,7 +315,7 @@ export class NewSessions {
     const result = new Set<string>();
     for (const path of paths) {
       try {
-        const canonical = realpathSync(path); const scratch = this.config.newSessions?.scratchRoot;
+        const canonical = realpathSync(nativeDrive(path)); const scratch = this.config.newSessions?.scratchRoot;
         // Only eligible projects participate in workspace-overlap checks. A home
         // directory containing private state is not a project and cannot hide scratch.
         if (!this.state.ownsScratch(canonical) && (!scratch || !inside(canonical, scratch)) && this.validRoot(canonical, false)) result.add(canonical);
@@ -348,13 +357,18 @@ export class NewSessions {
       else if (path.startsWith('~/') || process.platform === 'win32' && path.startsWith('~\\')) path = join(homedir(), path.slice(2));
       // On Windows, /folder and C:folder depend on an implicit drive or cwd.
       if (!isAbsolute(path) || process.platform === 'win32' && !/^(?:[a-z]:[\\/]|[\\/]{2})/iu.test(path)) return;
-      const canonical = realpathSync(path);
-      return this.explicitProjectAllowed(canonical) ? canonical : undefined;
+      const absolute = resolve(nativeDrive(path));
+      let ancestor = absolute;
+      while (!existsSync(ancestor)) { const parent = dirname(ancestor); if (parent === ancestor) return; ancestor = parent; }
+      const canonical = join(realpathSync(ancestor), relative(ancestor, absolute));
+      return this.explicitProjectAllowed(canonical, true) ? canonical : undefined;
     } catch { return; }
   }
-  private explicitProjectAllowed(path: string): boolean {
+  private explicitProjectAllowed(path: string, allowMissing = false): boolean {
     const scratch = this.config.newSessions?.scratchRoot;
-    return this.validRoot(path, false) && allowedSessionDirectory(path, this.config) &&
+    let ancestor = path;
+    while (allowMissing && !existsSync(ancestor)) { const parent = dirname(ancestor); if (parent === ancestor) return false; ancestor = parent; }
+    return this.validRoot(path, false, allowMissing) && allowedSessionDirectory(ancestor, this.config) &&
       !this.state.ownsScratch(path) && (!scratch || !inside(path, scratch));
   }
   private operationAllowed(op: NewSessionOperation): boolean {
@@ -362,9 +376,10 @@ export class NewSessions {
       !this.config.ignoredThreadIds?.includes(op.reset.threadId) && (!op.threadId || !this.config.ignoredThreadIds?.includes(op.threadId)) &&
       allowedSessionDirectory(op.cwd, this.config, this.state.ownsScratch(op.cwd, op.reset.threadId));
     if (!op.root || !op.cwd || !op.kind) return false;
-    if (op.explicitProject ? op.kind !== 'project' || !this.explicitProjectAllowed(op.root) : !this.choiceAllowed(op.root, op.kind)) return false;
+    const allowMissing = op.createDirectory === true && !op.threadId && ['selecting', 'preparing'].includes(op.status);
+    if (op.explicitProject ? op.kind !== 'project' || !this.explicitProjectAllowed(op.root, allowMissing) : !this.choiceAllowed(op.root, op.kind)) return false;
     if (op.threadId && this.config.ignoredThreadIds?.includes(op.threadId)) return false;
-    if (op.kind === 'project') return op.cwd === op.root && allowedSessionDirectory(op.cwd, this.config);
+    if (op.kind === 'project') return op.cwd === op.root && (allowMissing || allowedSessionDirectory(op.cwd, this.config));
     return op.cwd === join(op.root, op.id) && (!existsSync(op.cwd) || !lstatSync(op.cwd).isSymbolicLink() && realpathSync(op.cwd) === op.cwd);
   }
   private creationEnabled(): boolean { return this.config.newSessions?.enabled !== false; }
@@ -425,6 +440,17 @@ export class NewSessions {
         const loaded = await this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) &&
           allowedSessionDirectory(session.cwd, this.config, this.state.ownsScratch(session.cwd, session.id)));
         if (loaded.length >= 64) throw new Error('The limit of 64 attached sessions has been reached. Free a slot before using /new.');
+        if (this.closed || !this.creationEnabled() || !this.operationAllowed(op)) throw new Error('The directory is no longer allowed.');
+        if (op.explicitProject && op.createDirectory && !existsSync(op.cwd!)) {
+          try { mkdirSync(op.cwd!, { recursive: true, mode: 0o700 }); }
+          catch {
+            save({ status: 'failed', error: 'The project folder could not be created.' });
+            const text = 'The project folder could not be created. Check the path and filesystem permissions on the relay computer.';
+            if (!await this.edit(op, text)) this.notice(op.topicId, text);
+            return;
+          }
+          if (!this.operationAllowed(op)) throw new Error('The project folder changed before creation.');
+        }
         if (op.kind === 'scratch' && !op.reset) { if (!existsSync(op.cwd!)) mkdirSync(op.cwd!, { mode: 0o700 }); if (!this.operationAllowed(op)) throw new Error('The working directory changed.'); }
         if (this.closed) return;
         if (op.topicFirst && !op.reset) {

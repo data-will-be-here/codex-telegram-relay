@@ -117,7 +117,7 @@ test('project selection preserves the originating binding and never copies histo
   } finally { f.close(); }
 });
 
-test('/new with a quoted native project path creates an empty session without a project menu', async () => {
+test('/new with a quoted native project path asks before creating one empty session', async () => {
   const f = setup();
   try {
     f.config.sessionScope = 'all';
@@ -126,13 +126,39 @@ test('/new with a quoted native project path creates an empty session without a 
     await f.bridge.update(message(301, 999, `/new "${project.replace(/\\/gu, '/')}/"`)); await f.drain();
     const op = f.state.newSessions().at(-1)!;
     assert.ok(op, 'the explicit path should create a durable operation');
-    assert.equal(op.status, 'preparing'); assert.equal(op.cwd, realpathSync(project));
+    assert.equal(op.status, 'selecting'); assert.equal(op.cwd, realpathSync(project));
     assert.equal(f.native.starts, 0);
+    await f.bridge.workNewSession();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('Open a session in this folder?')));
+    await f.choose(0);
     await f.bridge.workNewSession(); await f.drain();
     const completed = f.state.newSession(op.id)!;
     assert.equal(completed.status, 'ready'); assert.equal(f.native.starts, 1);
     assert.equal(f.state.binding(completed.threadId!)!.cwd, realpathSync(project));
     assert.equal(f.native.writes.length, 0); assert.deepEqual(f.config.roots, roots);
+    await f.choose(0, 201); await f.bridge.workNewSession(); await f.bridge.discover();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+  } finally { f.close(); }
+});
+
+test('Windows drive-letter normalization cannot create a second topic for a relay-owned session', { skip: process.platform !== 'win32' }, async () => {
+  const f = setup();
+  try {
+    const create = f.native.createThread.bind(f.native);
+    f.native.createThread = async (...args) => {
+      const thread = await create(...args);
+      thread.cwd = string(thread.cwd).replace(/^[a-z]/u, drive => drive.toUpperCase());
+      f.native.sessions.find(session => session.id === thread.id)!.cwd = string(thread.cwd);
+      return thread;
+    };
+    await f.bridge.update(message(340, 999, `/new ${f.project.replace(/^[A-Z]/u, drive => drive.toLowerCase())}`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    await f.choose(0);
+    await f.bridge.workNewSession(); await f.bridge.discover();
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+    assert.equal(f.state.newSession(op.id)!.status, 'ready');
+    assert.equal(f.state.binding(f.state.newSession(op.id)!.threadId!)!.topicId, f.state.newSession(op.id)!.targetTopic);
   } finally { f.close(); }
 });
 
@@ -144,6 +170,7 @@ test('/new expands a home-relative project path and recovers an uncertain start 
     await f.bridge.update(message(302, 999, `/new ${path}`)); await f.drain();
     const op = f.state.newSessions().at(-1)!;
     assert.equal(op.cwd, realpathSync(project));
+    await f.choose(0);
     f.native.loseStart = true; await f.bridge.workNewSession();
     assert.equal(f.state.newSession(op.id)!.status, 'uncertain');
     await f.bridge.update(message(303, 999, `/new ${path}`));
@@ -157,15 +184,17 @@ test('/new expands a home-relative project path and recovers an uncertain start 
   } finally { f.close(); }
 });
 
-test('/new rejects missing, ambiguous, private, scratch and out-of-scope paths before creating anything', async () => {
+test('/new rejects ambiguous, private, scratch and out-of-scope paths before creating anything', async () => {
   const f = setup();
   try {
     const outside = join(f.dir, 'outside'); mkdirSync(outside);
     await f.bridge.update(message(310, 999, `/new ${outside}`));
     assert.equal(f.state.newSessions().length, 0, 'selected mode must retain its root restriction');
+    await f.bridge.update(message(309, 999, `/new ${join(outside, 'missing')}`));
+    assert.equal(f.state.newSessions().length, 0, 'missing folders outside selected roots are not authorized');
     f.config.sessionScope = 'all';
     const file = join(f.project, 'file.txt'); writeFileSync(file, 'fixture');
-    const paths = ['relative/project', 'D:project', join(f.project, 'missing'), file, f.state.home, f.scratch,
+    const paths = ['relative/project', 'D:project', file, f.state.home, f.scratch, join(f.state.home, 'missing'), join(f.scratch, 'missing'),
       `${f.project}\nextra`, ...(process.platform === 'win32' ? ['/code/project'] : ['D:/code/project'])];
     for (const [index, path] of paths.entries()) {
       await f.bridge.update(message(311 + index, 999, `/new ${path}`));
@@ -174,7 +203,7 @@ test('/new rejects missing, ambiguous, private, scratch and out-of-scope paths b
     await f.drain();
     assert.equal(f.native.starts, 0);
     assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
-    assert.ok(f.telegram.sent().some(item => string(item.text).includes('existing project folder')));
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('project folder path')));
   } finally { f.close(); }
 });
 
@@ -183,10 +212,68 @@ test('explicit /new paths are rechecked if allowed roots change before creation'
   try {
     await f.bridge.update(message(330, 999, `/new ${f.project}`)); await f.drain();
     const op = f.state.newSessions().at(-1)!;
+    await f.choose(0);
     f.config.roots = [];
     await f.bridge.workNewSession();
     assert.equal(f.state.newSession(op.id)!.status, 'failed'); assert.equal(f.native.starts, 0);
     assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
+  } finally { f.close(); }
+});
+
+test('/new explains a missing folder and creates it recursively only after confirmation', async () => {
+  const f = setup();
+  try {
+    const project = join(f.project, 'missing parent', 'new project');
+    await f.bridge.update(message(350, 999, `/new ${project}`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    assert.equal(op.status, 'selecting'); assert.equal(op.createDirectory, true);
+    await f.bridge.workNewSession();
+    assert.equal(existsSync(project), false); assert.equal(f.native.starts, 0);
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('folder does not exist') && string(item.text).includes('Create it and open')));
+    await f.choose(0); await f.bridge.workNewSession(); await f.drain();
+    assert.equal(existsSync(project), true); assert.equal(f.state.newSession(op.id)!.status, 'ready');
+    assert.equal(f.native.starts, 1); assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+  } finally { f.close(); }
+});
+
+test('cancelling a missing-folder confirmation creates no folder, topic or native session', async () => {
+  const f = setup();
+  try {
+    const project = join(f.project, 'cancelled folder');
+    await f.bridge.update(message(351, 999, `/new ${project}`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    await f.bridge.update({ update_id: 352, callback_query: { id: '352', from: { id: 42 }, data: `n:${op.token}:x`,
+      message: { message_id: f.state.promptMessage(op.menuKey), message_thread_id: 999, chat: { id: 42, type: 'private' } } } });
+    await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'cancelled'); assert.equal(existsSync(project), false);
+    assert.equal(f.native.starts, 0); assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
+  } finally { f.close(); }
+});
+
+test('missing-folder creation rechecks revoked scope after awaiting native discovery', async () => {
+  const f = setup();
+  try {
+    const project = join(f.project, 'revoked folder');
+    await f.bridge.update(message(354, 999, `/new ${project}`)); await f.drain(); await f.choose(0);
+    const list = f.native.list.bind(f.native);
+    f.native.list = async (...args) => { const sessions = await list(...args); f.config.roots = []; return sessions; };
+    await f.bridge.workNewSession();
+    assert.equal(existsSync(project), false); assert.equal(f.native.starts, 0);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
+  } finally { f.close(); }
+});
+
+test('a failed relay-owned creation keeps its reserved topic and discovery never creates a replacement', async () => {
+  const f = setup();
+  try {
+    const create = f.native.createThread.bind(f.native);
+    f.native.createThread = async (...args) => { const thread = await create(...args); thread.ephemeral = true; return thread; };
+    await f.bridge.update(message(353, 999, `/new ${f.project}`)); await f.drain(); await f.choose(0);
+    const op = f.state.newSessions().at(-1)!;
+    await f.bridge.workNewSession(); await f.bridge.discover(); await f.bridge.discover();
+    assert.equal(f.state.newSession(op.id)!.status, 'failed'); assert.equal(f.native.starts, 1);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 1);
+    assert.equal(f.state.binding(f.state.newSession(op.id)!.threadId!), undefined);
   } finally { f.close(); }
 });
 
