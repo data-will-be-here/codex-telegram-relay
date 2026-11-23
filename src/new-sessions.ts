@@ -107,7 +107,7 @@ export class NewSessions {
   }
 
   async open(topicId: number | null, text: string): Promise<void> {
-    if (text !== '/new') { this.notice(topicId, 'Use /new without arguments and choose an option with the buttons.'); return; }
+    const argument = text.slice('/new'.length).trim();
     if (this.config.newSessions?.enabled === false) { this.notice(topicId, 'Session creation is disabled locally. Existing conversations remain available.'); return; }
     if (!this.codex.createThread || !this.codex.setThreadName || !this.codex.nonArchivedThread || !this.codex.findCreatedThread) {
       this.notice(topicId, 'This Codex connection does not support session creation.'); return;
@@ -121,11 +121,22 @@ export class NewSessions {
     if (pending) { this.notice(topicId, pending.status === 'uncertain' ?
       'The previous creation outcome is unknown. The relay is checking Codex without repeating creation. Check Codex locally.' :
       'A session is already being created for this menu. Please wait; creation will not be repeated.'); return; }
+    const project = argument ? this.projectFromText(argument) : undefined;
+    if (argument && !project) {
+      this.notice(topicId, 'Use an existing project folder allowed by local relay settings. Windows: /new D:/code/project. macOS: /new /Users/name/code/project or /new ~/code/project. Paths with spaces may be quoted.'); return;
+    }
     for (const op of this.state.newSessions(['selecting']).filter(op => op.topicId === topicId || op.expires < Date.now())) {
       this.state.changeNewSession(op.id, 'selecting', { status: 'cancelled' }); this.state.cancelPrompt(op.menuKey);
     }
     if (this.state.newSessions([...active, 'selecting']).length >= 64) {
       this.notice(topicId, 'Too many open menus or pending session creations. Complete them and retry /new.'); return;
+    }
+    if (project) {
+      const id = randomUUID();
+      const op: NewSessionOperation = { id, status: 'preparing', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
+        expires: Date.now() + LIFETIME, choices: [], page: 0, topicFirst: true, explicitProject: true, kind: 'project', root: project, cwd: project };
+      this.state.createNewSession(op);
+      this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Creating Telegram topic…'); return;
     }
     const choices: NewSessionOperation['choices'] = [];
     const scratch = this.config.newSessions?.scratchRoot;
@@ -144,8 +155,9 @@ export class NewSessions {
     const op: NewSessionOperation = { id, status: 'selecting', topicId, menuKey: `notice/new-menu/${id}`, token: randomBytes(16).toString('hex'),
       expires: Date.now() + LIFETIME, choices, page: 0, topicFirst: true };
     this.state.createNewSession(op);
-    if (this.screens) this.screens.enqueue(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op), { kind: 'menu', title: 'New conversation', editable: true }, true);
-    else this.state.enqueueOwnerNotice(op.menuKey, topicId, 'Where should the new conversation start?', this.keyboard(op));
+    const prompt = 'Where should the new conversation start?\nOr send /new followed by a project folder path (Windows: D:/code/project; macOS: ~/code/project).';
+    if (this.screens) this.screens.enqueue(op.menuKey, topicId, prompt, this.keyboard(op), { kind: 'menu', title: 'New conversation', editable: true }, true);
+    else this.state.enqueueOwnerNotice(op.menuKey, topicId, prompt, this.keyboard(op));
   }
 
   private keyboard(op: NewSessionOperation): Json {
@@ -327,11 +339,30 @@ export class NewSessions {
   private choiceAllowed(root: string, kind: 'scratch' | 'project'): boolean {
     return (kind === 'scratch' ? this.config.newSessions?.scratchRoot === root : this.projectPaths().includes(root)) === true && this.validRoot(root, kind === 'scratch');
   }
+  private projectFromText(argument: string): string | undefined {
+    try {
+      if (argument.length > 4096 || /[\x00-\x1f\x7f]/u.test(argument)) return;
+      let path = argument;
+      if (path.length > 1 && (path.startsWith('"') && path.endsWith('"') || path.startsWith("'") && path.endsWith("'"))) path = path.slice(1, -1);
+      if (path === '~') path = homedir();
+      else if (path.startsWith('~/') || process.platform === 'win32' && path.startsWith('~\\')) path = join(homedir(), path.slice(2));
+      // On Windows, /folder and C:folder depend on an implicit drive or cwd.
+      if (!isAbsolute(path) || process.platform === 'win32' && !/^(?:[a-z]:[\\/]|[\\/]{2})/iu.test(path)) return;
+      const canonical = realpathSync(path);
+      return this.explicitProjectAllowed(canonical) ? canonical : undefined;
+    } catch { return; }
+  }
+  private explicitProjectAllowed(path: string): boolean {
+    const scratch = this.config.newSessions?.scratchRoot;
+    return this.validRoot(path, false) && allowedSessionDirectory(path, this.config) &&
+      !this.state.ownsScratch(path) && (!scratch || !inside(path, scratch));
+  }
   private operationAllowed(op: NewSessionOperation): boolean {
     if (op.reset) return !!op.cwd && op.cwd === op.reset.cwd && this.validRoot(op.cwd, false) &&
       !this.config.ignoredThreadIds?.includes(op.reset.threadId) && (!op.threadId || !this.config.ignoredThreadIds?.includes(op.threadId)) &&
       allowedSessionDirectory(op.cwd, this.config, this.state.ownsScratch(op.cwd, op.reset.threadId));
-    if (!op.root || !op.cwd || !op.kind || !this.choiceAllowed(op.root, op.kind)) return false;
+    if (!op.root || !op.cwd || !op.kind) return false;
+    if (op.explicitProject ? op.kind !== 'project' || !this.explicitProjectAllowed(op.root) : !this.choiceAllowed(op.root, op.kind)) return false;
     if (op.threadId && this.config.ignoredThreadIds?.includes(op.threadId)) return false;
     if (op.kind === 'project') return op.cwd === op.root && allowedSessionDirectory(op.cwd, this.config);
     return op.cwd === join(op.root, op.id) && (!existsSync(op.cwd) || !lstatSync(op.cwd).isSymbolicLink() && realpathSync(op.cwd) === op.cwd);

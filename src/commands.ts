@@ -5,7 +5,7 @@ const commands = [
   { command: 'status', args: '', en: 'Show connection, message mode and streaming status' },
   { command: 'limits', args: '', en: 'Show remaining Codex account limits and reset times' },
   { command: 'sessions', args: '', en: 'List attached Codex sessions and their IDs' },
-  { command: 'new', args: '', en: 'Start a new conversation or project session' },
+  { command: 'new', args: '[PATH]', en: 'Start a conversation or open a project folder' },
   { command: 'clear', args: '', en: 'Start a fresh conversation in this topic; keep Telegram history' },
   { command: 'stop', args: '', en: 'Stop the current Codex turn in this topic' },
   { command: 'rename', args: '[NEW NAME]', en: 'Rename this topic or restore its default name' },

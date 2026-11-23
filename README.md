@@ -238,7 +238,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
-| `/new` | Create a conversation without a project, or in a connected project (v0.1.20) |
+| `/new [PATH]` | Choose a conversation location, or open an existing project folder directly |
 | `/clear` | Start a fresh conversation in this topic, preserving Telegram history and supported permission settings |
 | `/stop` | Interrupt this topic's current turn, including while it waits for approval |
 | `/rename [NEW NAME]` | Rename this topic; without a name, wait for the next text message (v0.1.23) |
@@ -256,7 +256,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | `/help` | Show help |
 | Approval buttons | Allow **once** or decline the specific pending native request |
 
-The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, account-login commands or automatic history imports. New conversations use an automatically prepared workspace or known projects within the current discovery scope. Instructions follow the session's effective native Codex permissions; only an explicit `/permissions` selection changes them.
+The relay accepts only the paired owner in their private chat. Incoming attachments are handled as described below. There are no direct shell endpoints, account-login commands or automatic history imports. New conversations use an automatically prepared workspace, known projects or an explicitly entered existing project folder within the current discovery scope. Instructions follow the session's effective native Codex permissions; only an explicit `/permissions` selection changes them.
 
 `/stop` is available in the command list and `/help`, without a separate Stop button. It interrupts the exact current turn through native Codex, including while approval or a question is pending. The existing turn result confirms completion; the relay does not approve requests or send additional waiting acknowledgements. Ordinary text such as ?stop? remains model input and may wait behind an approval.
 
@@ -326,6 +326,8 @@ npm start -- new enable --scratch-root /absolute/path/to/conversations
 Use canonical absolute directories for overrides. Keep scratch outside Git repositories, project roots, relay private data and `CODEX_HOME`. `npm start -- new` shows effective settings; `new disable` disables new creation while keeping existing conversations usable. These commands are optional; updating an existing relay requires only loading the updated code, not a new setup step.
 
 Send `/new` in any owner-private topic, an unbound topic, or without a topic. The first option is **No project — question / research** (a general conversation), followed by the current available project and other known projects. Long lists have pages and Cancel. Choosing a location starts creation immediately; there is no Apply step. Open the new topic and write the first task there. Text in the old topic continues to its original session, including pending questions and approvals.
+
+To enter a project directly, send `/new D:/code/donidoni` on Windows (`D:\code\donidoni` also works), or `/new /Users/name/code/donidoni` / `/new ~/code/donidoni` on macOS. Paths refer to the computer running the relay. Spaces are supported, with optional matching single or double quotes, for example `/new "D:/code/my project"`. The folder must already exist. Creation starts immediately using the same durable workflow; pending creation is recovered instead of duplicated. In selected-project mode the folder must be inside an allowed root; the command does not change discovery scope, configured roots or native permissions. Private Codex/relay directories and conversation workspaces cannot be used as project folders.
 
 Each general conversation uses a persistent `<scratchRoot>/<operation-id>` directory for reports, downloads and scripts. Chat history is separate because it is a new thread. Global Codex settings, skills, plugins, instructions and memory remain shared. Directories are retained for resumption and file export, not auto-deleted. Titles/headers use **No project**; UUID directories are not added to the project picker. Project sessions share the project's files and current Git branch; `/new` creates no worktree and copies no conversation history.
 

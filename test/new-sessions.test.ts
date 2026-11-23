@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, relative } from 'node:path';
 import { Bridge } from '../src/bridge.js';
 import { RpcError } from '../src/codex.js';
 import { type ClearSettingsSnapshot } from '../src/clear-settings.js';
@@ -113,6 +114,79 @@ test('project selection preserves the originating binding and never copies histo
     assert.equal(f.state.binding('original-thread')!.topicId, original.topicId);
     assert.notEqual(f.state.binding(f.state.newSession(op.id)!.threadId!)!.topicId, original.topicId);
     assert.equal(f.native.writes.length, 0); assert.equal(f.state.newSession(op.id)!.cwd, f.project);
+  } finally { f.close(); }
+});
+
+test('/new with a quoted native project path creates an empty session without a project menu', async () => {
+  const f = setup();
+  try {
+    f.config.sessionScope = 'all';
+    const project = join(f.dir, 'another project'); mkdirSync(project);
+    const roots = [...f.config.roots];
+    await f.bridge.update(message(301, 999, `/new "${project.replace(/\\/gu, '/')}/"`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    assert.ok(op, 'the explicit path should create a durable operation');
+    assert.equal(op.status, 'preparing'); assert.equal(op.cwd, realpathSync(project));
+    assert.equal(f.native.starts, 0);
+    await f.bridge.workNewSession(); await f.drain();
+    const completed = f.state.newSession(op.id)!;
+    assert.equal(completed.status, 'ready'); assert.equal(f.native.starts, 1);
+    assert.equal(f.state.binding(completed.threadId!)!.cwd, realpathSync(project));
+    assert.equal(f.native.writes.length, 0); assert.deepEqual(f.config.roots, roots);
+  } finally { f.close(); }
+});
+
+test('/new expands a home-relative project path and recovers an uncertain start after reconnect without a duplicate', async () => {
+  const f = setup();
+  try {
+    const project = join(f.project, 'nested project'); mkdirSync(project);
+    const path = `~/${relative(homedir(), project).replace(/\\/gu, '/')}`;
+    await f.bridge.update(message(302, 999, `/new ${path}`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    assert.equal(op.cwd, realpathSync(project));
+    f.native.loseStart = true; await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'uncertain');
+    await f.bridge.update(message(303, 999, `/new ${path}`));
+    assert.equal(f.state.newSessions().length, 1);
+    f.bridge.close();
+    const bridge = new Bridge(f.config, f.state, f.native, f.telegram);
+    try {
+      f.state.changeNewSession(op.id, 'uncertain', { retryAt: 0 }); await bridge.workNewSession();
+      assert.equal(f.state.newSession(op.id)!.status, 'ready'); assert.equal(f.native.starts, 1);
+    } finally { bridge.close(); }
+  } finally { f.close(); }
+});
+
+test('/new rejects missing, ambiguous, private, scratch and out-of-scope paths before creating anything', async () => {
+  const f = setup();
+  try {
+    const outside = join(f.dir, 'outside'); mkdirSync(outside);
+    await f.bridge.update(message(310, 999, `/new ${outside}`));
+    assert.equal(f.state.newSessions().length, 0, 'selected mode must retain its root restriction');
+    f.config.sessionScope = 'all';
+    const file = join(f.project, 'file.txt'); writeFileSync(file, 'fixture');
+    const paths = ['relative/project', 'D:project', join(f.project, 'missing'), file, f.state.home, f.scratch,
+      `${f.project}\nextra`, ...(process.platform === 'win32' ? ['/code/project'] : ['D:/code/project'])];
+    for (const [index, path] of paths.entries()) {
+      await f.bridge.update(message(311 + index, 999, `/new ${path}`));
+      assert.equal(f.state.newSessions().length, 0, path);
+    }
+    await f.drain();
+    assert.equal(f.native.starts, 0);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
+    assert.ok(f.telegram.sent().some(item => string(item.text).includes('existing project folder')));
+  } finally { f.close(); }
+});
+
+test('explicit /new paths are rechecked if allowed roots change before creation', async () => {
+  const f = setup();
+  try {
+    await f.bridge.update(message(330, 999, `/new ${f.project}`)); await f.drain();
+    const op = f.state.newSessions().at(-1)!;
+    f.config.roots = [];
+    await f.bridge.workNewSession();
+    assert.equal(f.state.newSession(op.id)!.status, 'failed'); assert.equal(f.native.starts, 0);
+    assert.equal(f.telegram.calls.filter(call => call.method === 'createForumTopic').length, 0);
   } finally { f.close(); }
 });
 
