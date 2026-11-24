@@ -138,6 +138,20 @@ test('native unsubscribe and interrupt target only the explicit thread and turn'
   } finally { c.close(); }
 });
 
+test('cached permission status is read-only, unavailable before subscription, and returned as an isolated snapshot', async () => {
+  const c = new CodexClient();
+  try {
+    await c.connect(process.execPath, [resolve('test/fake-proxy.mjs')]);
+    assert.equal(c.permissionState('a'), undefined);
+    await c.attach('a');
+    const before = await c.call('test/records', {}) as Json[];
+    const snapshot = c.permissionState('a')!; snapshot.approvalsReviewer = 'auto_review';
+    assert.equal(c.permissionState('a')!.approvalsReviewer, 'user'); assert.equal(c.permissionState('unknown'), undefined);
+    const after = await c.call('test/records', {}) as Json[];
+    assert.equal(after.filter(r => r.method !== 'test/records').length, before.filter(r => r.method !== 'test/records').length);
+  } finally { c.close(); }
+});
+
 test('native permission catalog is live and paginated; writes use only explicit permission fields and require an applied event', async () => {
   const c = new CodexClient();
   try {

@@ -36,6 +36,9 @@ export class FakeCodex implements Codex {
   permissionRequirements: Json = {};
   autoReview = true;
   permissionReads = 0;
+  loaded?: () => Promise<string[]>;
+  interrupt?: (threadId: string, turnId: string) => Promise<unknown>;
+  permissionState(threadId: string): Json | undefined { const value = this.permissionStates.get(threadId); return value ? structuredClone(value) : undefined; }
   async permissionCatalog(threadId: string, cwd: string): Promise<PermissionSnapshot> {
     this.permissionReads++;
     let settings = this.permissionStates.get(threadId);

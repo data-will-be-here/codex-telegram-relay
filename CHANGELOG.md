@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show existing agent permission differences in `/permissions`. Add an explicitly confirmed request for the main agent to replace old workers in a new root turn, preserving handoff progress and pending-review authority. Journal interrupt/start outcomes and reconcile uncertain dispatch without replay.
 - Confirm `/new PATH` before opening a project session. Check folder existence, explain missing-folder creation, and create missing parents only after acceptance; retain local scope checks and durable recovery.
 - Normalize Windows drive letters before creation and keep failed relay-owned sessions fenced from ordinary discovery, preventing a second topic after a `d:`/`D:` metadata mismatch.
 - Add opt-in automatic Codex selection with managed/current preference, verified fallback and reconnect discovery; preserve legacy/fixed executable choices and pairing.

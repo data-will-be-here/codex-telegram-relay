@@ -57,6 +57,12 @@ export interface NewSessionOperation {
 }
 
 export type TurnStopStatus = 'requested' | 'uncertain' | 'acknowledged' | 'completed';
+export interface AgentRestartJob {
+  id: string; binding: Binding; inputId: number; key: string; signature: string; mode: string;
+  agents: { threadId: string; cwd: string; name: string }[]; anchorTurnId: string | null;
+  status: 'queued' | 'waiting' | 'dispatching' | 'sent' | 'uncertain' | 'failed' | 'dismissed';
+  at: number; retryAt?: number;
+}
 
 export class State {
   private db: DatabaseSync;
@@ -106,6 +112,9 @@ export class State {
         CREATE TABLE IF NOT EXISTS retired_bindings(threadId TEXT PRIMARY KEY, binding TEXT NOT NULL, replacementId TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS subscription_cleanup(threadId TEXT PRIMARY KEY, replacementId TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS turn_stops(threadId TEXT NOT NULL, turnId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,turnId));
+        CREATE TABLE IF NOT EXISTS agent_restarts(id TEXT PRIMARY KEY,threadId TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_restarts_pending ON agent_restarts(threadId) WHERE status IN ('queued','waiting','dispatching','uncertain');
+        UPDATE agent_restarts SET status='uncertain' WHERE status='dispatching';
         CREATE TABLE IF NOT EXISTS widget_cards(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, turnId TEXT NOT NULL, payload TEXT NOT NULL,
           delivery TEXT NOT NULL DEFAULT 'new', messageId INTEGER, sentRevision INTEGER NOT NULL DEFAULT 0,
           retryAt INTEGER NOT NULL DEFAULT 0, lastSentAt INTEGER NOT NULL DEFAULT 0, everUncertain INTEGER NOT NULL DEFAULT 0, UNIQUE(threadId,turnId));
@@ -284,6 +293,21 @@ export class State {
   }
   widgetResult(id: string, delivery: WidgetDelivery['delivery'], retryAt = 0, failure: string | null = null): void {
     this.db.prepare("UPDATE widget_cards SET delivery=?,retryAt=?,failure=COALESCE(?,failure),everUncertain=MAX(everUncertain,CASE WHEN ?='uncertain' THEN 1 ELSE 0 END) WHERE id=?").run(delivery, retryAt, failure, delivery, id);
+  }
+  agentRestarts(): AgentRestartJob[] {
+    return this.db.prepare("SELECT status,payload FROM agent_restarts WHERE status IN ('queued','waiting','dispatching','uncertain') ORDER BY rowid").all()
+      .map(row => ({ ...JSON.parse(string(row.payload)), status: row.status }) as AgentRestartJob);
+  }
+  queueAgentRestart(job: AgentRestartJob): boolean {
+    if (this.agentRestarts().length >= 64) return false;
+    return this.db.prepare('INSERT OR IGNORE INTO agent_restarts VALUES(?,?,?,?)').run(job.id, job.binding.threadId, job.status, JSON.stringify(job)).changes === 1;
+  }
+  changeAgentRestart(job: AgentRestartJob, patch: Partial<AgentRestartJob>): AgentRestartJob {
+    const next = { ...job, ...patch };
+    if (this.db.prepare('UPDATE agent_restarts SET status=?,payload=? WHERE id=? AND status=?').run(next.status, JSON.stringify(next), job.id, job.status).changes !== 1) {
+      throw new Error('Agent replacement changed.');
+    }
+    return next;
   }
   newSessions(phases?: readonly NewSessionPhase[]): NewSessionOperation[] {
     const rows = phases ? this.db.prepare(`SELECT * FROM new_sessions WHERE status IN (${phases.map(() => '?').join(',')})`).all(...phases) : this.db.prepare('SELECT * FROM new_sessions').all();
@@ -796,6 +820,7 @@ export class State {
     this.db.prepare("DELETE FROM turn_stops WHERE status='completed' AND at<?").run(Date.now() - 7 * 24 * 60 * 60_000);
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     this.db.prepare("DELETE FROM incoming WHERE at<? AND status IN ('done','rejected')").run(cutoff);
+    this.db.prepare("DELETE FROM agent_restarts WHERE json_extract(payload,'$.at')<? AND status IN ('sent','failed','dismissed')").run(cutoff);
     this.db.prepare("DELETE FROM outbox WHERE at<? AND status IN ('sent','cancelled','pin-uncertain') AND key NOT IN (SELECT c.deliveryKey FROM approval_cards c JOIN approval_requests r ON r.identity=c.requestIdentity WHERE r.status IN ('pending','consumed'))").run(cutoff);
     this.db.prepare("DELETE FROM approval_cards WHERE at<? AND requestIdentity IN (SELECT identity FROM approval_requests WHERE status='resolved') AND deliveryKey NOT IN (SELECT key FROM outbox WHERE status='uncertain')").run(cutoff);
     this.db.prepare("DELETE FROM approval_requests WHERE status='resolved' AND at<? AND identity NOT IN (SELECT requestIdentity FROM approval_cards)").run(cutoff);

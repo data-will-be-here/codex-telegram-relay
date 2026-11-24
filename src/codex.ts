@@ -304,6 +304,10 @@ export class CodexClient extends EventEmitter implements Codex {
     }
     throw new RpcError('Permissions catalog scan was incomplete.', false);
   }
+  permissionState(threadId: string): Json | undefined {
+    const settings = this.permissionSettings.get(threadId)?.settings;
+    return settings && validPermissionSettings(settings) ? structuredClone(settings) : undefined;
+  }
   async permissionCatalog(threadId: string, cwd: string): Promise<PermissionSnapshot> {
     const results = await Promise.all([
       this.catalogPages('permissionProfile/list', { cwd }),

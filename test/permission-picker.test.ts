@@ -39,7 +39,7 @@ test('standard presets apply the native profile, policy and reviewer together', 
     await choose(f, await open(f), 'Read Only', 2);
     assert.deepEqual(f.codex.writes, [{ method: 'permissions', params: { threadId: 'thread-a', permissions: ':read-only', approvalPolicy: 'on-request', approvalsReviewer: 'user' } }]);
     assert.equal(f.codex.permissionStates.get('thread-a')!.approvalsReviewer, 'user');
-    assert.match(string(edited(f).text), /following requests/u);
+    assert.match(string(edited(f).text), /following turns/u);
   } finally { f.close(); }
 });
 

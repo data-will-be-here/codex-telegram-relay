@@ -1,21 +1,25 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { RpcError } from './codex.js';
 import { withProjectHeader } from './format.js';
-import { permissionSignature, validPermissionSettings } from './permission-settings.js';
+import { permissionMode, permissionSignature, validPermissionSettings } from './permission-settings.js';
 import { type State } from './state.js';
 import { type Screens } from './screens.js';
-import { integer, object, string, displayName, type Binding, type Codex, type Json, type Keyboard, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
+import { integer, object, string, displayName, type Binding, type Codex, type Json, type Keyboard, type PermissionAgent, type PermissionPatch, type PermissionSnapshot, type Telegram } from './types.js';
 
 const PAGE_SIZE = 7;
 const LIFETIME = 10 * 60_000;
 const NAMES = new Map([[':read-only', 'Read Only'], [':workspace', 'Ask for approval'], [':danger-full-access', 'Full Access']]);
 const label = (value: string): string => Array.from(value.replace(/[\x00-\x1f\x7f]/gu, ' ').replace(/\s+/gu, ' ').trim()).slice(0, 100).join('');
 interface Choice { patch: PermissionPatch; text: string; confirm: boolean; description: string; }
-type Action = { kind: 'choice'; choice: Choice } | { kind: 'confirm' } | { kind: 'back' } | { kind: 'close' } | { kind: 'page'; page: number };
+type Action = { kind: 'choice'; choice: Choice } | { kind: 'confirm' } | { kind: 'back' } | { kind: 'close' } | { kind: 'page'; page: number } | { kind: 'restart' } | { kind: 'restartConfirm' } | { kind: 'dismiss' } | { kind: 'dismissConfirm' };
 interface Menu {
   binding: Binding; key: string; token: string; expires: number; busy: boolean;
   snapshot: PermissionSnapshot; signature: string; actions: Map<string, Action>; page: number;
   confirmation?: Choice;
+  agents: PermissionAgent[]; agentsUnknown?: boolean;
+  restart?: { agents: PermissionAgent[]; anchorTurnId: string | null };
+  notice?: string;
+  dismiss?: string;
 }
 
 function policyAllowed(snapshot: PermissionSnapshot, value: string): boolean {
@@ -52,7 +56,9 @@ export class PermissionPicker {
   private menus = new Map<string, Menu>();
   private opening = new Set<string>();
   constructor(private readonly state: State, private readonly codex: Codex, private readonly telegram: Telegram,
-    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>, private readonly screens?: Screens) {}
+    private readonly ownerId: number, private readonly allowed: (binding: Binding) => Promise<Json | undefined>, private readonly screens?: Screens,
+    private readonly inspect?: (binding: Binding) => Promise<PermissionAgent[]>,
+    private readonly replace?: (binding: Binding, key: string, inputId: number, signature: string, mode: string, agents: PermissionAgent[], anchorTurnId: string | null) => Promise<void>) {}
 
   async open(binding: Binding): Promise<void> {
     if (this.opening.has(binding.threadId)) return;
@@ -72,7 +78,9 @@ export class PermissionPicker {
       const snapshot = await this.catalog(binding);
       if (!await this.allowed(binding)) { this.notice(binding, 'The session is no longer available for this topic.'); return; }
       const menu: Menu = { binding, key: `prompt/permissions/${randomUUID()}`, token: '', expires: Date.now() + LIFETIME,
-        busy: false, snapshot, signature: permissionSignature(snapshot.settings), actions: new Map(), page: 0 };
+        busy: false, snapshot, signature: permissionSignature(snapshot.settings), actions: new Map(), page: 0, agents: [] };
+      try { menu.agents = await this.inspect?.(binding) ?? []; } catch { menu.agentsUnknown = true; }
+      if (!await this.allowed(binding)) return;
       this.menus.set(binding.threadId, menu);
       const screen = this.screen(menu);
       if (this.screens) this.screens.enqueue(menu.key, binding.topicId, screen.text, screen.markup as unknown as Json, { kind: 'menu', title: 'Session permissions', editable: true });
@@ -88,7 +96,7 @@ export class PermissionPicker {
     return snapshot;
   }
 
-  async callback(callback: Json, message: Json, topicId: number | null): Promise<'done' | 'rejected' | 'uncertain'> {
+  async callback(callback: Json, message: Json, topicId: number | null, inputId = 0): Promise<'done' | 'rejected' | 'uncertain'> {
     const match = /^p:([a-f0-9]{32}):([a-z0-9]+)$/u.exec(string(callback.data));
     const menu = match ? [...this.menus.values()].find(item => item.token === match[1]) : undefined;
     const action = match && menu?.actions.get(match[2]!);
@@ -104,6 +112,38 @@ export class PermissionPicker {
       const fresh = await this.catalog(menu.binding);
       if (permissionSignature(fresh.settings) !== menu.signature) { await this.complete(menu, 'Session settings changed in Codex. Reopen /permissions.'); return 'rejected'; }
       menu.snapshot = fresh;
+      if (action.kind === 'dismiss' || action.kind === 'dismissConfirm') {
+        const job = this.state.agentRestarts().find(item => item.binding.threadId === menu.binding.threadId && item.status === 'uncertain');
+        if (!job) throw new RpcError('The saved request has already changed. Reopen /permissions.', false);
+        if (action.kind === 'dismiss') {
+          menu.dismiss = job.id; const screen = this.screen(menu); await this.edit(menu, screen.text, screen.markup); return 'done';
+        }
+        if (menu.dismiss !== job.id) throw new RpcError('The saved request changed.', false);
+        this.retire(menu); this.state.changeAgentRestart(job, { status: 'dismissed' });
+        await this.complete(menu, 'Saved uncertainty cleared. No native action was taken. Reopen /permissions to make a new selection.'); return 'done';
+      }
+      if (action.kind === 'restart' || action.kind === 'restartConfirm') {
+        if (!this.inspect || !this.replace) throw new RpcError('Agent replacement is unavailable.', false);
+        const agents = await this.inspect(menu.binding);
+        const turns = await this.codex.turns(menu.binding.threadId);
+        const thread = await this.allowed(menu.binding);
+        if (!thread || !this.current(menu) || !agents.length) throw new RpcError('The session or agents changed. Reopen /permissions.', false);
+        const anchorTurnId = string(turns[0]?.id) || null;
+        if (action.kind === 'restart') {
+          menu.restart = { agents, anchorTurnId };
+          const screen = this.screen(menu); await this.edit(menu, screen.text, screen.markup); return 'done';
+        }
+        const saved = menu.restart;
+        if (!saved || saved.anchorTurnId !== anchorTurnId || JSON.stringify(saved.agents.map(a => [a.threadId, a.cwd])) !== JSON.stringify(agents.map(a => [a.threadId, a.cwd]))) {
+          throw new RpcError('The session or selected agents changed. Reopen /permissions.', false);
+        }
+        const latest = await this.catalog(menu.binding);
+        if (!this.current(menu) || permissionSignature(latest.settings) !== menu.signature || !await this.allowed(menu.binding)) throw new RpcError('The session settings changed.', false);
+        this.retire(menu);
+        await this.edit(menu, 'Scheduling the confirmed agent replacement…', { inline_keyboard: [] });
+        await this.replace(menu.binding, menu.key, inputId, menu.signature, permissionMode(fresh.settings), saved.agents, saved.anchorTurnId);
+        return 'done';
+      }
       if (action.kind === 'choice' || action.kind === 'confirm') {
         const requested = action.kind === 'confirm' ? menu.confirmation : action.choice;
         const choice = requested && this.currentChoice(fresh, requested);
@@ -118,12 +158,18 @@ export class PermissionPicker {
         // Consume before writing. An uncertain native write must never be replayed by another click.
         this.retire(menu); writing = true;
         await this.codex.updatePermissions!(menu.binding.threadId, choice.patch, menu.signature);
-        await this.complete(menu, `Selected: ${choice.text}.\nSaved for following requests in this session.`);
+        if (menu.agents.length && this.inspect && this.replace) {
+          menu.snapshot = await this.catalog(menu.binding); menu.signature = permissionSignature(menu.snapshot.settings);
+          menu.agents = await this.inspect(menu.binding); delete menu.confirmation; delete menu.restart;
+          menu.notice = `Selected: ${choice.text}. Saved for following turns in this session.`;
+          this.menus.set(menu.binding.threadId, menu); menu.expires = Date.now() + LIFETIME;
+          const screen = this.screen(menu); await this.edit(menu, screen.text, screen.markup);
+        } else await this.complete(menu, `Selected: ${choice.text}.\nSaved for following turns in this session.`);
         return 'done';
       }
-      delete menu.confirmation;
+      delete menu.confirmation; delete menu.restart; delete menu.dismiss;
       if (action.kind === 'back') menu.page = 0;
-      else menu.page = action.page;
+      else if (action.kind === 'page') menu.page = action.page;
       const screen = this.screen(menu); await this.edit(menu, screen.text, screen.markup); return 'done';
     } catch (error) {
       const uncertain = writing && (!(error instanceof RpcError) || error.uncertain);
@@ -142,6 +188,12 @@ export class PermissionPicker {
   private screen(menu: Menu): { text: string; markup: Keyboard } {
     menu.token = randomBytes(16).toString('hex'); menu.actions.clear();
     const button = (text: string, action: Action) => { const code = menu.actions.size.toString(36); menu.actions.set(code, action); return { text, callback_data: `p:${menu.token}:${code}` }; };
+    if (menu.dismiss) return { text: 'Clear the saved uncertain replacement request?\n\nFirst check the root history: the previous request may already have been received. Clearing this record does not stop any running work or send a replacement request.',
+      markup: { inline_keyboard: [[button('Checked history — clear record', { kind: 'dismissConfirm' })], [button('Back', { kind: 'back' }), button('Cancel', { kind: 'close' })]] } };
+    if (menu.restart) return { text: `Request replacement of ${menu.restart.agents.length} existing agents?\nMode for new agents: ${permissionMode(menu.snapshot.settings)}\n\n` +
+      'This pauses the current root turn if active. A NEW root turn will ask the main agent to preserve progress, interrupt the listed workers and create replacements for unfinished tasks. ' +
+      'Files and conversation history are retained. Pending approvals are not accepted automatically. Replacement is carried out by the main agent; it is not a direct settings change to old workers.',
+      markup: { inline_keyboard: [[button('Pause and request replacement', { kind: 'restartConfirm' })], [button('Back', { kind: 'back' }), button('Cancel', { kind: 'close' })]] } };
     if (menu.confirmation) {
       const full = menu.confirmation.patch.permissions === ':danger-full-access';
       return { text: full ? 'Enable Full Access?\n\nCodex will be able to modify files outside the project and run commands with network access without approval prompts.\nThe selection will persist for following requests in this session.' :
@@ -162,15 +214,24 @@ export class PermissionPicker {
       [button((selected(choice) ? '✓ ' : '') + choice.text, { kind: 'choice', choice })]);
     const nav = []; if (menu.page) nav.push(button('←', { kind: 'page', page: menu.page - 1 }));
     if (menu.page + 1 < pages) nav.push(button('→', { kind: 'page', page: menu.page + 1 })); if (nav.length) rows.push(nav);
+    const pending = this.state.agentRestarts().find(job => job.binding.threadId === menu.binding.threadId);
+    if (pending?.status === 'uncertain') rows.push([button('Clear uncertain request…', { kind: 'dismiss' })]);
+    else if (!pending && menu.agents.length && this.replace) rows.push([button('Replace existing agents…', { kind: 'restart' })]);
     rows.push([button('Close', { kind: 'close' })]);
+    const agentText = menu.agents.length ? `\n\nExisting agents (${menu.agents.length}):\n` + menu.agents.slice(0, 5).map(agent =>
+      `${label(agent.name)}: ${agent.settings ? permissionMode(agent.settings) : 'settings unavailable'}${agent.waiting ? ' · waiting for approval' : ''}`).join('\n') +
+      (menu.agents.length > 5 ? `\n+ ${menu.agents.length - 5} more` : '') + '\nTheir settings are independent. Codex blocks direct changes to these workers; replacements can inherit the new root mode.' :
+      menu.agentsUnknown ? '\n\nAgent settings could not be verified. Reopen the menu after connection recovery.' : '';
     return { text: `Session permissions\nCurrent: ${name}\n\nChoose a mode. Approve for me uses automatic approval review within the workspace profile.` +
+      '\nChanges apply to following turns; pending approvals retain their existing controls.' + (menu.notice ? `\n${menu.notice}` : '') + agentText +
+      (pending ? pending.status === 'uncertain' ? '\n\nA previous replacement request has an unknown outcome. Check the root history before another request.' : '\n\nAn agent replacement request is pending.' : '') +
       (!options.length ? '\nNo options are currently available.' : '') + (pages > 1 ? `\nPage ${menu.page + 1}/${pages}` : ''), markup: { inline_keyboard: rows } };
   }
 
   private async ack(callback: Json, text?: string): Promise<void> { await this.telegram.call('answerCallbackQuery', { callback_query_id: callback.id, ...(text ? { text } : {}) }); }
   private async edit(menu: Menu, text: string, markup: Keyboard): Promise<void> {
     if (this.screens) { menu.key = await this.screens.edit(menu.key, menu.binding.topicId, text, markup as unknown as Json,
-      { kind: 'menu', title: 'Session permissions', editable: true, caption: menu.confirmation ? text : undefined }); return; }
+      { kind: 'menu', title: 'Session permissions', editable: true, caption: menu.confirmation || menu.restart || menu.dismiss ? text : undefined }); return; }
     const id = this.state.promptMessage(menu.key); if (!id) throw new Error('Menu delivery is not confirmed.');
     await this.telegram.call('editMessageText', { chat_id: this.ownerId, message_id: id,
       ...withProjectHeader({ text, entities: [] }, menu.binding.cwd, displayName(menu.binding), menu.binding.projectLabel), reply_markup: markup });

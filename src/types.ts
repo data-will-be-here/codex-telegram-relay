@@ -44,10 +44,12 @@ export interface AgentOrigin { threadId: string; name: string; }
 export interface ModelSettings { model: string; effort?: string; serviceTier: string; }
 export interface PermissionPatch { permissions?: string; approvalPolicy?: 'on-request' | 'never'; approvalsReviewer?: 'user' | 'auto_review'; }
 export interface PermissionSnapshot { settings: Json; profiles: Json[]; requirements: Json; autoReview: boolean; }
+export interface PermissionAgent { threadId: string; cwd: string; name: string; settings?: Json; waiting: boolean; }
 
 export interface Codex {
   runtimeInfo?(): import('./runtime-info.js').RuntimeInfo;
   permissionCatalog?(threadId: string, cwd: string): Promise<PermissionSnapshot>;
+  permissionState?(threadId: string): Json | undefined;
   updatePermissions?(threadId: string, patch: PermissionPatch, expected: string): Promise<void>;
   captureClearSettings?(threadId: string, cwd: string): Promise<import('./clear-settings.js').ClearSettingsSnapshot>;
   validateClearSettings?(threadId: string, snapshot: import('./clear-settings.js').ClearSettingsSnapshot): Promise<void>;

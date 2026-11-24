@@ -1,23 +1,25 @@
 import { allowedSessionDirectory, type Config } from './config.js';
-import { object, string, type AgentOrigin, type Binding, type Codex } from './types.js';
+import { object, string, type AgentOrigin, type Binding, type Codex, type Json } from './types.js';
 
 /** Resolve only verified spawned descendants of an attached interactive root. */
 export async function agentRoute(threadId: string, codex: Codex, config: Config,
-  attachedBinding: (id: string) => Binding | undefined, ownedScratch: (cwd: string) => boolean = () => false): Promise<{ binding: Binding; agent: AgentOrigin } | undefined> {
+  attachedBinding: (id: string) => Binding | undefined, ownedScratch: (cwd: string) => boolean = () => false): Promise<{ binding: Binding; agent: AgentOrigin; origin: Json } | undefined> {
   const visited = new Set<string>();
   let current = threadId;
   let name = 'Agent';
+  let origin: Json | undefined;
   for (let depth = 0; depth < 16; depth++) {
     if (!current || visited.has(current) || config.ignoredThreadIds?.includes(current)) return;
     visited.add(current);
     const thread = await codex.read(current, 1000);
+    if (depth === 0) origin = thread;
     if (thread.id !== current || thread.ephemeral === true || string(object(thread.status).type) === 'notLoaded' ||
         !allowedSessionDirectory(string(thread.cwd), config, ownedScratch(string(thread.cwd)))) return;
     const binding = attachedBinding(current);
     if (binding) {
       if (current === threadId || binding.cwd !== thread.cwd || !['cli', 'vscode', 'appServer'].includes(string(thread.source)) ||
           thread.parentThreadId || thread.canAcceptDirectInput === false) return;
-      return { binding, agent: { threadId, name } };
+      return { binding, agent: { threadId, name }, origin: origin! };
     }
     const spawn = object(object(object(thread.source).subAgent).thread_spawn);
     const parent = string(thread.parentThreadId);

@@ -12,3 +12,16 @@ export function validPermissionSettings(settings: Json): boolean {
     (['on-request', 'never', 'untrusted'].includes(String(policy)) || !!object(policy).granular) &&
     ['user', 'auto_review', 'guardian_subagent'].includes(String(settings.approvalsReviewer));
 }
+
+export function permissionMode(settings: Json): string {
+  const profile = String(object(settings.activePermissionProfile).id ?? '');
+  const type = String(object(settings.sandboxPolicy).type ?? '');
+  const reviewer = settings.approvalsReviewer === 'guardian_subagent' ? 'auto_review' : settings.approvalsReviewer;
+  if (profile === ':read-only' || !profile && type === 'readOnly') return reviewer === 'user' && settings.approvalPolicy === 'on-request' ? 'Read Only' : 'Custom read-only';
+  if ((profile === ':danger-full-access' || !profile && type === 'dangerFullAccess') && settings.approvalPolicy === 'never') return 'Full Access';
+  if ((profile === ':workspace' || !profile && type === 'workspaceWrite') && settings.approvalPolicy === 'on-request') {
+    if (reviewer === 'auto_review') return 'Approve for me';
+    if (reviewer === 'user') return 'Ask for approval';
+  }
+  return 'Custom Codex settings';
+}

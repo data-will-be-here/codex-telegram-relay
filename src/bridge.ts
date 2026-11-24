@@ -16,6 +16,8 @@ import { Widgets, ViewPicker } from './widgets.js';
 import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
+import { AgentRestart } from './agent-restart.js';
+import { type PermissionAgent } from './types.js';
 import { formatLimits } from './limits.js';
 import { limitMeters } from './limits.js';
 import { Screens } from './screens.js';
@@ -66,6 +68,7 @@ export class Bridge {
   private views: ViewPicker;
   private closed = false;
   private newSessions: NewSessions;
+  private agentRestart: AgentRestart;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
   private screens: Screens;
@@ -77,7 +80,15 @@ export class Bridge {
     this.screens = new Screens(state, telegram, config);
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding), this.screens);
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
-    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
+    this.agentRestart = new AgentRestart(state, codex, binding => this.settingsThread(binding), binding => this.permissionAgents(binding),
+      async (binding, inputId, text) => { await this.catchUp(binding); await this.sendInput(binding, inputId, text, true); },
+      async (job, text) => {
+        if (!await this.settingsThread(job.binding)) return;
+        try { await this.screens.edit(job.key, job.binding.topicId, text, { inline_keyboard: [] }, { kind: 'menu', title: 'Session permissions', editable: true }); }
+        catch { state.enqueue(`notice/agent-replacement/${job.id}/${job.status}`, job.binding.topicId, text); }
+      });
+    this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens,
+      binding => this.permissionAgents(binding), (...args) => this.agentRestart.request(...args));
     this.widgets = new Widgets(state, this.generation);
     this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async () => {
       for (const binding of this.state.bindings()) {
@@ -94,7 +105,31 @@ export class Bridge {
 
   private allowed(cwd: string, threadId: string): boolean { return allowedSessionDirectory(cwd, this.config, this.state.ownsScratch(cwd, threadId)); }
   workNewSession(): Promise<void> { return this.newSessions.tick(); }
-  close(): void { this.closed = true; this.widgets.close(); this.newSessions.close(); }
+  workPermissionRestart(): Promise<void> { return this.agentRestart.tick(); }
+  close(): void { this.closed = true; this.widgets.close(); this.newSessions.close(); this.agentRestart.close(); }
+
+  private async permissionAgents(binding: Binding): Promise<PermissionAgent[]> {
+    if (!this.codex.loaded) return [];
+    if (!await this.settingsThread(binding)) throw new RpcError('The session changed.', false);
+    const agents: PermissionAgent[] = [];
+    const loaded = [...new Set(await this.codex.loaded())].sort();
+    if (loaded.length > 256) throw new RpcError('Too many loaded sessions to inspect safely.', false);
+    const deadline = Date.now() + 5000;
+    for (const id of loaded) {
+      if (Date.now() > deadline) throw new RpcError('Agent inspection timed out.', false);
+      if (id === binding.threadId) continue;
+      const route = await agentRoute(id, this.codex, this.config, root => this.attached.has(root) ? this.state.binding(root) : undefined,
+        cwd => this.state.ownsScratch(cwd));
+      if (!route || route.binding.threadId !== binding.threadId || route.binding.topicId !== binding.topicId) continue;
+      if (agents.length >= 128) throw new RpcError('Too many agents to verify safely.', false);
+      const thread = route.origin;
+      const settings = this.codex.permissionState?.(id);
+      agents.push({ threadId: id, cwd: string(thread.cwd), name: route.agent.name,
+        ...(settings && settings.cwd === thread.cwd ? { settings } : {}), waiting: array(object(thread.status).activeFlags).includes('waitingOnApproval') });
+    }
+    if (!await this.settingsThread(binding)) throw new RpcError('The session changed.', false);
+    return agents;
+  }
   widgetDelivery(): WidgetDeliveryGuard {
     for (const card of this.state.activeWidgets(this.generation)) {
       const id = card.binding.threadId; const turnId = card.turnId;
@@ -716,7 +751,7 @@ export class Bridge {
         this.state.finish(id, await this.models.callback(callback, message, topic)); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('p:')) {
-        this.state.finish(id, await this.permissions.callback(callback, message, topic)); return;
+        this.state.finish(id, await this.permissions.callback(callback, message, topic, id)); return;
       }
       if (Object.keys(callback).length && string(callback.data).startsWith('v:')) {
         await this.views.callback(callback, message, topic); this.state.finish(id, 'done'); return;
@@ -1140,7 +1175,7 @@ export class Bridge {
     // Never replay a completed/uncertain native write automatically; require a fresh last answer.
     prompt.index = missing >= 0 ? missing : prompt.questions.length - 1;
   }
-  private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[]): Promise<void> {
+  private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[], requireIdle = false): Promise<void> {
     const current = (): boolean => !this.closed && !this.state.resettingTopic(binding.topicId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
       !this.config.ignoredThreadIds?.includes(binding.threadId);
@@ -1150,6 +1185,7 @@ export class Bridge {
     if (!current() || thread.cwd !== binding.cwd) throw new RpcError('Native session or topic changed. No instruction was sent.', false);
     const status = string(object(thread.status).type);
     if (status === 'active') {
+      if (requireIdle) throw new RpcError('A new root turn has started. No replacement instruction was sent.', false);
       const turn = (await this.codex.turns(binding.threadId)).find(t => t.status === 'inProgress');
       if (!current()) throw new RpcError('The topic changed. No instruction was sent.', false);
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
@@ -1157,7 +1193,8 @@ export class Bridge {
         taskTitle(array(turn?.items)) ?? taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else if (status === 'idle') {
       await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
-        taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
+        requireIdle ? binding.taskName || binding.sessionName || 'Agent handoff' :
+          taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else throw new RpcError('This session is not ready. Open it in Codex before retrying.', false);
   }
   private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>, task?: string): Promise<void> {

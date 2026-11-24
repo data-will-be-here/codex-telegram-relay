@@ -1,13 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { State } from '../src/state.js';
+import { State, type AgentRestartJob } from '../src/state.js';
 import { Outbox, TelegramClient, TelegramError, splitMessage } from '../src/telegram.js';
 import { FakeTelegram, temporary, messageBody } from './helpers.js';
 import { projectHeader } from '../src/format.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { string, array, object } from '../src/types.js';
+
+test('replacement dispatch survives a real database reopen as uncertain and blocks automatic duplicate scheduling', () => {
+  const f = temporary(); let state = new State(join(f.dir, 'home'));
+  try {
+    const job: AgentRestartJob = { id: 'handoff', binding: { threadId: 'root', topicId: 10, cwd: f.dir, title: 'Project', lastTurn: null },
+      key: 'menu', inputId: 1, signature: 'settings', mode: 'Approve for me', agents: [{ threadId: 'child', cwd: f.dir, name: '/root/worker' }],
+      anchorTurnId: null, status: 'queued', at: Date.now() };
+    assert.equal(state.queueAgentRestart(job), true); state.changeAgentRestart(job, { status: 'dispatching' });
+    state.close(); state = new State(join(f.dir, 'home'));
+    const recovered = state.agentRestarts()[0]!;
+    assert.equal(recovered.status, 'uncertain'); assert.equal(state.queueAgentRestart({ ...job, id: 'duplicate' }), false);
+    state.changeAgentRestart(recovered, { status: 'dismissed' });
+    assert.equal(state.queueAgentRestart({ ...job, id: 'new-explicit-request' }), true);
+  } finally { state.close(); f.close(); }
+});
 
 test('interrupted host-answer reservations, question drafts and recovery timestamps survive a real database reopen', () => {
   const f = temporary(); let state = new State(join(f.dir, 'home'));

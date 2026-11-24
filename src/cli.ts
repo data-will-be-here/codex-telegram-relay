@@ -221,7 +221,7 @@ async function start(args: string[]): Promise<void> {
   })();
   const creations = (async (): Promise<void> => {
     while (!stopping) {
-      try { await liveBridge?.workNewSession(); }
+      try { await liveBridge?.workNewSession(); await liveBridge?.workPermissionRestart(); }
       catch { console.error('New-session recovery paused; ordinary messaging is unaffected.'); }
       await delay(250);
     }
