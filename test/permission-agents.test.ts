@@ -140,6 +140,23 @@ test('root settings changed during agent inspection prevent interruption and rep
   } finally { f.close(); }
 });
 
+test('permissions changed while completed replies are caught up cancel the final replacement dispatch', async () => {
+  const f = await setup();
+  try {
+    let changed = false;
+    const completed: Json = { id: 'new-completion', status: 'completed' };
+    // Consuming completed native history races with a settings notification from another client.
+    Object.defineProperty(completed, 'items', { enumerable: true, get: () => {
+      changed = true; f.codex.permissionStates.get('thread-a')!.approvalsReviewer = 'auto_review';
+      return [{ type: 'agentMessage', text: 'Completed result' }];
+    } });
+    f.codex.histories.set('thread-a', [completed]);
+    await f.confirm(); await f.bridge.workPermissionRestart();
+    assert.equal(changed, true); assert.equal(f.codex.writes.length, 0);
+    assert.equal(f.state.agentRestarts().length, 0); assert.match(string(f.edited().text), /permissions changed before dispatch/u);
+  } finally { f.close(); }
+});
+
 test('a status delivery failure cannot reclassify an acknowledged replacement start or replay it', async () => {
   const f = await setup();
   try {

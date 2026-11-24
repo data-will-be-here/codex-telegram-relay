@@ -24,7 +24,7 @@ export class AgentRestart {
   constructor(private readonly state: State, private readonly codex: Codex,
     private readonly allowed: (binding: Binding) => Promise<Json | undefined>,
     private readonly inspect: (binding: Binding) => Promise<PermissionAgent[]>,
-    private readonly send: (binding: Binding, inputId: number, text: string) => Promise<void>,
+    private readonly send: (binding: Binding, inputId: number, text: string, expected: { signature: string; anchorTurnId: string | null }) => Promise<void>,
     private readonly report: (job: AgentRestartJob, text: string) => Promise<void>) {}
   close(): void { this.closed = true; }
   private async notify(job: AgentRestartJob, text: string): Promise<void> {
@@ -36,6 +36,7 @@ export class AgentRestart {
   }
   async request(binding: Binding, key: string, inputId: number, signature: string, mode: string,
     agents: PermissionAgent[], anchorTurnId: string | null): Promise<void> {
+    if (!this.codex.permissionState) throw new RpcError('Verified permission snapshots are unavailable.', false);
     if (this.closed || !await this.allowed(binding)) throw new RpcError('The session is unavailable.', false);
     const job: AgentRestartJob = { id: randomUUID(), binding, key, inputId, signature, mode, anchorTurnId,
       agents: agents.map(({ threadId, cwd, name }) => ({ threadId, cwd, name })), at: Date.now(), status: 'queued' };
@@ -87,7 +88,7 @@ export class AgentRestart {
         const active = currentTurns.filter(turn => turn.status === 'inProgress');
         if (active.length !== 1 || active[0]!.id !== job.anchorTurnId || !this.codex.interrupt) throw new RpcError('The active root turn cannot be identified safely.', false);
         if (job.status === 'queued') {
-          save({ status: 'waiting', retryAt: Date.now() + 1000 });
+          save({ status: 'waiting', interrupted: true, retryAt: Date.now() + 1000 });
           if (this.state.reserveTurnStop(job.binding.threadId, job.anchorTurnId!)) {
             try { await this.codex.interrupt(job.binding.threadId, job.anchorTurnId!); this.state.markTurnStop(job.binding.threadId, job.anchorTurnId!, 'acknowledged'); }
             catch (error) {
@@ -104,13 +105,13 @@ export class AgentRestart {
       if (this.closed) return;
       if (latest !== job.signature || !await this.allowed(job.binding)) throw new RpcError('The session or permissions changed.', false);
       save({ status: 'dispatching' });
-      try { await this.send(job.binding, job.inputId, replacementInstruction(job, agents)); }
+      try { await this.send(job.binding, job.inputId, replacementInstruction(job, agents), { signature: job.signature, anchorTurnId: job.anchorTurnId }); }
       catch (error) { save({ status: error instanceof RpcError && !error.uncertain ? 'failed' : 'uncertain', retryAt: Date.now() + 30_000 }); throw error; }
       save({ status: 'sent' });
       await this.notify(job, 'Replacement requested in a new root turn. The main agent was asked to preserve progress and replace unfinished workers. Existing files and history are retained.');
     } catch (error) {
       if (this.closed) return;
-      const paused = job.status === 'waiting';
+      const paused = job.interrupted === true;
       if (job.status !== 'uncertain' && job.status !== 'failed') save({ status: 'failed' });
       const text = job.status === 'uncertain' ? 'The replacement request outcome is unknown. Check the root history; it will not be sent again automatically.' :
         error instanceof RpcError && !error.uncertain ? error.message : 'Agent replacement stopped. Check Codex; no automatic retry will be made.';

@@ -17,6 +17,7 @@ import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
 import { AgentRestart } from './agent-restart.js';
+import { permissionSignature } from './permission-settings.js';
 import { type PermissionAgent } from './types.js';
 import { formatLimits } from './limits.js';
 import { limitMeters } from './limits.js';
@@ -81,14 +82,14 @@ export class Bridge {
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding), this.screens);
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
     this.agentRestart = new AgentRestart(state, codex, binding => this.settingsThread(binding), binding => this.permissionAgents(binding),
-      async (binding, inputId, text) => { await this.catchUp(binding); await this.sendInput(binding, inputId, text, true); },
+      async (binding, inputId, text, expected) => { await this.catchUp(binding); await this.sendInput(binding, inputId, text, true, expected); },
       async (job, text) => {
         if (!await this.settingsThread(job.binding)) return;
         try { await this.screens.edit(job.key, job.binding.topicId, text, { inline_keyboard: [] }, { kind: 'menu', title: 'Session permissions', editable: true }); }
         catch { state.enqueue(`notice/agent-replacement/${job.id}/${job.status}`, job.binding.topicId, text); }
       });
     this.permissions = new PermissionPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens,
-      binding => this.permissionAgents(binding), (...args) => this.agentRestart.request(...args));
+      binding => this.permissionAgents(binding), codex.permissionState ? (...args) => this.agentRestart.request(...args) : undefined);
     this.widgets = new Widgets(state, this.generation);
     this.views = new ViewPicker(state, telegram, async binding => !!await this.settingsThread(binding), async () => {
       for (const binding of this.state.bindings()) {
@@ -1175,7 +1176,8 @@ export class Bridge {
     // Never replay a completed/uncertain native write automatically; require a fresh last answer.
     prompt.index = missing >= 0 ? missing : prompt.questions.length - 1;
   }
-  private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[], requireIdle = false): Promise<void> {
+  private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[], requireIdle = false,
+    expected?: { signature: string; anchorTurnId: string | null }): Promise<void> {
     const current = (): boolean => !this.closed && !this.state.resettingTopic(binding.topicId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
       !this.config.ignoredThreadIds?.includes(binding.threadId);
@@ -1192,6 +1194,14 @@ export class Bridge {
       await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt),
         taskTitle(array(turn?.items)) ?? taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
     } else if (status === 'idle') {
+      if (expected) {
+        const turns = await this.codex.turns(binding.threadId);
+        const settings = this.codex.permissionState?.(binding.threadId);
+        if (!current() || !settings || permissionSignature(settings) !== expected.signature ||
+            (string(turns[0]?.id) || null) !== expected.anchorTurnId || turns.some(turn => turn.status === 'inProgress')) {
+          throw new RpcError('The root turn or permissions changed before dispatch. No replacement instruction was sent.', false);
+        }
+      }
       await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
         requireIdle ? binding.taskName || binding.sessionName || 'Agent handoff' :
           taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));

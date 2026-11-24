@@ -62,6 +62,7 @@ export interface AgentRestartJob {
   agents: { threadId: string; cwd: string; name: string }[]; anchorTurnId: string | null;
   status: 'queued' | 'waiting' | 'dispatching' | 'sent' | 'uncertain' | 'failed' | 'dismissed';
   at: number; retryAt?: number;
+  interrupted?: boolean;
 }
 
 export class State {
