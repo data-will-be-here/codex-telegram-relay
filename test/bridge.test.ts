@@ -271,6 +271,57 @@ test('busy input steers the expected active turn; uncertain steering never creat
   } finally { f.close(); }
 });
 
+test('an accepted question gets one eyes reaction on the original message and still receives the model reply', async () => {
+  const f = await fixture();
+  try {
+    f.codex.sessions[0]!.status = 'active';
+    f.codex.histories.set('thread-a', [{ id: 'running', status: 'inProgress' }]);
+    const question = message(1, 101, 'какой прогресс?');
+    object(question.message).message_id = 397;
+    await f.bridge.update(question);
+    await f.bridge.update(question);
+    await f.drain();
+    assert.deepEqual(f.codex.writes, [{ method: 'steer', params: { threadId: 'thread-a', turnId: 'running', text: 'какой прогресс?' } }]);
+    assert.deepEqual(f.telegram.calls.filter(call => call.method === 'setMessageReaction'), [{
+      method: 'setMessageReaction', params: { chat_id: 42, message_id: 397, reaction: [{ type: 'emoji', emoji: '👀' }] },
+    }]);
+    assert.equal(f.telegram.sent().length, 0);
+
+    await f.bridge.notification('item/completed', { threadId: 'thread-a', turnId: 'running', item: { id: 'progress', type: 'agentMessage', phase: 'commentary', text: 'Tests passed. Reviewing the results.' } });
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 1);
+    assert.equal(messageBody(f.telegram.sent()[0]!), 'Tests passed. Reviewing the results.');
+  } finally { f.close(); }
+});
+
+test('a rejected reaction leaves accepted input successful and failed steering receives no reaction', async () => {
+  const f = await fixture();
+  try {
+    f.codex.sessions[0]!.status = 'active';
+    f.codex.histories.set('thread-a', [{ id: 'running', status: 'inProgress' }]);
+    f.codex.failSteer = true;
+    await assert.rejects(f.bridge.update(message(1, 101, 'What is the progress?')));
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 1);
+    assert.match(messageBody(f.telegram.sent()[0]!), /Delivery could not be confirmed/u);
+    assert.equal(f.telegram.calls.some(call => call.method === 'setMessageReaction'), false);
+
+    f.codex.sessions[0]!.status = 'idle';
+    const call = f.telegram.call.bind(f.telegram);
+    f.telegram.call = async (method, params) => {
+      const result = await call(method, params);
+      if (method === 'setMessageReaction') throw new Error('Reaction unavailable');
+      return result;
+    };
+    await f.bridge.update(message(2, 101, 'Continue the work.'));
+    await f.bridge.update(message(3, 101, '/status'));
+    await f.drain();
+    assert.equal(f.telegram.sent().length, 2);
+    assert.deepEqual(f.telegram.calls.filter(call => call.method === 'setMessageReaction').map(call => call.params.message_id), [2]);
+    assert.deepEqual(f.codex.writes.map(w => w.method), ['steer', 'start']);
+  } finally { f.close(); }
+});
+
 test('commentary is suppressed and final delivery is deduplicated across native event/catch-up', async () => {
   const f = await fixture();
   try {

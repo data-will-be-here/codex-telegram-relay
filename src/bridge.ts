@@ -737,6 +737,7 @@ export class Bridge {
     }
     const topic = integer(message.message_thread_id) ?? null;
     if (!this.state.admit(id, topic)) { this.state.advance(id); return; }
+    let acceptedInput = false;
     try {
       if (Object.keys(callback).length && string(callback.data).startsWith('tr:')) {
         await this.topicRenames.callback(callback, message, topic); this.state.finish(id, 'done'); return;
@@ -774,7 +775,7 @@ export class Bridge {
         this.state.finish(id, 'done'); return;
       }
       if (Object.keys(callback).length) await this.callback(callback, message, topic, id);
-      else await this.message(message, topic, id);
+      else acceptedInput = await this.message(message, topic, id) === true;
       this.state.finish(id, 'done');
     } catch (error) {
       if (error instanceof AttachmentError) { this.state.finish(id, 'rejected'); this.notice(topic, error.message); return; }
@@ -783,12 +784,23 @@ export class Bridge {
       this.notice(topic, '⚠️ Delivery could not be confirmed. Check the terminal before sending the same instruction again.');
       throw error;
     } finally { this.state.advance(id); }
+    if (acceptedInput) await this.reactToInput(message);
   }
 
-  private async message(message: Json, topicId: number | null, inputId: number): Promise<void> {
+  private async reactToInput(message: Json): Promise<void> {
+    const messageId = integer(message.message_id);
+    if (messageId === undefined || messageId < 1) return;
+    try {
+      await this.telegram.call('setMessageReaction', {
+        chat_id: this.config.ownerId, message_id: messageId, reaction: [{ type: 'emoji', emoji: '👀' }],
+      });
+    } catch { /* Reaction availability has no effect on accepted input. */ }
+  }
+
+  private async message(message: Json, topicId: number | null, inputId: number): Promise<boolean | void> {
     if (await this.topicRenames.message(message, topicId)) return;
     if (['photo', 'document', 'voice', 'audio', 'video', 'video_note', 'animation'].some(key => message[key])) {
-      await this.mediaMessage(message, topicId, inputId); return;
+      return this.mediaMessage(message, topicId, inputId);
     }
     const text = string(message.text).trim();
     if (!text) return;
@@ -917,12 +929,13 @@ export class Bridge {
       const focused = question.filter(p => p.freeText);
       const target = focused.length === 1 ? focused[0] : question.length === 1 ? question[0] : undefined;
       if (!target) { this.notice(topicId, 'Several questions are pending. Choose “Type an answer” on the question you want to answer.'); return; }
-      await this.answer(target, text, inputId); return;
+      return this.answer(target, text, inputId);
     }
     if (text.startsWith('/')) { this.notice(topicId, 'Unknown command. Use /help; /model changes this session’s model settings.'); return; }
     const prompt = text;
     if (!prompt || prompt.length > 16_000) { this.notice(topicId, 'Send a text instruction of at most 16000 characters.'); return; }
     await this.sendInput(binding, inputId, prompt);
+    return true;
   }
 
   private async answerCallback(callback: Json, message: Json, topicId: number | null): Promise<void> {
@@ -998,7 +1011,7 @@ export class Bridge {
     } catch (error) { this.notice(topicId, string(object(error).message) || 'Could not recover the topic.'); }
   }
 
-  private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<void> {
+  private async mediaMessage(message: Json, topicId: number | null, inputId: number): Promise<boolean> {
     const binding = topicId === null ? undefined : this.state.topic(topicId);
     if (!binding) throw new AttachmentError('Send attachments in an attached project topic. No instruction was sent.');
     if (!this.attached.has(binding.threadId)) throw new AttachmentError(`${await this.connectionStatus(binding)} No attachment was downloaded or instruction sent.`);
@@ -1018,10 +1031,10 @@ export class Bridge {
     if (!inputs.length) throw new AttachmentError('The attachment could not be identified. No instruction was sent.');
     if (question) {
       const text = [caption, ...inputs.map(i => i.type === 'text' ? i.text : `Image file available for inspection: ${JSON.stringify(i.path)}`)].filter(Boolean).join('\n\n');
-      await this.answer(question, text, inputId, inputs.filter(i => i.type === 'localImage'));
-    } else {
-      await this.sendInput(binding, inputId, [{ type: 'text', text: caption || 'Please inspect the attached file.' }, ...inputs]);
+      return this.answer(question, text, inputId, inputs.filter(i => i.type === 'localImage'));
     }
+    await this.sendInput(binding, inputId, [{ type: 'text', text: caption || 'Please inspect the attached file.' }, ...inputs]);
+    return true;
   }
 
   private async callback(callback: Json, _message: Json, topicId: number | null, inputId: number): Promise<void> {
@@ -1069,10 +1082,10 @@ export class Bridge {
     this.screens.enqueue(this.promptKey(prompt) + (repeat ? '/' + randomUUID() : ''), prompt.binding.topicId, text, { inline_keyboard: rows },
       { kind: 'question', title: (string(question.header) || 'Codex needs your answer') + progress, widgets: prompt.widgets });
   }
-  private async answer(prompt: Prompt, text: string, inputId: number, images: UserInput[] = []): Promise<void> {
-    if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); return; }
-    if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); this.notice(prompt.binding.topicId, 'This question is closed or cannot currently be verified. Check Codex before answering again.'); return; }
-    if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) return;
+  private async answer(prompt: Prompt, text: string, inputId: number, images: UserInput[] = []): Promise<boolean> {
+    if (!await this.stillAllowed(prompt.binding)) { await this.clearPrompt(prompt); return false; }
+    if (!await this.asyncStillPending(prompt)) { await this.clearPrompt(prompt); this.notice(prompt.binding.topicId, 'This question is closed or cannot currently be verified. Check Codex before answering again.'); return false; }
+    if (this.prompts.get(prompt.token) !== prompt || !this.pending(prompt)) return false;
     const question = prompt.questions[prompt.index]!;
     prompt.answers[string(question.id)] = { answers: [text] };
     const saved = this.progressIdentity(prompt);
@@ -1087,7 +1100,7 @@ export class Bridge {
     } else {
       if (prompt.asyncCallId) {
         // Host async tools have no pending app-server RPC. Deliver a normal, explicit user answer.
-        if (!this.state.beginAsyncAnswer(prompt.binding.threadId, prompt.asyncCallId)) return;
+        if (!this.state.beginAsyncAnswer(prompt.binding.threadId, prompt.asyncCallId)) return false;
         const text = prompt.questions.map(q => `Question: ${string(q.question)}\nAnswer: ${prompt.answers[string(q.id)]!.answers.join(', ')}`).join('\n\n');
         try {
           await this.sendInput(prompt.binding, inputId, images.length ? [{ type: 'text', text }, ...images] : text);
@@ -1108,6 +1121,7 @@ export class Bridge {
         if (saved) this.state.clearQuestionAnswers(saved.key);
       }
     }
+    return true;
   }
   private pending(prompt: Prompt): boolean {
     if (this.state.turnStop(prompt.binding.threadId, string(prompt.request.params.turnId))?.status === 'completed') return false;

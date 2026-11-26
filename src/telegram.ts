@@ -51,11 +51,13 @@ export class TelegramClient implements Telegram {
   }
   async call(method: string, params: Json = {}): Promise<unknown> {
     if (!/^[A-Za-z]+$/u.test(method)) throw new Error('Invalid Telegram method.');
+    const timeout = method === 'setMessageReaction' ? 2000 : method === 'getUpdates' ? 35_000 :
+      method.endsWith('MessageDraft') ? 3000 : /^(?:get|set)MyCommands$/u.test(method) ? 5000 : 15_000;
     let responseReceived = false;
     try {
       const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
-        signal: AbortSignal.timeout(method === 'getUpdates' ? 35_000 : method.endsWith('MessageDraft') ? 3000 : /^(?:get|set)MyCommands$/u.test(method) ? 5000 : 15_000), redirect: 'error',
+        signal: AbortSignal.timeout(timeout), redirect: 'error',
       });
       responseReceived = true;
       const body = (await boundedBody(response, 2 * 1024 * 1024)).toString('utf8');
