@@ -311,7 +311,7 @@ Opening, paging and cancelling never change settings. Buttons expire after ten m
 
 ### Closing a saved session
 
-Send `/close` in the bot chat and choose a saved session. Codex unloads the selected session and archives its history. The Telegram topic and its messages stay available. Active turns, pending responses, and ongoing deliveries block closing. To use the same topic again, restore the archived conversation in Codex.
+Send `/close` in the bot chat and choose a saved session. The menu lists sessions from oldest to newest and removes each closed session's button so you can continue from the same message. Codex unloads the selected session and archives its history. The Telegram topic and its messages stay available. Active turns, pending responses, and ongoing deliveries block closing. To use the same topic again, restore the archived conversation in Codex.
 
 ## Fresh conversation in the current topic: /clear (v0.1.20)
 

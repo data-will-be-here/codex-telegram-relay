@@ -229,13 +229,15 @@ export class Bridge {
   }
 
   private async sessionIdleBlocker(binding: Binding, command: '/clear' | '/close'): Promise<string | undefined> {
+    const retry = command === '/close' ? 'select the session again' : 'retry /clear';
+    const retrySentence = retry[0]!.toUpperCase() + retry.slice(1);
     const routed = (): boolean => !this.closed && !this.state.retiredSession(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
       !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId) &&
       (command === '/close' ? this.closeEligible(binding) : !this.closingSessions.has(binding.threadId));
     const blocker = (): string | undefined => !routed() ? 'The saved topic or directory is no longer eligible.' :
-      this.state.sessionDeliveryBusy(binding.threadId) ? `Messages or files are still being delivered. Wait for delivery and retry ${command}.` :
-      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? `Answer the pending question or approval, then retry ${command}.` : undefined;
+      this.state.sessionDeliveryBusy(binding.threadId) ? `Messages or files are still being delivered. Wait for delivery and ${retry}.` :
+      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? `Answer the pending question or approval, then ${retry}.` : undefined;
     const initial = blocker(); if (initial) return initial;
     const thread = await this.codex.read(binding.threadId);
     if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true || thread.canAcceptDirectInput === false ||
@@ -245,23 +247,23 @@ export class Bridge {
       const saved = await this.codex.nonArchivedThread?.(binding.threadId);
       if (!saved || saved.id !== binding.threadId || saved.cwd !== binding.cwd || saved.parentThreadId || saved.ephemeral === true || saved.canAcceptDirectInput === false ||
           !['cli', 'vscode', 'appServer'].includes(string(saved.source))) return 'The saved conversation is archived or unavailable.';
-      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return `The Codex task is still active. Finish it and retry ${command}.`;
-    } else if (status !== 'idle' && !(command === '/close' && status === 'systemError')) return `The Codex task is still active. Finish it and retry ${command}.`;
+      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return `The Codex task is still active. Finish it and ${retry}.`;
+    } else if (status !== 'idle' && !(command === '/close' && status === 'systemError')) return `The Codex task is still active. Finish it and ${retry}.`;
     const children = [...this.agentSubscriptions].filter(([, rootId]) => rootId === binding.threadId).map(([id]) => id);
     for (const id of children) {
       const child = await this.codex.read(id, 1000);
       const changed = blocker(); if (changed) return changed;
-      if (this.agentSubscriptions.get(id) !== binding.threadId) return `Connected subagents changed during the check. Retry ${command}.`;
-      if (child.id !== id) return `A connected subagent could not be verified. Reconnect Codex before retrying ${command}.`;
-      if (!['idle', 'notLoaded'].includes(string(object(child.status).type))) return `A connected subagent is still active. Finish its work in Codex before retrying ${command}.`;
+      if (this.agentSubscriptions.get(id) !== binding.threadId) return `Connected subagents changed during the check. ${retrySentence}.`;
+      if (child.id !== id) return `A connected subagent could not be verified. Reconnect Codex, then ${retry}.`;
+      if (!['idle', 'notLoaded'].includes(string(object(child.status).type))) return `A connected subagent is still active. Finish its work in Codex, then ${retry}.`;
     }
     if ([...this.agentSubscriptions].some(([id, rootId]) => rootId === binding.threadId && !children.includes(id)))
-      return `Connected subagents changed during the check. Retry ${command}.`;
+      return `Connected subagents changed during the check. ${retrySentence}.`;
     const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
     const turns = await this.codex.turns(binding.threadId);
     const changed = blocker(); if (changed) return changed;
-    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return `The conversation changed during the check. Retry ${command}.`;
-    if (turns.some(turn => turn.status === 'inProgress')) return `The Codex task is still active. Finish it and retry ${command}.`;
+    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return `The conversation changed during the check. ${retrySentence}.`;
+    if (turns.some(turn => turn.status === 'inProgress')) return `The Codex task is still active. Finish it and ${retry}.`;
     if (status === 'systemError' && turns[0]?.status !== 'failed') return 'The previous failed turn could not be verified.';
     const latest = turns.find(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
     if (!latest && baseline && baseline !== '-') return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
@@ -271,12 +273,12 @@ export class Bridge {
       const missed = turns.slice(0, index).filter(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
       for (const turn of missed.reverse()) await this.complete(binding, turn, { baseline, advance: false });
       if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
-      return `A completed reply is being recovered. Wait for delivery and retry ${command}.`;
+      return `A completed reply is being recovered. Wait for delivery and ${retry}.`;
     }
     if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId)))
-      .some(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed')) return `Answer the pending question in Codex, then retry ${command}.`;
-    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? `The conversation changed during the check. Retry ${command}.` :
-      this.state.reply(binding.threadId) ? `A submitted instruction is still awaiting its result. Wait and retry ${command}.` : undefined);
+      .some(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed')) return `Answer the pending question in Codex, then ${retry}.`;
+    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? `The conversation changed during the check. ${retrySentence}.` :
+      this.state.reply(binding.threadId) ? `A submitted instruction is still awaiting its result. Wait and ${retry}.` : undefined);
   }
 
   private closeEligible(binding: Binding): boolean {
@@ -303,26 +305,26 @@ export class Bridge {
       const saved = await this.codex.nonArchivedThread(id);
       if (!saved && !(await this.codex.loaded()).includes(id)) return closed();
       if (!saved || saved.id !== id || saved.cwd !== binding.cwd) return `Could not verify the saved conversation for ${label}.`;
-      if (this.state.agentRestarts().some(job => job.binding.threadId === id)) return `${label} has a pending agent operation. Wait and retry /close.`;
+      if (this.state.agentRestarts().some(job => job.binding.threadId === id)) return `${label} has a pending agent operation. Select it again when the operation ends.`;
       const blocker = await this.sessionIdleBlocker(binding, '/close');
       if (blocker) return `Cannot close ${label.toLowerCase()} now. ${blocker}`;
-      if (await this.hasWorkingDescendant(id, await this.codex.loaded())) return `${label} has a working subagent. Wait and retry /close.`;
+      if (await this.hasWorkingDescendant(id, await this.codex.loaded())) return `${label} has a working subagent. Select it again when the subagent finishes.`;
       const latest = await this.codex.read(id, 3000);
       if (!this.closeEligible(binding) || this.state.sessionDeliveryBusy(id) || this.state.reply(id) ||
           latest.id !== id || latest.cwd !== binding.cwd || latest.parentThreadId || latest.ephemeral === true ||
           latest.canAcceptDirectInput === false || !['idle', 'notLoaded', 'systemError'].includes(string(object(latest.status).type)) ||
           [...this.prompts.values()].some(prompt => prompt.binding.threadId === id && this.pending(prompt))) {
-        return `${label} changed or has active work. Check Codex and retry /close.`;
+        return `${label} changed or has active work. Check Codex and try again.`;
       }
       dispatched = true;
       try { await this.codex.archive(id); }
       catch (error) {
-        if (error instanceof RpcError && !error.uncertain) return `Codex rejected closing ${label.toLowerCase()}. Check it locally and retry /close.`;
+        if (error instanceof RpcError && !error.uncertain) return `Codex rejected closing ${label.toLowerCase()}. Check it locally and try again.`;
         // A lost response may follow successful archival. Verify native state without repeating the operation.
       }
       if (!(await this.codex.loaded()).includes(id) && !await this.codex.nonArchivedThread(id)) return closed();
     } catch {
-      if (!dispatched) return `Could not verify ${label.toLowerCase()} in Codex. Check it locally and retry /close.`;
+      if (!dispatched) return `Could not verify ${label.toLowerCase()} in Codex. Check it locally and try again.`;
     } finally { this.closingSessions.delete(id); }
     return `Closing ${label.toLowerCase()} could not be confirmed. Check its status in Codex before trying again.`;
   }
