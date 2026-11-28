@@ -10,10 +10,10 @@ import { CodexClient } from '../src/codex.js';
 import { findCodex, type Config } from '../src/config.js';
 import { Outbox } from '../src/telegram.js';
 import { State } from '../src/state.js';
-import { object, type Json } from '../src/types.js';
+import { array, object, string, type Json } from '../src/types.js';
 import { FakeTelegram, message, temporary } from './helpers.js';
 
-test('native /new: empty workspace-write thread persists across app-server restart without a model turn', {
+test('native /new and /close: a restored empty thread closes through Telegram and stays archived', {
   skip: process.env.CODEX_RELAY_NATIVE_NEW !== '1', timeout: 60_000,
 }, async () => {
   const temp = temporary(); const home = join(temp.dir, 'codex');
@@ -72,10 +72,24 @@ test('native /new: empty workspace-write thread persists across app-server resta
     assert.deepEqual(await native.turns(saved.threadId!), []);
     assert.equal((await native.read(saved.threadId!)).id, saved.threadId);
     assert.equal(records.filter(method => method === 'thread/start').length, 1);
-    await rpc('thread/archive', { threadId: saved.threadId });
-    await delay(50);
+    assert.ok((await native.loaded()).includes(saved.threadId!), 'the target must be live before the click');
+    const other = string((await native.createThread(project, 'close-qualification-control')).id);
+    assert.ok(other);
+    await bridge.update(message(3, saved.targetTopic!, '/close'));
+    while (await outbox.flushOne()) { /* Deliver close picker. */ }
+    const menu = telegram.sent().at(-1)!;
+    const selection = string(object(array(array(object(menu.reply_markup).inline_keyboard)[0])[0]).callback_data);
+    assert.match(selection, /^cl:/u);
+    await bridge.update({ update_id: 4, callback_query: { id: '4', from: { id: 42 }, data: selection, message: {
+      message_id: telegram.message, chat: { id: 42, type: 'private' }, message_thread_id: saved.targetTopic } } });
+    assert.equal(state.archivedSession(saved.threadId!), true);
+    assert.equal(state.binding(saved.threadId!)?.topicId, saved.targetTopic);
+    assert.ok(!(await native.loaded()).includes(saved.threadId!), 'the click unloads the native thread immediately');
+    assert.ok((await native.loaded()).includes(other), 'the click leaves other threads in the same daemon open');
     assert.equal(await native.nonArchivedThread(saved.threadId!), undefined);
-    bridge.close(); bridge = new Bridge(config, state, native, telegram);
+    assert.equal(records.filter(method => method === 'thread/archive').length, 1);
+    bridge.close(); await stop(); await boot();
+    bridge = new Bridge(config, state, native, telegram);
     const resumes = records.filter(method => method === 'thread/resume').length;
     await bridge.discover();
     assert.equal(records.filter(method => method === 'thread/resume').length, resumes);

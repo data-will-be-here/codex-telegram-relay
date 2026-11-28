@@ -111,6 +111,7 @@ export class State {
         CREATE TABLE IF NOT EXISTS topic_operations(threadId TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, attempt TEXT NOT NULL, status TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS new_sessions(id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS retired_bindings(threadId TEXT PRIMARY KEY, binding TEXT NOT NULL, replacementId TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS archived_bindings(threadId TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS subscription_cleanup(threadId TEXT PRIMARY KEY, replacementId TEXT NOT NULL, retryAt INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS turn_stops(threadId TEXT NOT NULL, turnId TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(threadId,turnId));
         CREATE TABLE IF NOT EXISTS agent_restarts(id TEXT PRIMARY KEY,threadId TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
@@ -337,6 +338,10 @@ export class State {
   }
   workspaceLabel(cwd?: string | null): string | undefined { return cwd && this.ownsScratch(cwd) ? 'No project' : undefined; }
   retiredSession(threadId: string): boolean { return !!this.db.prepare('SELECT 1 FROM retired_bindings WHERE threadId=?').get(threadId); }
+  archivedSession(threadId: string): boolean { return !!this.db.prepare('SELECT 1 FROM archived_bindings WHERE threadId=?').get(threadId); }
+  setSessionArchived(threadId: string, archived: boolean): void {
+    this.db.prepare(archived ? 'INSERT OR IGNORE INTO archived_bindings VALUES(?)' : 'DELETE FROM archived_bindings WHERE threadId=?').run(threadId);
+  }
   resettingTopic(topicId: number): boolean {
     return !!this.db.prepare("SELECT 1 FROM new_sessions WHERE json_extract(payload,'$.reset.topicId')=? AND status NOT IN ('ready','failed','cancelled') LIMIT 1").get(topicId);
   }

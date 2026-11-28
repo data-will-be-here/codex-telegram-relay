@@ -16,6 +16,7 @@ import { Widgets, ViewPicker } from './widgets.js';
 import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
+import { SessionClose } from './session-close.js';
 import { AgentRestart } from './agent-restart.js';
 import { permissionSignature } from './permission-settings.js';
 import { type PermissionAgent } from './types.js';
@@ -69,6 +70,9 @@ export class Bridge {
   private views: ViewPicker;
   private closed = false;
   private newSessions: NewSessions;
+  private sessionClose: SessionClose;
+  private closingSessions = new Set<string>();
+  private connectingSessions = new Set<string>();
   private agentRestart: AgentRestart;
   private pendingBind: { threadId: string; attempt: string; expires: number } | undefined;
   private nameVersions = new Map<string, number>();
@@ -79,7 +83,10 @@ export class Bridge {
     this.topics = new Topics(config, state, telegram);
     this.topicRenames = new TopicRenames(config, state, this.topics, telegram, () => !this.closed);
     this.screens = new Screens(state, telegram, config);
-    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.clearBlocker(binding), this.screens);
+    this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.sessionIdleBlocker(binding, '/clear'), this.screens);
+    this.sessionClose = new SessionClose(state, telegram, config.ownerId,
+      () => state.bindings().filter(binding => this.closeEligible(binding) && !state.archivedSession(binding.threadId)),
+      binding => this.archiveSession(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
     this.agentRestart = new AgentRestart(state, codex, binding => this.settingsThread(binding), binding => this.permissionAgents(binding),
       async (binding, inputId, text, expected) => { await this.catchUp(binding); await this.sendInput(binding, inputId, text, true, expected); },
@@ -149,20 +156,24 @@ export class Bridge {
       for (const [childId, rootId] of this.agentSubscriptions) if (rootId === id) this.state.enqueueUnsubscribe(childId, binding.threadId);
       this.attached.delete(id); this.drafts.finish(id); await this.retireTopicPrompts(id);
     }
-    if (!this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
+    if (this.state.archivedSession(binding.threadId) && !await this.codex.nonArchivedThread?.(binding.threadId)) throw new RpcError('The saved session is archived.', false);
+    if (this.closingSessions.has(binding.threadId) || !this.allowed(binding.cwd, binding.threadId) || this.config.ignoredThreadIds?.includes(binding.threadId)) throw new RpcError('New session is no longer eligible.', false);
     if (binding.lastTurn === null) this.state.baseline(binding.threadId, '-');
     this.attached.add(binding.threadId);
+    this.connectingSessions.add(binding.threadId);
     try {
       const thread = await this.codex.attach(binding.threadId);
       if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true ||
           thread.canAcceptDirectInput === false || !['cli', 'vscode', 'appServer'].includes(string(thread.source))) throw new Error('Created session attachment returned incompatible metadata.');
       this.state.sessionName(binding.threadId, string(thread.name));
+      if (this.state.archivedSession(binding.threadId)) this.state.setSessionArchived(binding.threadId, false);
     }
     catch (error) { this.attached.delete(binding.threadId); throw error; }
+    finally { this.connectingSessions.delete(binding.threadId); }
   }
 
   private async settingsThread(binding: Binding): Promise<Json | undefined> {
-    const eligible = (): boolean => !this.closed && this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
+    const eligible = (): boolean => !this.closed && !this.closingSessions.has(binding.threadId) && this.attached.has(binding.threadId) && !this.config.ignoredThreadIds?.includes(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd && !this.state.topicOperation(binding.threadId) && !this.state.resettingTopic(binding.topicId);
     if (!eligible()) return;
     const thread = await this.codex.read(binding.threadId, 1000);
@@ -217,13 +228,14 @@ export class Bridge {
     }
   }
 
-  private async clearBlocker(binding: Binding): Promise<string | undefined> {
+  private async sessionIdleBlocker(binding: Binding, command: '/clear' | '/close'): Promise<string | undefined> {
     const routed = (): boolean => !this.closed && !this.state.retiredSession(binding.threadId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
-      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId);
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && !this.state.topicOperation(binding.threadId) && this.allowed(binding.cwd, binding.threadId) &&
+      (command === '/close' ? this.closeEligible(binding) : !this.closingSessions.has(binding.threadId));
     const blocker = (): string | undefined => !routed() ? 'The saved topic or directory is no longer eligible.' :
-      this.state.sessionDeliveryBusy(binding.threadId) ? 'Messages or files are still being delivered. Wait for delivery and retry /clear.' :
-      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? 'Answer the pending question or approval, then retry /clear.' : undefined;
+      this.state.sessionDeliveryBusy(binding.threadId) ? `Messages or files are still being delivered. Wait for delivery and retry ${command}.` :
+      [...this.prompts.values()].some(prompt => prompt.binding.threadId === binding.threadId && this.pending(prompt)) ? `Answer the pending question or approval, then retry ${command}.` : undefined;
     const initial = blocker(); if (initial) return initial;
     const thread = await this.codex.read(binding.threadId);
     if (thread.id !== binding.threadId || thread.cwd !== binding.cwd || thread.parentThreadId || thread.ephemeral === true || thread.canAcceptDirectInput === false ||
@@ -233,23 +245,24 @@ export class Bridge {
       const saved = await this.codex.nonArchivedThread?.(binding.threadId);
       if (!saved || saved.id !== binding.threadId || saved.cwd !== binding.cwd || saved.parentThreadId || saved.ephemeral === true || saved.canAcceptDirectInput === false ||
           !['cli', 'vscode', 'appServer'].includes(string(saved.source))) return 'The saved conversation is archived or unavailable.';
-      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return 'The Codex task is still active. Finish it and retry /clear.';
-    } else if (status !== 'idle') return 'The Codex task is still active. Finish it and retry /clear.';
+      if (!['idle', 'notLoaded'].includes(string(object(saved.status).type))) return `The Codex task is still active. Finish it and retry ${command}.`;
+    } else if (status !== 'idle' && !(command === '/close' && status === 'systemError')) return `The Codex task is still active. Finish it and retry ${command}.`;
     const children = [...this.agentSubscriptions].filter(([, rootId]) => rootId === binding.threadId).map(([id]) => id);
     for (const id of children) {
       const child = await this.codex.read(id, 1000);
       const changed = blocker(); if (changed) return changed;
-      if (this.agentSubscriptions.get(id) !== binding.threadId) return 'Connected subagents changed during the check. Retry /clear.';
-      if (child.id !== id) return 'A connected subagent could not be verified. Reconnect Codex before retrying /clear.';
-      if (!['idle', 'notLoaded'].includes(string(object(child.status).type))) return 'A connected subagent is still active. Finish its work in Codex before retrying /clear.';
+      if (this.agentSubscriptions.get(id) !== binding.threadId) return `Connected subagents changed during the check. Retry ${command}.`;
+      if (child.id !== id) return `A connected subagent could not be verified. Reconnect Codex before retrying ${command}.`;
+      if (!['idle', 'notLoaded'].includes(string(object(child.status).type))) return `A connected subagent is still active. Finish its work in Codex before retrying ${command}.`;
     }
     if ([...this.agentSubscriptions].some(([id, rootId]) => rootId === binding.threadId && !children.includes(id)))
-      return 'Connected subagents changed during the check. Retry /clear.';
+      return `Connected subagents changed during the check. Retry ${command}.`;
     const baseline = this.state.binding(binding.threadId)?.lastTurn ?? null;
     const turns = await this.codex.turns(binding.threadId);
     const changed = blocker(); if (changed) return changed;
-    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return 'The conversation changed during the check. Retry /clear.';
-    if (turns.some(turn => turn.status === 'inProgress')) return 'The Codex task is still active. Finish it and retry /clear.';
+    if (this.state.binding(binding.threadId)?.lastTurn !== baseline) return `The conversation changed during the check. Retry ${command}.`;
+    if (turns.some(turn => turn.status === 'inProgress')) return `The Codex task is still active. Finish it and retry ${command}.`;
+    if (status === 'systemError' && turns[0]?.status !== 'failed') return 'The previous failed turn could not be verified.';
     const latest = turns.find(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
     if (!latest && baseline && baseline !== '-') return 'Recent conversation history could not be verified. Retry after reconnecting Codex.';
     if (latest && latest.id !== this.state.binding(binding.threadId)?.lastTurn) {
@@ -258,12 +271,88 @@ export class Bridge {
       const missed = turns.slice(0, index).filter(turn => ['completed', 'failed', 'interrupted'].includes(string(turn.status)));
       for (const turn of missed.reverse()) await this.complete(binding, turn, { baseline, advance: false });
       if (routed()) this.state.baselineIfCurrent(binding.threadId, string(latest.id), baseline);
-      return 'A completed reply is being recovered. Wait for delivery and retry /clear.';
+      return `A completed reply is being recovered. Wait for delivery and retry ${command}.`;
     }
     if (this.codex.asyncQuestions && (await this.codex.asyncQuestions(binding.threadId, this.state.hostSince(binding.threadId), this.state.asyncAnswerIds(binding.threadId)))
-      .some(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed')) return 'Answer the pending question in Codex, then retry /clear.';
-    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? 'The conversation changed during the check. Retry /clear.' :
-      this.state.reply(binding.threadId) ? 'A submitted instruction is still awaiting its result. Wait and retry /clear.' : undefined);
+      .some(question => this.state.turnStop(binding.threadId, question.turnId)?.status !== 'completed')) return `Answer the pending question in Codex, then retry ${command}.`;
+    return blocker() ?? (this.state.binding(binding.threadId)?.lastTurn !== baseline ? `The conversation changed during the check. Retry ${command}.` :
+      this.state.reply(binding.threadId) ? `A submitted instruction is still awaiting its result. Wait and retry ${command}.` : undefined);
+  }
+
+  private closeEligible(binding: Binding): boolean {
+    const current = this.state.binding(binding.threadId);
+    return !this.closed && current?.topicId === binding.topicId && current.cwd === binding.cwd &&
+      !this.config.ignoredThreadIds?.includes(binding.threadId) && this.allowed(binding.cwd, binding.threadId) &&
+      !this.state.topicOperation(binding.threadId) && !this.state.resettingTopic(binding.topicId) && !this.connectingSessions.has(binding.threadId);
+  }
+
+  private async archiveSession(binding: Binding): Promise<string> {
+    const id = binding.threadId;
+    const label = `Session ${id.slice(0, 8)}`;
+    if (!this.codex.archive || !this.codex.nonArchivedThread || !this.codex.loaded) return 'This Codex connection does not support closing sessions.';
+    if (this.closingSessions.has(id) || !this.closeEligible(binding)) return `${label} is busy or its saved binding has changed. Send /close again.`;
+    this.closingSessions.add(id);
+    let dispatched = false;
+    const closed = (): string => {
+      this.state.setSessionArchived(id, true);
+      this.attached.delete(id); this.drafts.finish(id);
+      for (const [childId, rootId] of this.agentSubscriptions) if (rootId === id) this.agentSubscriptions.delete(childId);
+      return `${label} is closed and its Codex history is archived. The Telegram topic and its messages are preserved.`;
+    };
+    try {
+      const saved = await this.codex.nonArchivedThread(id);
+      if (!saved && !(await this.codex.loaded()).includes(id)) return closed();
+      if (!saved || saved.id !== id || saved.cwd !== binding.cwd) return `Could not verify the saved conversation for ${label}.`;
+      if (this.state.agentRestarts().some(job => job.binding.threadId === id)) return `${label} has a pending agent operation. Wait and retry /close.`;
+      const blocker = await this.sessionIdleBlocker(binding, '/close');
+      if (blocker) return `Cannot close ${label.toLowerCase()} now. ${blocker}`;
+      if (await this.hasWorkingDescendant(id, await this.codex.loaded())) return `${label} has a working subagent. Wait and retry /close.`;
+      const latest = await this.codex.read(id, 3000);
+      if (!this.closeEligible(binding) || this.state.sessionDeliveryBusy(id) || this.state.reply(id) ||
+          latest.id !== id || latest.cwd !== binding.cwd || latest.parentThreadId || latest.ephemeral === true ||
+          latest.canAcceptDirectInput === false || !['idle', 'notLoaded', 'systemError'].includes(string(object(latest.status).type)) ||
+          [...this.prompts.values()].some(prompt => prompt.binding.threadId === id && this.pending(prompt))) {
+        return `${label} changed or has active work. Check Codex and retry /close.`;
+      }
+      dispatched = true;
+      try { await this.codex.archive(id); }
+      catch (error) {
+        if (error instanceof RpcError && !error.uncertain) return `Codex rejected closing ${label.toLowerCase()}. Check it locally and retry /close.`;
+        // A lost response may follow successful archival. Verify native state without repeating the operation.
+      }
+      if (!(await this.codex.loaded()).includes(id) && !await this.codex.nonArchivedThread(id)) return closed();
+    } catch {
+      if (!dispatched) return `Could not verify ${label.toLowerCase()} in Codex. Check it locally and retry /close.`;
+    } finally { this.closingSessions.delete(id); }
+    return `Closing ${label.toLowerCase()} could not be confirmed. Check its status in Codex before trying again.`;
+  }
+
+  private async hasWorkingDescendant(rootId: string, loaded: string[]): Promise<boolean> {
+    if (loaded.length > 256) throw new Error('Too many loaded sessions to check subagents.');
+    const threads = new Map<string, Json>();
+    const children = loaded.filter(id => id !== rootId);
+    const read = async (id: string): Promise<Json> => {
+      const thread = threads.get(id) ?? await this.codex.read(id, 3000);
+      if (thread.id !== id) throw new Error('A native thread could not be verified.');
+      threads.set(id, thread);
+      return thread;
+    };
+    for (let index = 0; index < children.length; index += 8) {
+      await Promise.all(children.slice(index, index + 8).map(read));
+    }
+    for (const id of children) {
+      const thread = threads.get(id)!;
+      if (object(thread.status).type !== 'active') continue;
+      const seen = new Set([id]);
+      let parent = string(thread.parentThreadId);
+      while (parent) {
+        if (parent === rootId) return true;
+        if (seen.has(parent) || seen.size >= 16) throw new Error('A subagent hierarchy could not be verified.');
+        seen.add(parent);
+        parent = string((await read(parent)).parentThreadId);
+      }
+    }
+    return false;
   }
 
   /** Synchronous, bounded accumulation: token volume must not fill the control-event queue. */
@@ -341,21 +430,28 @@ export class Bridge {
     try {
       await this.topics.retryPendingTitles();
       const nameVersions = new Map(this.nameVersions);
-      const readSessions = () => this.codex.list(session => !this.state.retiredSession(session.id) && !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
+      const readSessions = () => this.codex.list(session => !this.state.retiredSession(session.id) && !this.closingSessions.has(session.id) &&
+        !this.config.ignoredThreadIds?.includes(session.id) && this.allowed(session.cwd, session.id));
       let sessions = await readSessions();
-      if (await this.newSessions.restore(sessions.map(session => session.id))) sessions = await readSessions();
+      if (await this.newSessions.restore(sessions.map(session => session.id), this.closingSessions)) sessions = await readSessions();
       const loaded = new Set(sessions.map(s => s.id));
       for (const id of this.nameVersions.keys()) if (!loaded.has(id)) this.nameVersions.delete(id);
-      for (const id of this.attached) if (!loaded.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
+      for (const id of this.attached) if (!loaded.has(id) && !this.closingSessions.has(id)) { this.attached.delete(id); this.drafts.finish(id); }
       for (const id of this.observedUnmaterialized) if (!loaded.has(id)) this.observedUnmaterialized.delete(id);
       for (const session of sessions) {
-        if (this.newSessions.busy(session.id, session.threadSource)) continue;
+        if (this.newSessions.busy(session.id, session.threadSource) || this.closingSessions.has(session.id)) continue;
         if (this.config.ignoredThreadIds?.includes(session.id) || !this.allowed(session.cwd, session.id)) { this.attached.delete(session.id); continue; }
         try {
+          if (this.state.archivedSession(session.id)) {
+            if (!await this.codex.nonArchivedThread?.(session.id) || this.closingSessions.has(session.id)) continue;
+            this.state.setSessionArchived(session.id, false);
+          }
           const previous = this.state.binding(session.id);
           // Check native readiness before creating/replacing a topic. Keep the binding before attach so replayed requests can route.
           const history = !this.attached.has(session.id) || this.state.topicOperation(session.id) ? await this.codex.turns(session.id) : undefined;
+          if (this.closingSessions.has(session.id) || this.state.archivedSession(session.id)) continue;
           let binding = await this.topics.ensure(session);
+          if (this.closingSessions.has(session.id) || this.state.archivedSession(session.id)) continue;
           if (!binding) { this.attached.delete(session.id); continue; }
           if ((this.nameVersions.get(session.id) ?? 0) === (nameVersions.get(session.id) ?? 0)) this.state.sessionName(session.id, session.name);
           binding = this.state.binding(session.id)!;
@@ -372,8 +468,11 @@ export class Bridge {
             binding = this.state.binding(session.id)!;
           }
           this.observedUnmaterialized.delete(session.id); // Baseline now preserves the first answer across attachment retries.
+          if (this.closingSessions.has(session.id) || this.state.archivedSession(session.id)) continue;
           this.attached.add(session.id);
-          await this.codex.attach(session.id);
+          this.connectingSessions.add(session.id);
+          try { await this.codex.attach(session.id); }
+          finally { this.connectingSessions.delete(session.id); }
           // Replayed requests identify what needs attention. Attachment itself is not a new prompt.
           await this.catchUp(binding);
           await this.syncAsyncQuestions(binding);
@@ -431,6 +530,8 @@ export class Bridge {
       try {
         route = await agentRoute(id, this.codex, this.config, root => this.attached.has(root) ? this.state.binding(root) : undefined, cwd => this.state.ownsScratch(cwd));
         if (!route) continue;
+        if (this.state.archivedSession(route.binding.threadId)) continue;
+        if (this.closingSessions.has(route.binding.threadId)) { eligible.add(id); continue; }
         if (eligible.size >= 128) {
           this.state.enqueue(`notice/subagent-limit/${this.generation}`, null, 'The relay reached its limit of 128 loaded subagents. Check Codex locally for additional approvals.');
           continue;
@@ -438,8 +539,11 @@ export class Bridge {
         eligible.add(id);
         if (this.agentSubscriptions.get(id) === route.binding.threadId) continue;
         await this.codex.turns(id);
+        if (this.closingSessions.has(route.binding.threadId) || this.state.archivedSession(route.binding.threadId)) continue;
         this.agentSubscriptions.set(id, route.binding.threadId);
-        await this.codex.attach(id); // Pending requests replay for this exact origin, not its root.
+        this.connectingSessions.add(route.binding.threadId);
+        try { await this.codex.attach(id); } // Pending requests replay for this exact origin, not its root.
+        finally { this.connectingSessions.delete(route.binding.threadId); }
       } catch (error) {
         eligible.delete(id);
         if (error instanceof RpcError && error.uncertain) throw error;
@@ -469,6 +573,11 @@ export class Bridge {
 
   async notification(method: string, params: Json): Promise<void> {
     if (method === 'thread/started') { this.newSessions.observeStarted(object(params.thread)); return; }
+    if (method === 'thread/unarchived') {
+      const id = string(params.threadId);
+      if (id && this.state.archivedSession(id)) this.state.setSessionArchived(id, false);
+      return;
+    }
     if (method === 'thread/name/updated') {
       const threadId = string(params.threadId);
       if (this.attached.has(threadId)) {
@@ -742,6 +851,9 @@ export class Bridge {
       if (Object.keys(callback).length && string(callback.data).startsWith('tr:')) {
         await this.topicRenames.callback(callback, message, topic); this.state.finish(id, 'done'); return;
       }
+      if (Object.keys(callback).length && string(callback.data).startsWith('cl:')) {
+        await this.sessionClose.callback(callback, message, topic); this.state.finish(id, 'done'); return;
+      }
       if (Object.keys(callback).length && string(callback.data).startsWith('recover:')) {
         await this.recoverTopic(callback, message, topic); this.state.finish(id, 'done'); return;
       }
@@ -815,6 +927,11 @@ export class Bridge {
       this.notice(topicId, commandHelp()); return;
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
+    if (/^\/close(?:\s|$)/u.test(text)) {
+      if (text === '/close') this.sessionClose.open(topicId);
+      else this.notice(topicId, 'Send /close without arguments and choose a session.');
+      return;
+    }
     if (/^\/stop(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
       if (text !== '/stop' || !binding) { this.notice(topicId, 'Send /stop without arguments inside an attached session topic.'); return; }
@@ -823,7 +940,9 @@ export class Bridge {
     if (/^\/clear(?:\s|$)/u.test(text)) {
       const binding = topicId === null ? undefined : this.state.topic(topicId);
       if (text !== '/clear' || !binding) { this.notice(topicId, 'Send /clear without arguments inside an attached session topic.'); return; }
-      await this.newSessions.clear(binding); return;
+      if (this.state.archivedSession(binding.threadId)) this.notice(topicId, 'This session is archived. Restore it in Codex before using /clear.');
+      else await this.newSessions.clear(binding);
+      return;
     }
     if (/^\/limits(?:\s|$)/u.test(text)) {
       if (text !== '/limits') { this.notice(topicId, 'Use /limits without arguments.'); return; }
@@ -832,7 +951,7 @@ export class Bridge {
       return;
     }
     if (text === '/sessions') {
-      this.screen(topicId, 'Sessions', this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
+      this.screen(topicId, 'Sessions', this.state.bindings().map(b => `${b.title}\n${b.threadId}\nSaved topic: #${b.topicId}${this.config.ignoredThreadIds?.includes(b.threadId) ? ' (ignored)' : this.state.archivedSession(b.threadId) ? ' (closed)' : this.attached.has(b.threadId) ? ' (connected)' : ' (not attached; saved binding only)'}`).join('\n\n') || 'No sessions attached. Open Codex in an eligible project and send its first prompt.'); return;
     }
     if (text === '/status') { const runtime = this.codex.runtimeInfo?.(); this.screens.enqueue(`attention/status/${randomUUID()}`, topicId, `Connected sessions: ${this.attached.size}\nRelay: ${runtime?.relayVersion ?? 'unknown'}\nProxy: ${runtime?.proxyVersion ?? 'unknown'}\nDaemon: ${runtime?.daemonVersion ?? 'unknown'}\nAPI: ${runtime?.compatibility ?? 'unknown'}\nSession discovery: ${this.config.sessionScope === 'all' ? 'automatic (all projects)' : 'selected projects'}\nView for all topics: ${this.state.viewMode() === 'widgets' ? 'Widgets · experimental' : 'Classic'}\nMessage mode: ${this.state.messageMode()}\nLive previews: ${this.state.streamingEnabled() ? 'on' : 'off'}\nPending final answers: ${this.state.pendingFinalCount()}\nUncertain deliveries: ${this.state.uncertainCount()}\nTopics awaiting recovery: ${this.state.topicOperations().length}\nPermissions: inherited from Codex; /permissions explicitly changes this session’s settings.\nChecked: ${new Date().toISOString()}`, null, { kind: 'info', title: 'Relay status' }, true); return; }
     if (/^\/stream(?:\s|$)/u.test(text)) {
@@ -961,6 +1080,7 @@ export class Bridge {
   private async connectionStatus(binding: Binding): Promise<string> {
     if (this.config.ignoredThreadIds?.includes(binding.threadId)) return 'This session is ignored. Re-enable it locally before reconnecting.';
     if (!this.allowed(binding.cwd, binding.threadId)) return 'This session is outside your selected projects. Select its project locally before reconnecting.';
+    if (this.state.archivedSession(binding.threadId)) return 'This session is closed and its history is archived. Restore it in Codex to use this topic again.';
     if (this.attached.has(binding.threadId)) return 'The native session is connected. Send instructions in its saved topic.';
     try {
       const sessions = await this.codex.list(session => session.id === binding.threadId);
@@ -1192,7 +1312,7 @@ export class Bridge {
   }
   private async sendInput(binding: Binding, inputId: number, prompt: string | UserInput[], requireIdle = false,
     expected?: { signature: string; anchorTurnId: string | null }): Promise<void> {
-    const current = (): boolean => !this.closed && !this.state.resettingTopic(binding.topicId) &&
+    const current = (): boolean => !this.closed && !this.closingSessions.has(binding.threadId) && !this.state.archivedSession(binding.threadId) && !this.state.resettingTopic(binding.topicId) &&
       this.state.binding(binding.threadId)?.topicId === binding.topicId && this.state.binding(binding.threadId)?.cwd === binding.cwd &&
       !this.config.ignoredThreadIds?.includes(binding.threadId);
     if (!current()) throw new RpcError('This topic is switching conversations. Wait for completion; no instruction was sent.', false);

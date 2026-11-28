@@ -566,17 +566,18 @@ export class NewSessions {
   }
 
   /** Load only recorded, non-archived relay-owned sessions, leaving ordinary discovery unchanged. */
-  async restore(loadedIds: readonly string[]): Promise<boolean> {
+  async restore(loadedIds: readonly string[], closing: ReadonlySet<string>): Promise<boolean> {
     if (!this.codex.nonArchivedThread || this.closed) return false;
     let changed = false;
     const loaded = new Set(loadedIds);
     for (const op of this.state.newSessions(['ready']).filter(item => item.threadId && !this.state.retiredSession(item.threadId) &&
-      !loaded.has(item.threadId) && (this.restoreAfter.get(item.threadId) ?? 0) <= Date.now()).slice(0, Math.max(0, 64 - loaded.size))) {
+      !loaded.has(item.threadId) && !closing.has(item.threadId) && (this.restoreAfter.get(item.threadId) ?? 0) <= Date.now()).slice(0, Math.max(0, 64 - loaded.size))) {
       if (!this.operationAllowed(op)) continue;
       this.restoreAfter.set(op.threadId!, Date.now() + 30_000);
       try {
+        const wasArchived = this.state.archivedSession(op.threadId!);
         const saved = await this.codex.nonArchivedThread(op.threadId!);
-        if (!saved) continue;
+        if (!saved || closing.has(op.threadId!) || (!wasArchived && this.state.archivedSession(op.threadId!))) continue;
         this.verify(saved, op);
         const binding = this.state.binding(op.threadId!);
         if (binding) { await this.connected(binding); changed = true; }

@@ -225,6 +225,10 @@ export class CodexClient extends EventEmitter implements Codex {
     if (!['unsubscribed', 'notSubscribed', 'notLoaded'].includes(String(result.status))) throw new RpcError('Native subscription cleanup could not be confirmed.', true);
     this.permissionSettings.delete(threadId); this.questionReaders.delete(threadId);
   }
+  async archive(threadId: string): Promise<void> {
+    await this.call('thread/archive', { threadId });
+    this.permissionSettings.delete(threadId); this.questionReaders.delete(threadId);
+  }
   async interrupt(threadId: string, turnId: string): Promise<void> { await this.call('turn/interrupt', { threadId, turnId }); }
   async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
   async nonArchivedThread(threadId: string): Promise<Json | undefined> {

@@ -55,6 +55,7 @@ export interface Codex {
   validateClearSettings?(threadId: string, snapshot: import('./clear-settings.js').ClearSettingsSnapshot): Promise<void>;
   clearSettingsCurrent?(threadId: string, snapshot: import('./clear-settings.js').ClearSettingsSnapshot): boolean;
   unsubscribe?(threadId: string): Promise<void>;
+  archive?(threadId: string): Promise<void>;
   interrupt?(threadId: string, turnId: string): Promise<unknown>;
   createThread?(cwd: string, marker: string, source?: 'clear', snapshot?: import('./clear-settings.js').ClearSettingsSnapshot): Promise<Json>;
   setThreadName?(threadId: string, name: string): Promise<void>;

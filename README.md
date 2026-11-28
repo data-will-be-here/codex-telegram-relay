@@ -238,6 +238,7 @@ Setup and each relay start synchronize the English command menu with `setMyComma
 | --- | --- |
 | Text in a project topic | Answer its pending question; otherwise steer the running turn or start a turn in the idle session |
 | `/sessions` | Show the saved session/topic bindings |
+| `/close` | Pick an idle session to unload and archive immediately |
 | `/new [PATH]` | Choose a conversation location, or open an existing project folder directly |
 | `/clear` | Start a fresh conversation in this topic, preserving Telegram history and supported permission settings |
 | `/stop` | Interrupt this topic's current turn, including while it waits for approval |
@@ -307,6 +308,10 @@ The handoff is journaled before interrupt/start operations. Changed turns, route
 Ask for approval selects the workspace profile with user approval review. Approve for me selects the same workspace profile with native automatic review; it does not grant Full Access. Both use on-request approval policy. Full Access selects unrestricted access with no approval prompts; Read Only selects the read-only profile with on-request user review. Each standard choice applies the complete profile/policy/reviewer preset, and the current marker compares all three. Custom profiles preserve the existing policy and reviewer. Codex remains authoritative.
 
 Opening, paging and cancelling never change settings. Buttons expire after ten minutes and belong only to the original message, topic and connection. A local settings change invalidates an earlier selection. Unknown write outcomes are never automatically repeated: check permissions in Codex before another selection. [Protocol and verification](docs/architecture.md#session-permission-selection).
+
+### Closing a saved session
+
+Send `/close` in the bot chat and choose a saved session. Codex unloads the selected session and archives its history. The Telegram topic and its messages stay available. Active turns, pending responses, and ongoing deliveries block closing. To use the same topic again, restore the archived conversation in Codex.
 
 ## Fresh conversation in the current topic: /clear (v0.1.20)
 
