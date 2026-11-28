@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { approvalCardIdentity, approvalIdentity, approvalMessage, approvalDisplayMessage, approvalOverview, approvalDetailsMessage } from './approvals.js';
 import { allowedSessionDirectory, type Config } from './config.js';
-import { FirstMessageRequiredError, RpcError } from './codex.js';
+import { FirstMessageRequiredError, isMissingThread, RpcError } from './codex.js';
 import { Drafts } from './drafts.js';
 import { commandHelp } from './commands.js';
 import { State, type ApprovalCard } from './state.js';
@@ -16,7 +16,7 @@ import { Widgets, ViewPicker } from './widgets.js';
 import { resultParts } from './widget-result.js';
 import { type WidgetDeliveryGuard } from './widget-types.js';
 import { NewSessions } from './new-sessions.js';
-import { SessionClose } from './session-close.js';
+import { SessionClose, type CloseResult } from './session-close.js';
 import { AgentRestart } from './agent-restart.js';
 import { permissionSignature } from './permission-settings.js';
 import { type PermissionAgent } from './types.js';
@@ -84,9 +84,7 @@ export class Bridge {
     this.topicRenames = new TopicRenames(config, state, this.topics, telegram, () => !this.closed);
     this.screens = new Screens(state, telegram, config);
     this.newSessions = new NewSessions(config, state, codex, telegram, this.topics, binding => this.connectCreated(binding), binding => this.sessionIdleBlocker(binding, '/clear'), this.screens);
-    this.sessionClose = new SessionClose(state, telegram, config.ownerId,
-      () => state.bindings().filter(binding => this.closeEligible(binding) && !state.archivedSession(binding.threadId)),
-      binding => this.archiveSession(binding));
+    this.sessionClose = new SessionClose(state, telegram, config.ownerId, () => this.closeCandidates(), binding => this.archiveSession(binding));
     this.models = new ModelPicker(state, codex, telegram, config.ownerId, binding => this.settingsThread(binding), this.screens);
     this.agentRestart = new AgentRestart(state, codex, binding => this.settingsThread(binding), binding => this.permissionAgents(binding),
       async (binding, inputId, text, expected) => { await this.catchUp(binding); await this.sendInput(binding, inputId, text, true, expected); },
@@ -288,45 +286,70 @@ export class Bridge {
       !this.state.topicOperation(binding.threadId) && !this.state.resettingTopic(binding.topicId) && !this.connectingSessions.has(binding.threadId);
   }
 
-  private async archiveSession(binding: Binding): Promise<string> {
+  private async closeCandidates(): Promise<Binding[]> {
+    const eligible = (binding: Binding) => this.closeEligible(binding) && !this.state.archivedSession(binding.threadId);
+    const candidates = this.state.bindings().filter(eligible);
+    const read = this.codex.nonArchivedThread?.bind(this.codex);
+    if (!read) return candidates;
+    const available: Binding[] = [];
+    const deadline = Date.now() + 3000;
+    for (let offset = 0; offset < candidates.length; offset += 8) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) { available.push(...candidates.slice(offset)); break; }
+      const batch = candidates.slice(offset, offset + 8);
+      const found = await Promise.all(batch.map(async binding => {
+        try { return !!await read(binding.threadId, remaining); }
+        catch (error) { return !isMissingThread(error, binding.threadId); }
+      }));
+      available.push(...batch.filter((_, index) => found[index]));
+    }
+    return available.filter(eligible);
+  }
+
+  private async archiveSession(binding: Binding): Promise<CloseResult> {
     const id = binding.threadId;
     const label = `Session ${id.slice(0, 8)}`;
-    if (!this.codex.archive || !this.codex.nonArchivedThread || !this.codex.loaded) return 'This Codex connection does not support closing sessions.';
-    if (this.closingSessions.has(id) || !this.closeEligible(binding)) return `${label} is busy or its saved binding has changed. Send /close again.`;
+    const blocked = (text: string): CloseResult => ({ status: 'blocked', text });
+    if (!this.codex.archive || !this.codex.nonArchivedThread || !this.codex.loaded) return blocked('This Codex connection does not support closing sessions.');
+    if (this.closingSessions.has(id) || !this.closeEligible(binding)) return blocked(`${label} is busy or its saved binding has changed. Send /close again.`);
     this.closingSessions.add(id);
     let dispatched = false;
-    const closed = (): string => {
+    const closed = (): CloseResult => {
       this.state.setSessionArchived(id, true);
       this.attached.delete(id); this.drafts.finish(id);
       for (const [childId, rootId] of this.agentSubscriptions) if (rootId === id) this.agentSubscriptions.delete(childId);
-      return `${label} is closed and its Codex history is archived. The Telegram topic and its messages are preserved.`;
+      return { status: 'closed', text: `${label} is closed and its Codex history is archived. The Telegram topic and its messages are preserved.` };
     };
     try {
-      const saved = await this.codex.nonArchivedThread(id);
+      const saved = await this.codex.nonArchivedThread(id).catch(error => {
+        if (isMissingThread(error, id)) return null;
+        throw error;
+      });
+      if (saved === null) return { status: 'missing', text: `${label} no longer exists in Codex. Its Telegram topic stays available.` };
       if (!saved && !(await this.codex.loaded()).includes(id)) return closed();
-      if (!saved || saved.id !== id || saved.cwd !== binding.cwd) return `Could not verify the saved conversation for ${label}.`;
-      if (this.state.agentRestarts().some(job => job.binding.threadId === id)) return `${label} has a pending agent operation. Select it again when the operation ends.`;
+      if (!saved || saved.id !== id || saved.cwd !== binding.cwd) return blocked(`Could not verify the saved conversation for ${label}.`);
+      if (this.state.agentRestarts().some(job => job.binding.threadId === id)) return blocked(`${label} has a pending agent operation. Select it again when the operation ends.`);
       const blocker = await this.sessionIdleBlocker(binding, '/close');
-      if (blocker) return `Cannot close ${label.toLowerCase()} now. ${blocker}`;
-      if (await this.hasWorkingDescendant(id, await this.codex.loaded())) return `${label} has a working subagent. Select it again when the subagent finishes.`;
+      if (blocker) return blocked(`Cannot close ${label.toLowerCase()} now. ${blocker}`);
+      if (await this.hasWorkingDescendant(id, await this.codex.loaded())) return blocked(`${label} has a working subagent. Select it again when the subagent finishes.`);
       const latest = await this.codex.read(id, 3000);
       if (!this.closeEligible(binding) || this.state.sessionDeliveryBusy(id) || this.state.reply(id) ||
           latest.id !== id || latest.cwd !== binding.cwd || latest.parentThreadId || latest.ephemeral === true ||
           latest.canAcceptDirectInput === false || !['idle', 'notLoaded', 'systemError'].includes(string(object(latest.status).type)) ||
           [...this.prompts.values()].some(prompt => prompt.binding.threadId === id && this.pending(prompt))) {
-        return `${label} changed or has active work. Check Codex and try again.`;
+        return blocked(`${label} changed or has active work. Check Codex and try again.`);
       }
       dispatched = true;
       try { await this.codex.archive(id); }
       catch (error) {
-        if (error instanceof RpcError && !error.uncertain) return `Codex rejected closing ${label.toLowerCase()}. Check it locally and try again.`;
+        if (error instanceof RpcError && !error.uncertain) return blocked(`Codex rejected closing ${label.toLowerCase()}. Check it locally and try again.`);
         // A lost response may follow successful archival. Verify native state without repeating the operation.
       }
       if (!(await this.codex.loaded()).includes(id) && !await this.codex.nonArchivedThread(id)) return closed();
     } catch {
-      if (!dispatched) return `Could not verify ${label.toLowerCase()} in Codex. Check it locally and try again.`;
+      if (!dispatched) return blocked(`Could not verify ${label.toLowerCase()} in Codex. Check it locally and try again.`);
     } finally { this.closingSessions.delete(id); }
-    return `Closing ${label.toLowerCase()} could not be confirmed. Check its status in Codex before trying again.`;
+    return blocked(`Closing ${label.toLowerCase()} could not be confirmed. Check its status in Codex before trying again.`);
   }
 
   private async hasWorkingDescendant(rootId: string, loaded: string[]): Promise<boolean> {
@@ -930,7 +953,7 @@ export class Bridge {
     }
     if (/^\/new(?:\s|$)/u.test(text)) { await this.newSessions.open(topicId, text); return; }
     if (/^\/close(?:\s|$)/u.test(text)) {
-      if (text === '/close') this.sessionClose.open(topicId);
+      if (text === '/close') await this.sessionClose.open(topicId);
       else this.notice(topicId, 'Send /close without arguments and choose a session.');
       return;
     }

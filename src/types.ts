@@ -60,7 +60,7 @@ export interface Codex {
   createThread?(cwd: string, marker: string, source?: 'clear', snapshot?: import('./clear-settings.js').ClearSettingsSnapshot): Promise<Json>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   storedThreads?(cwd: string): Promise<Json[]>;
-  nonArchivedThread?(threadId: string): Promise<Json | undefined>;
+  nonArchivedThread?(threadId: string, timeoutMs?: number): Promise<Json | undefined>;
   findCreatedThread?(cwd: string, marker: string): Promise<Json | undefined>;
   rateLimits(): Promise<Json>;
   models(): Promise<Json[]>;

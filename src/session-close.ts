@@ -15,6 +15,11 @@ interface CloseMenu {
   busy: boolean;
 }
 
+export interface CloseResult {
+  status: 'closed' | 'missing' | 'blocked';
+  text: string;
+}
+
 /** Codex UUIDv7 IDs contain the session creation time. Order legacy IDs by topic. */
 function createdAt(binding: Binding): number {
   const id = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.exec(binding.threadId);
@@ -25,15 +30,15 @@ export class SessionClose {
   private readonly menus = new Map<string, CloseMenu>();
 
   constructor(private readonly state: State, private readonly telegram: Telegram, private readonly ownerId: number,
-    private readonly candidates: () => Binding[], private readonly closeSession: (binding: Binding) => Promise<string>) {}
+    private readonly candidates: () => Promise<Binding[]>, private readonly closeSession: (binding: Binding) => Promise<CloseResult>) {}
 
-  open(topicId: number | null): void {
+  async open(topicId: number | null): Promise<void> {
     const token = randomBytes(16).toString('hex');
     const key = `notice/session-close/${token}`;
-    const bindings = this.candidates().sort((a, b) => createdAt(a) - createdAt(b) || a.topicId - b.topicId);
-    if (!bindings.length) { this.state.enqueueOwnerNotice(key, topicId, 'No saved sessions are available to close.'); return; }
+    const bindings = (await this.candidates()).sort((a, b) => createdAt(a) - createdAt(b) || a.topicId - b.topicId);
     const now = Date.now();
     for (const [id, menu] of this.menus) if (menu.expires <= now || menu.topicId === topicId) this.menus.delete(id);
+    if (!bindings.length) { this.state.enqueueOwnerNotice(key, topicId, 'No saved sessions are available to close.'); return; }
     if (this.menus.size >= 32) this.menus.delete(this.menus.keys().next().value!);
     const menu = { bindings, topicId, key, page: 0, expires: now + MENU_LIFETIME, busy: false };
     this.menus.set(token, menu);
@@ -67,17 +72,17 @@ export class SessionClose {
         await this.refresh(messageId, token, menu);
         return;
       }
-      const result = binding ? await this.closeSession(binding) : 'Close session cancelled.';
-      const archived = binding && this.state.archivedSession(binding.threadId);
-      if (archived) {
+      const result = binding ? await this.closeSession(binding) : undefined;
+      if (binding && result && result.status !== 'blocked') {
         menu.bindings = menu.bindings.filter(item => item.threadId !== binding.threadId);
         menu.page = Math.max(0, Math.min(menu.page, Math.ceil(menu.bindings.length / PAGE_SIZE) - 1));
       }
-      if (binding && menu.bindings.length) {
-        await this.refresh(messageId, token, menu, archived ? '' : result);
+      if (result && menu.bindings.length) {
+        await this.refresh(messageId, token, menu, result.status === 'closed' ? '' : result.text);
       } else {
         this.menus.delete(token);
-        if (!await this.edit(messageId, result)) this.state.enqueueOwnerNotice(`${menu.key}/result`, topicId, result);
+        const text = result?.text ?? 'Close session cancelled.';
+        if (!await this.edit(messageId, text)) this.state.enqueueOwnerNotice(`${menu.key}/result`, topicId, text);
       }
     } finally { menu.busy = false; }
   }

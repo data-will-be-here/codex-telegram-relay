@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { RpcError } from '../src/codex.js';
 import { SessionClose } from '../src/session-close.js';
 import { array, object, string, type Json } from '../src/types.js';
 import { click, fixture, message } from './helpers.js';
@@ -86,11 +87,9 @@ test('/close orders sessions by creation time and moves back when closing the la
     title: `Project ${9 - index}`,
     lastTurn: null,
   }));
-  const picker = new SessionClose(f.state, f.telegram, 42, () => choices.slice(), async binding => {
-    f.state.setSessionArchived(binding.threadId, true);
-    return 'Session closed.';
-  });
-  picker.open(null);
+  const picker = new SessionClose(f.state, f.telegram, 42, async () => choices.slice(),
+    async () => ({ status: 'closed', text: 'Session closed.' }));
+  await picker.open(null);
   await f.drain();
   const menu = f.telegram.sent().at(-1)!;
   const messageId = f.telegram.message;
@@ -107,4 +106,46 @@ test('/close orders sessions by creation time and moves back when closing the la
   assert.equal(buttons(updated).length, 9);
   assert.equal(buttons(updated)[0]?.callback_data, oldest);
   assert.equal(buttons(updated).at(-1)?.text, 'Cancel');
+});
+
+test('/close skips missing and archived sessions but retains saved unloaded sessions and unverified bindings', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  await f.drain();
+  const missing = new Set(['missing']);
+  const unavailable = (id: string) => new RpcError(`Codex rejected the request: thread not loaded: ${id}`, false);
+  f.state.bind('missing', 201, f.projectA, 'Missing session');
+  f.state.bind('archived', 202, f.projectA, 'Archived session');
+  f.state.bind('saved', 203, f.projectA, 'Saved unloaded session');
+  f.state.bind('unverified', 204, f.projectA, 'Try again later');
+  const archiveCalls: string[] = [];
+  Object.assign(f.codex, {
+    loaded: async () => f.codex.sessions.map(session => session.id),
+    nonArchivedThread: async (id: string) => {
+      if (missing.has(id)) throw unavailable(id);
+      if (id === 'archived') return undefined;
+      if (id === 'unverified') throw new RpcError('Temporary read failure', true);
+      if (id === 'saved') return { id, cwd: f.projectA, status: { type: 'notLoaded' } };
+      return f.codex.read(id);
+    },
+    archive: async (id: string) => { archiveCalls.push(id); },
+  });
+
+  await f.bridge.update(message(1, 101, '/close'));
+  await f.drain();
+  const menu = f.telegram.sent().at(-1)!;
+  assert.ok(!buttons(menu).some(item => string(item.text).includes(' · missing · ') || string(item.text).includes(' · archived · ')));
+  const saved = button(menu, ' · saved · ');
+  assert.ok(button(menu, ' · unverifi · '));
+  assert.equal(f.state.topic(201)?.threadId, 'missing');
+
+  missing.add('saved');
+  const event = click(2, saved);
+  object(object(event.callback_query).message).message_id = f.telegram.message;
+  await f.bridge.update(event);
+  const updated = f.telegram.calls.at(-1)!.params;
+  assert.match(string(updated.text), /no longer exists in Codex/u);
+  assert.ok(!buttons(updated).some(item => item.callback_data === saved));
+  assert.equal(f.state.topic(203)?.threadId, 'saved');
+  assert.deepEqual(archiveCalls, []);
 });

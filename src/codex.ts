@@ -20,6 +20,12 @@ export class RpcError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
 }
 
+/** A metadata read reports this exact error when the thread is neither live nor stored. */
+export function isMissingThread(error: unknown, threadId: string): boolean {
+  return error instanceof RpcError && !error.uncertain &&
+    error.message === `Codex rejected the request: thread not loaded: ${threadId}`;
+}
+
 export class FirstMessageRequiredError extends RpcError {
   constructor() { super('Send the first message in this session locally in Codex. The relay will connect automatically afterwards.', false); }
 }
@@ -231,8 +237,8 @@ export class CodexClient extends EventEmitter implements Codex {
   }
   async interrupt(threadId: string, turnId: string): Promise<void> { await this.call('turn/interrupt', { threadId, turnId }); }
   async setThreadName(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
-  async nonArchivedThread(threadId: string): Promise<Json | undefined> {
-    const thread = await this.read(threadId);
+  async nonArchivedThread(threadId: string, timeoutMs?: number): Promise<Json | undefined> {
+    const thread = await this.read(threadId, timeoutMs);
     const path = string(thread.path);
     if (!path || (await lstat(path)).isSymbolicLink()) throw new RpcError('The saved native history path could not be verified.', false);
     const target = await realpath(path);
