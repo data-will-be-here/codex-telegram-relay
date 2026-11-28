@@ -271,6 +271,41 @@ test('busy input steers the expected active turn; uncertain steering never creat
   } finally { f.close(); }
 });
 
+test('a fresh Telegram message continues the same session after a failed turn left systemError', async () => {
+  const f = await fixture();
+  try {
+    const read = f.codex.read.bind(f.codex);
+    f.codex.read = async id => ({ ...await read(id), source: 'vscode', canAcceptDirectInput: true });
+    f.codex.sessions[0]!.status = 'systemError';
+    f.codex.histories.set('thread-a', [{ id: 'expired-quota', status: 'failed', error: { codexErrorInfo: 'usageLimitExceeded' } }]);
+    const update = message(1, 101, 'Continue with the review');
+    await f.bridge.update(update);
+    await f.bridge.update(update);
+    await f.drain();
+    assert.deepEqual(f.codex.writes, [{ method: 'start', params: { threadId: 'thread-a', text: 'Continue with the review' } }]);
+    assert.equal(f.state.topic(101)?.threadId, 'thread-a');
+    assert.deepEqual(f.telegram.calls.filter(call => call.method === 'setMessageReaction').map(call => call.params.message_id), [1]);
+    assert.equal(f.telegram.sent().length, 0);
+  } finally { f.close(); }
+});
+
+test('an active turn appearing during systemError verification is not sent a second start', async () => {
+  const f = await fixture();
+  try {
+    const read = f.codex.read.bind(f.codex);
+    f.codex.read = async id => ({ ...await read(id), source: 'vscode', canAcceptDirectInput: true });
+    f.codex.sessions[0]!.status = 'systemError';
+    f.codex.turns = async () => {
+      f.codex.sessions[0]!.status = 'active';
+      return [{ id: 'failed-turn', status: 'failed' }];
+    };
+    await f.bridge.update(message(1, 101, 'Continue with the review'));
+    await f.drain();
+    assert.deepEqual(f.codex.writes, []);
+    assert.match(messageBody(f.telegram.sent()[0]!), /changed while checking/u);
+  } finally { f.close(); }
+});
+
 test('an accepted question gets one eyes reaction on the original message and still receives the model reply', async () => {
   const f = await fixture();
   try {

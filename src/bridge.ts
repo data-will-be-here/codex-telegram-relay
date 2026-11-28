@@ -1207,19 +1207,34 @@ export class Bridge {
       if (!string(turn?.id)) throw new RpcError('The active turn could not be identified safely. Check Codex before retrying.', false);
       await this.awaitAssistant(binding.threadId, inputId, string(turn?.id), () => this.codex.steer(binding.threadId, string(turn?.id), prompt),
         taskTitle(array(turn?.items)) ?? taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
-    } else if (status === 'idle') {
-      if (expected) {
-        const turns = await this.codex.turns(binding.threadId);
-        const settings = this.codex.permissionState?.(binding.threadId);
-        if (!current() || !settings || permissionSignature(settings) !== expected.signature ||
-            (string(turns[0]?.id) || null) !== expected.anchorTurnId || turns.some(turn => turn.status === 'inProgress')) {
-          throw new RpcError('The root turn or permissions changed before dispatch. No replacement instruction was sent.', false);
-        }
+      return;
+    }
+    if (status === 'systemError' && !requireIdle) {
+      // Codex can retain the previous turn's failure status until the next user turn.
+      const turns = await this.codex.turns(binding.threadId, 3000);
+      if (turns[0]?.status !== 'failed' || !string(turns[0].id) || turns.some(turn => turn.status === 'inProgress')) {
+        throw new RpcError('Codex reports a session error and the previous turn could not be verified as failed.', false);
       }
-      await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
-        requireIdle ? binding.taskName || binding.sessionName || 'Agent handoff' :
-          taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
-    } else throw new RpcError('This session is not ready. Open it in Codex before retrying.', false);
+      const fresh = await this.codex.read(binding.threadId, 3000);
+      if (!current() || !this.attached.has(binding.threadId) || this.state.topicOperation(binding.threadId) || fresh.id !== binding.threadId ||
+          fresh.cwd !== binding.cwd || !this.allowed(binding.cwd, binding.threadId) || fresh.parentThreadId || fresh.ephemeral === true ||
+          fresh.canAcceptDirectInput !== true || !['cli', 'vscode', 'appServer'].includes(string(fresh.source)) ||
+          !['systemError', 'idle'].includes(string(object(fresh.status).type))) {
+        throw new RpcError('The session changed while checking the failed turn. Send again once the session is available.', false);
+      }
+    } else if (status !== 'idle') throw new RpcError('This session is not ready. Open it in Codex before retrying.', false);
+
+    if (expected) {
+      const turns = await this.codex.turns(binding.threadId);
+      const settings = this.codex.permissionState?.(binding.threadId);
+      if (!current() || !settings || permissionSignature(settings) !== expected.signature ||
+          (string(turns[0]?.id) || null) !== expected.anchorTurnId || turns.some(turn => turn.status === 'inProgress')) {
+        throw new RpcError('The root turn or permissions changed before dispatch. No replacement instruction was sent.', false);
+      }
+    }
+    await this.awaitAssistant(binding.threadId, inputId, null, () => this.codex.start(binding.threadId, prompt),
+      requireIdle ? binding.taskName || binding.sessionName || 'Agent handoff' :
+        taskTitle([{ type: 'userMessage', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }]));
   }
   private async awaitAssistant(threadId: string, inputId: number, turnId: string | null, write: () => Promise<unknown>, task?: string): Promise<void> {
     const binding = this.state.binding(threadId);
